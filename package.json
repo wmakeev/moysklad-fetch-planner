@@ -1,0 +1,64 @@
+{
+  "name": "moysklad-fetch-planner",
+  "version": "0.0.1",
+  "description": "Планировщик запросов для API МойСклад",
+  "files": [
+    "build/src/"
+  ],
+  "main": "build/src/index.js",
+  "types": "build/src/index.d.ts",
+  "keywords": [
+    "moysklad",
+    "api",
+    "fetch",
+    "request",
+    "rate-limit"
+  ],
+  "repository": {
+    "type": "git",
+    "url": ""
+  },
+  "scripts": {
+    "env:example": "npx sync-dotenv",
+    "compile": "tsc",
+    "compile:prod": "rm -rf build/ && tsc --build tsconfig.prod.json",
+    "lint": "eslint . --fix",
+    "build:dev": "npm run lint && npm run compile",
+    "build": "rm -rf build/ && npm run lint && npm run compile:prod"
+  },
+  "engines": {
+    "node": ">=14"
+  },
+  "prettier": {
+    "semi": false,
+    "singleQuote": true,
+    "quoteProps": "consistent",
+    "trailingComma": "none",
+    "arrowParens": "avoid"
+  },
+  "author": {
+    "name": "Vitaliy V. Makeev",
+    "email": "w.makeev@gmail.com"
+  },
+  "license": "MIT",
+  "devDependencies": {
+    "@types/node": "^14.17.3",
+    "@types/node-fetch": "^2.5.10",
+    "@types/tape": "^4.13.0",
+    "@typescript-eslint/eslint-plugin": "^4.28.0",
+    "@typescript-eslint/parser": "^4.28.0",
+    "@typescript-eslint/typescript-estree": "^4.28.0",
+    "dotenv": "^10.0.0",
+    "eslint": "^7.29.0",
+    "eslint-config-prettier": "^8.3.0",
+    "eslint-plugin-node": "^11.1.0",
+    "eslint-plugin-prettier": "^3.4.0",
+    "moysklad": "^0.10.0",
+    "node-fetch": "^2.6.1",
+    "prettier": "^2.3.1",
+    "source-map-support": "^0.5.19",
+    "tape": "^5.2.2",
+    "typescript": "^4.3.4",
+    "typescript-eslint-language-service": "^4.1.4"
+  }
+}

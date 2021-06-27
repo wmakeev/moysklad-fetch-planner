@@ -1,0 +1,15 @@
+# Bootstrap scripts folder
+.bootstrap
+
+# npm
+node_modules
+
+# env
+.env*
+!.env.example
+
+# temp
+/__temp
+
+# build
+/build
