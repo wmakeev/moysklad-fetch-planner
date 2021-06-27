@@ -52,7 +52,7 @@ interface TimelineItem {
 /**
  * Интерфейс для элемента в истории запросов
  */
-interface RequestTimeline extends TimelineItem {}
+type RequestTimeline = TimelineItem
 
 /**
  * Интерфейс для элемента в истории ответов
@@ -112,7 +112,7 @@ class FetchPlanner {
    * где-то параллельно работает другое приложение и задействует часть лимита.
    * Поэтому планировщик будет считать, что идет непрерывный поток запросов.
    */
-  private sprintStarted: boolean = false
+  private sprintStarted = false
 
   /**
    * Значение заголовка `X-Lognex-Retry-TimeInterval` из последнего
@@ -324,13 +324,13 @@ class FetchPlanner {
   }
 
   /** Добавляет элемент в историю запросов к серверу */
-  private addRequestTimeline(item: RequestTimeline) {
+  private addToRequestTimeline(item: RequestTimeline) {
     this.trimTimeline(item.time)
     this.requestTimeline.push(item)
   }
 
   /** Добавляет элемент в историю ответов сервера */
-  private addResponseTimeline(item: ResponseTimeline) {
+  private addToResponseTimeline(item: ResponseTimeline) {
     this.trimTimeline(item.time)
     this.responseTimeline.push(item)
   }
@@ -585,7 +585,7 @@ class FetchPlanner {
             if (retryAfter) {
               responseType = ResponseType.RATE_LIMIT_OVERFLOW
 
-              this.addResponseTimeline({
+              this.addToResponseTimeline({
                 requestId,
                 time: Date.now(),
                 responseType: responseType
@@ -600,7 +600,7 @@ class FetchPlanner {
             else {
               responseType = ResponseType.PARALLEL_LIMIT_OVERFLOW
 
-              this.addResponseTimeline({
+              this.addToResponseTimeline({
                 requestId,
                 time: Date.now(),
                 responseType
@@ -611,7 +611,7 @@ class FetchPlanner {
           } else {
             responseType = ResponseType.OK
 
-            this.addResponseTimeline({
+            this.addToResponseTimeline({
               requestId,
               time: Date.now(),
               responseType
@@ -648,7 +648,7 @@ class FetchPlanner {
           })
         })
 
-      this.addRequestTimeline({
+      this.addToRequestTimeline({
         requestId,
         time: requestStartTime
       })

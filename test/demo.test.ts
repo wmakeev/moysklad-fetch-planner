@@ -1,19 +1,22 @@
-const fs = require('fs')
-const path = require('path')
+import fs from 'fs'
+import path from 'path'
 import Moysklad from 'moysklad'
 import nodeFetch from 'node-fetch'
 import { wrapFetchApi } from '../src'
 
 const TEST_REQUESTS_COUNT = 300
 
-const addCsvLine = (lines: string[][], obj: { [key: string]: any }) => {
+const addCsvLine = (
+  lines: string[][],
+  obj: { [key: string]: string | number }
+) => {
   if (lines.length === 0) {
     lines.push(Object.keys(obj))
   }
 
   const headers = lines[0]
 
-  lines.push(headers.map(h => obj[h]))
+  lines.push(headers.map(h => (obj[h] ? String(obj[h]) : '')))
 }
 
 const generateRequest1 = () => {
