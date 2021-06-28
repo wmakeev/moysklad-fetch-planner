@@ -234,15 +234,13 @@ class FetchPlanner {
   private parallelLimitCorrectionStep = 1
 
   /**
-   * Время на которое внутри планировка запланирована очередная обработка
+   * Время и таймер на которые внутри планировка запланирована очередная обработка
    * очереди запросов
    * */
-  private planedProcessActionsTime = 0
-
-  /**
-   * Таймер установленный на время следующей обработки очереди запросов
-   */
-  private planedProcessActionsTimeout: NodeJS.Timeout | null = null
+  private processActionsPlanedTimeout: {
+    time: number
+    timeout: NodeJS.Timeout
+  } | null = null
 
   /** DEBUG */
   private eventHandler: EventHandler | null = null
@@ -469,19 +467,20 @@ class FetchPlanner {
 
     const planTime = Math.max(time, nextRequestTime)
 
-    if (this.planedProcessActionsTime < planTime) {
+    if (
+      !this.processActionsPlanedTimeout ||
+      this.processActionsPlanedTimeout.time < planTime
+    ) {
       const wait = planTime - Date.now()
 
-      if (this.planedProcessActionsTimeout !== null) {
-        clearTimeout(this.planedProcessActionsTimeout)
+      if (this.processActionsPlanedTimeout) {
+        clearTimeout(this.processActionsPlanedTimeout.timeout)
       }
-
-      this.planedProcessActionsTime = planTime
 
       const timeout = setTimeout(
         () => {
-          if (this.planedProcessActionsTimeout === timeout) {
-            this.planedProcessActionsTimeout = null
+          if (this.processActionsPlanedTimeout?.timeout === timeout) {
+            this.processActionsPlanedTimeout = null
           }
 
           this.processActions()
@@ -489,7 +488,10 @@ class FetchPlanner {
         wait > 0 ? wait : 0
       )
 
-      this.planedProcessActionsTimeout = timeout
+      this.processActionsPlanedTimeout = {
+        time: planTime,
+        timeout
+      }
     }
   }
 
@@ -498,7 +500,7 @@ class FetchPlanner {
       this.requestsInProgress <
         this.maxParallelLimit + this.parallelLimitCorrection &&
       this.actionsQueue.length > 0 &&
-      this.planedProcessActionsTimeout === null
+      this.processActionsPlanedTimeout === null
     )
   }
 
@@ -518,7 +520,7 @@ class FetchPlanner {
         timeIntervalCorrection: this.timeIntervalCorrection,
         rateLimitRemainingOnLastRevision: this.rateLimitRemainingOnLastRevision,
         rateLimitRemaining: this.rateLimitRemaining,
-        planedProcessActionsTime: this.planedProcessActionsTime
+        planedProcessActionsTime: this.processActionsPlanedTimeout?.time
       })
     }
   }

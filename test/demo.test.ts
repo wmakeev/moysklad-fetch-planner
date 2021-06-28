@@ -4,7 +4,7 @@ import Moysklad from 'moysklad'
 import nodeFetch from 'node-fetch'
 import { wrapFetchApi } from '../src'
 
-const TEST_REQUESTS_COUNT = 300
+const TEST_REQUESTS_COUNT = 200
 
 const addCsvLine = (
   lines: string[][],
@@ -69,7 +69,7 @@ async function stage() {
   const promises = []
 
   for (let i = 1; i <= TEST_REQUESTS_COUNT; i++) {
-    const req = Math.random() > 0.7 ? generateRequest1() : generateRequest2()
+    const req = Math.random() > 0.1 ? generateRequest1() : generateRequest2()
 
     const promise = ms.GET(req.url, req.query).then(() => {
       console.log(`Запрос ${i}`)
