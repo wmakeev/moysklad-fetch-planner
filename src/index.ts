@@ -11,6 +11,7 @@ export interface FetchPlannerParams {
   eventHandler: EventHandler
 }
 
+// FIXME Согласовать интерфейсы DOM и node-fetch
 /**
  * [Fetch API](https://developer.mozilla.org/en-US/docs/Web/API/Fetch_API)
  */
@@ -551,7 +552,9 @@ class FetchPlanner {
       const requestId = this.getNewRequestId()
       const requestStartTime = Date.now()
 
-      this.fetchApi(action.url, action.options)
+      const fetchApi = this.fetchApi
+
+      fetchApi(action.url, action.options)
         .then(resp => {
           const requestEndTime = Date.now()
           const requestDuration = requestEndTime - requestStartTime
