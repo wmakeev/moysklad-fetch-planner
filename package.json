@@ -55,7 +55,7 @@
     "eslint-plugin-node": "^11.1.0",
     "eslint-plugin-prettier": "^3.4.0",
     "moysklad": "^0.10.0",
-    "node-fetch": "^2.6.1",
+    "node-fetch": "^3.1.1",
     "prettier": "^2.3.1",
     "source-map-support": "^0.5.19",
     "tape": "^5.2.2",
