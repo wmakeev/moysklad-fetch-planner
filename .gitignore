@@ -1,4 +1,5 @@
 # Bootstrap scripts folder
+.DS_store
 .bootstrap
 
 # npm
