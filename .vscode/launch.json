@@ -17,6 +17,7 @@
         "-r",
         "source-map-support/register"
       ],
+      "args": ["-p", "31"],
       "preLaunchTask": "npm: compile",
       "outFiles": [
         "${workspaceFolder}/build/**/*.js"

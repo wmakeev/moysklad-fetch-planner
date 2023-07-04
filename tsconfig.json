@@ -1,48 +1,24 @@
-// https://www.typescriptlang.org/tsconfig
 {
+  "extends": [
+    "@tsconfig/node14/tsconfig.json",
+    "@tsconfig/strictest/tsconfig.json",
+    "@tsconfig/esm/tsconfig.json"
+  ],
   "compilerOptions": {
-    // -- Project Options
-    "declaration": true,
-    "declarationMap": true,
-    "incremental": true,
-    // https://github.com/microsoft/TypeScript/wiki/Node-Target-Mapping
-    "lib": [
-      "ES2020" // Node 14
-      // "ES7/ES2016" // Browser
-    ],
-    "module": "CommonJS",
-    "outDir": "build",
     "rootDir": ".",
+    "outDir": "build",
+
     "sourceMap": true,
-    "target": "ES2020", // Node 14.x
-    // -- Strict Checks
-    "strict": true,
-    // -- Module Resolution
-    "moduleResolution": "Node",
-    "esModuleInterop": true,
-    // -- Linter Checks
-    "noImplicitReturns": true,
-    "noUnusedLocals": true,
-    "noUnusedParameters": true,
+
+    "noUnusedLocals": false,
+    "exactOptionalPropertyTypes": false,
+
+    // -- Editor Support
     "plugins": [
       {
         "name": "typescript-eslint-language-service"
       }
-    ],
-    // -- Experimental
-    "experimentalDecorators": true,
-    "emitDecoratorMetadata": true,
-    // -- Advanced
-    "allowUnreachableCode": false,
-    "forceConsistentCasingInFileNames": true,
-    "importsNotUsedAsValues": "error",
-    "newLine": "lf",
-    "resolveJsonModule": true,
-    "skipLibCheck": true,
-    "stripInternal": true
+    ]
   },
-  "include": [
-    "src/**/*",
-    "test/**/*"
-  ]
+  "include": ["src/**/*", "test/**/*"]
 }

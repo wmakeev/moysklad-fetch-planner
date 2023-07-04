@@ -1,65 +1,46 @@
+import Moysklad from 'moysklad'
+import undici from 'undici'
 import fs from 'fs'
 import path from 'path'
-import Moysklad from 'moysklad'
-import nodeFetch from 'node-fetch'
-import { wrapFetchApi } from '../src'
+import { FetchPlanner, type FetchPlannerParams } from '../src/index.js'
 
-const TEST_REQUESTS_COUNT = 200
+const TEST_REQUESTS_COUNT = 100
 
-const addCsvLine = (
-  lines: string[][],
-  obj: { [key: string]: string | number }
-) => {
-  if (lines.length === 0) {
-    lines.push(Object.keys(obj))
-  }
-
-  const headers = lines[0]
-
-  lines.push(headers.map(h => (obj[h] ? String(obj[h]) : '')))
-}
-
-const generateRequest1 = () => {
+export const generateRequest = () => {
   return {
-    url: 'context/employee',
+    url: 'entity/project/metadata',
     query: {}
   }
 }
 
-const generateRequest2 = () => {
-  const month = Math.round(Math.random() * 11)
-  const days1 = Math.round(Math.random() * 28) + 1
-  const days2 = Math.round(Math.random() * 28) + 1
+async function stage(procNum: number, reqCount: number) {
+  const eventObjects: any[] = []
 
-  return {
-    url: 'entity/customerorder',
-    query: {
-      filter: {
-        updated: {
-          $gt: new Date(2020, month, Math.min(days1, days2)),
-          $lt: new Date(2020, month, Math.max(days1, days2), 23, 59, 59)
-        }
-      },
-      limit: Math.round(Math.random() * 100) + 1
+  let curEventObject: any = {}
+
+  const eventHandler: FetchPlannerParams['eventHandler'] = {
+    emit(eventName, data) {
+      curEventObject = {
+        ...curEventObject,
+        ...fetchPlanner.getInternalState(),
+        ...(typeof data === 'object'
+          ? data
+          : data != null
+          ? { [eventName]: data }
+          : {}),
+        time: Date.now() - startTime
+      }
+
+      eventObjects.push(curEventObject)
     }
   }
-}
 
-async function stage() {
-  const requests = [] as string[][]
-  const responses = [] as string[][]
-
-  const fetch = wrapFetchApi(nodeFetch, {
-    eventHandler: {
-      emit(eventName, data) {
-        if (eventName === 'request') {
-          addCsvLine(requests, data)
-        } else if (eventName === 'response') {
-          addCsvLine(responses, data)
-        }
-      }
-    }
+  const fetchPlanner = new FetchPlanner(undici.fetch, {
+    eventHandler
   })
+
+  const fetch = fetchPlanner.getFetch()
+  const trigger = fetchPlanner.getTrigger()
 
   const ms = Moysklad({
     apiVersion: '1.2',
@@ -68,8 +49,12 @@ async function stage() {
 
   const promises = []
 
-  for (let i = 1; i <= TEST_REQUESTS_COUNT; i++) {
-    const req = Math.random() > 0.1 ? generateRequest1() : generateRequest2()
+  const startTime = Date.now()
+
+  for (let i = 1; i <= reqCount; i++) {
+    const req = generateRequest()
+
+    await trigger()
 
     const promise = ms.GET(req.url, req.query).then(() => {
       console.log(`Запрос ${i}`)
@@ -80,19 +65,60 @@ async function stage() {
 
   await Promise.all(promises)
 
-  fs.writeFileSync(
-    path.join(process.cwd(), '__temp/requests-9.csv'),
-    requests.map(l => l.join()).join('\n')
+  const endTime = Date.now()
+
+  const reportHeaders = Object.keys(
+    eventObjects.reduce((res, it) => {
+      return Object.keys(it).length > Object.keys(res).length ? it : res
+    })
   )
 
+  const reportLines = [reportHeaders]
+
+  for (const event of eventObjects) {
+    const line = reportHeaders.reduce((line, header) => {
+      line.push(event[header])
+      return line
+    }, [] as string[])
+
+    reportLines.push(line)
+  }
+
   fs.writeFileSync(
-    path.join(process.cwd(), '__temp/responses-9.csv'),
-    responses.map(l => l.join()).join('\n')
+    path.join(process.cwd(), `__temp/fetch-planner/report-proc${procNum}.csv`),
+    reportLines.map(l => l.join()).join('\n') + '\n'
   )
 
-  console.log('DONE')
+  const duration = Math.round(endTime - startTime)
+  const avgRequestDuration = Math.round(duration / reqCount)
+
+  console.log(`DONE (${duration}ms, ${avgRequestDuration}ms/req).`)
 }
 
-stage().catch(err => {
+const procParamIndex = process.argv.indexOf('-p')
+
+let proc = 1
+
+if (procParamIndex !== -1) {
+  proc = Number(process.argv[procParamIndex + 1] ?? '1')
+}
+
+if (Number.isNaN(proc)) {
+  throw new Error('Procees arg is not number')
+}
+
+const rcountParamIndex = process.argv.indexOf('-r')
+
+let rcount = TEST_REQUESTS_COUNT
+
+if (rcountParamIndex !== -1) {
+  rcount = Number(process.argv[rcountParamIndex + 1] ?? '100')
+}
+
+if (Number.isNaN(rcount)) {
+  throw new Error('Requests count arg is not number')
+}
+
+stage(proc, rcount).catch(err => {
   console.log(err)
 })
