@@ -10,7 +10,9 @@
 
     "sourceMap": true,
 
-    "noUnusedLocals": false,
+    "declaration": true,
+
+    "noUnusedLocals": true,
     "exactOptionalPropertyTypes": false,
 
     // -- Editor Support
