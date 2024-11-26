@@ -1,11 +1,11 @@
 {
   "extends": [
     "eslint:recommended",
-    "plugin:node/recommended",
+    "plugin:n/recommended",
     "prettier"
   ],
   "plugins": [
-    "node",
+    "n",
     "prettier"
   ],
   "rules": {
