@@ -1,8 +1,13 @@
-import Moysklad from 'moysklad'
-import undici from 'undici'
 import fs from 'fs'
+import Moysklad from 'moysklad'
+import pRetry from 'p-retry'
 import path from 'path'
-import { FetchPlanner, type FetchPlannerParams } from '../src/index.js'
+import undici from 'undici'
+import {
+  FetchPlanner,
+  type RetryStrategyFunction,
+  type FetchPlannerParams
+} from '../src/index.js'
 
 const TEST_REQUESTS_COUNT = 200
 
@@ -35,8 +40,22 @@ async function stage(procNum: number, reqCount: number) {
     }
   }
 
+  const fetchRetry: RetryStrategyFunction = async thunk => {
+    return await pRetry(thunk, {
+      onFailedAttempt: error => {
+        console.log(
+          `[FETCH ERROR] ${
+            (error as any).cause?.message ?? error.message
+          } (retry ${error.attemptNumber} left ${error.retriesLeft})`
+        )
+      },
+      retries: 1
+    })
+  }
+
   const fetchPlanner = new FetchPlanner(undici.fetch, {
-    eventHandler
+    eventHandler,
+    retry: fetchRetry
   })
 
   const fetch = fetchPlanner.getFetch()

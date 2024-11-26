@@ -4,6 +4,13 @@ import type { RequestInfo, RequestInit, Response } from 'undici'
 // коэфициент на задержку если были ошибки в неком окне в прошлом и запрещать
 // увеличивать лимит при пересмотре.
 
+export type RetryStrategyFunction = <
+  U,
+  T extends (...agrs: any[]) => Promise<U>
+>(
+  thunk: T
+) => Promise<U>
+
 /**
  * Общий интерфейс для элемента в истории запросов и ответов
  */
@@ -128,7 +135,45 @@ export interface FetchPlannerParams {
   // TODO Добавить возможность переназначать опциональные параметры внутренней конфигурации
 
   eventHandler?: EventHandler
-  retry?: <U, T extends (...agrs: any[]) => Promise<U>>(thunk: T) => Promise<U>
+
+  /**
+   * Стратегия повтора запроса при возникновении ошибки в процессе вызова fetch.
+   * Например ошибки соединения не связанные с API МойСклад.
+   *
+   * Обрабатывать запросы с кодом `429` внутри функции не нужно, т.к. планировщик
+   * самостоятельно выполняет повторные запросы при возникновении ошибки `HTTP 429 Too Many Requests`.
+   *
+   * Пример использования совместно с библиотекой [p-retry](https://github.com/sindresorhus/p-retry):
+   *
+   * ```ts
+   * import pRetry from 'p-retry'
+   * import { FetchPlanner, type RetryStrategyFunction } from 'moysklad-fetch-planner'
+   *
+   * const fetchRetryStrategy: RetryStrategyFunction = async thunk => {
+   *   return await pRetry(thunk, {
+   *    onFailedAttempt: error => {
+   *       console.log(
+   *         `[FETCH ERROR] ${error.message} (retry ${error.attemptNumber} left ${error.retriesLeft})`
+   *       )
+   *     },
+   *     retries: 2
+   *   })
+   * }
+   *
+   * const fetchPlanner = new FetchPlanner(fetch, {
+   *   retry: fetchRetryStrategy
+   * })
+   *
+   * const ms = Moysklad({
+   *   fetch: fetchPlanner.getFetch(),
+   *   userAgent: 'my-app'
+   * })
+   * ```
+   *
+   * @param thunk Функция без аргументов которую передает планировщик. При
+   * выполнении данной функции выполняется очередной HTTP-запрос.
+   */
+  retry?: RetryStrategyFunction
 }
 
 export class FetchPlanner {
