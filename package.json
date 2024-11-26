@@ -1,6 +1,6 @@
 {
   "name": "moysklad-fetch-planner",
-  "version": "1.0.1",
+  "version": "2.0.0",
   "type": "module",
   "description": "Планировщик запросов для API МойСклад",
   "files": [
