@@ -1,3 +1,5 @@
+// node -r dotenv/config ./build/test/demo.test.js -p 1
+
 import fs from 'fs'
 import Moysklad from 'moysklad'
 import pRetry from 'p-retry'
@@ -9,7 +11,7 @@ import {
   type FetchPlannerParams
 } from '../src/index.js'
 
-const TEST_REQUESTS_COUNT = 200
+const TEST_REQUESTS_COUNT = 100
 
 export const generateRequest = () => {
   return {
@@ -19,7 +21,7 @@ export const generateRequest = () => {
 }
 
 async function stage(procNum: number, reqCount: number) {
-  const eventObjects: any[] = []
+  const eventObjects: Record<string, any>[] = []
 
   let curEventObject: any = {}
 
@@ -31,8 +33,8 @@ async function stage(procNum: number, reqCount: number) {
         ...(typeof data === 'object'
           ? data
           : data != null
-          ? { [eventName]: data }
-          : {}),
+            ? { [eventName]: data }
+            : {}),
         time: Date.now() - startTime
       }
 
@@ -86,11 +88,14 @@ async function stage(procNum: number, reqCount: number) {
 
   const endTime = Date.now()
 
-  const reportHeaders = Object.keys(
-    eventObjects.reduce((res, it) => {
-      return Object.keys(it).length > Object.keys(res).length ? it : res
-    })
-  )
+  const reportHeaders = [
+    ...eventObjects
+      .reduce<Set<any>>((res, it) => {
+        Object.keys(it).forEach(key => res.add(key))
+        return res
+      }, new Set())
+      .values()
+  ]
 
   const reportLines = [reportHeaders]
 
