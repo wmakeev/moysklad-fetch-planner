@@ -618,20 +618,24 @@ export class FetchPlanner {
           else {
             // Кто-то работает в параллельном процессе, снижаем наш maxParallelLimit
             if (
+              // Есть возможность снизить кол-во параллельных запросов?
               this.maxParallelLimit +
                 this.parallelLimitCorrection -
                 this.parallelLimitCorrectionStep >
               0
             ) {
+              // Да. Снижаем кол-во параллельных запросов с указанным шагом
               this.parallelLimitCorrection -= this.parallelLimitCorrectionStep
             } else {
+              // Нет. Устанавливаем минимальное кол-во параллельных запросов = 1
+              // (максимальная коррекция).
               this.parallelLimitCorrection = this.maxParallelLimit - 1
-
-              this.eventHandler?.emit(
-                'parallel-limit',
-                this.maxParallelLimit + this.parallelLimitCorrection
-              )
             }
+
+            this.eventHandler?.emit(
+              'parallel-limit',
+              this.maxParallelLimit + this.parallelLimitCorrection
+            )
 
             this.parallelLimitCorrectionTime = requestEndTime
 
