@@ -1,3 +1,4 @@
+/* eslint-disable-next-line */
 import type { RequestInfo, RequestInit, Response } from 'undici'
 
 // TODO Нужно еще учитывать PARALLEL_LIMIT_OVERFLOW и накидывать определенный
@@ -96,7 +97,7 @@ export interface EventHandler {
   emit(eventName: 'response', data: ResponseEvent): void
   emit(eventName: 'delay', data: RequestDelayEvent): void
   emit(eventName: 'trigger', data: undefined): void
-  emit(eventName: 'parallel-limit', data: number): void
+  emit(eventName: 'parallel-limit', data: number): void // TODO Нигде не используется
   emit(eventName: 'rate-limit', data: RateLimitEvent): void
   emit(eventName: 'limit-overflow', data: LimitOverflowEvent): void
 }
@@ -314,7 +315,10 @@ export class FetchPlanner {
    * планировщик для выполнения запросов к серверу
    * @param params Опциональные параметры планировщика
    */
-  constructor(private fetchApi: Fetch, params?: FetchPlannerParams) {
+  constructor(
+    private fetchApi: Fetch,
+    params?: FetchPlannerParams
+  ) {
     if (params?.eventHandler) {
       this.eventHandler = params.eventHandler
     }
@@ -509,6 +513,11 @@ export class FetchPlanner {
     ) {
       this.parallelLimitCorrection++
       this.parallelLimitCorrectionTime = now
+
+      this.eventHandler?.emit(
+        'parallel-limit',
+        this.maxParallelLimit + this.parallelLimitCorrection
+      )
     }
 
     return (
@@ -617,6 +626,11 @@ export class FetchPlanner {
               this.parallelLimitCorrection -= this.parallelLimitCorrectionStep
             } else {
               this.parallelLimitCorrection = this.maxParallelLimit - 1
+
+              this.eventHandler?.emit(
+                'parallel-limit',
+                this.maxParallelLimit + this.parallelLimitCorrection
+              )
             }
 
             this.parallelLimitCorrectionTime = requestEndTime
