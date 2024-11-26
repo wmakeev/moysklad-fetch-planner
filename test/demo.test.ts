@@ -4,7 +4,7 @@ import fs from 'fs'
 import path from 'path'
 import { FetchPlanner, type FetchPlannerParams } from '../src/index.js'
 
-const TEST_REQUESTS_COUNT = 100
+const TEST_REQUESTS_COUNT = 200
 
 export const generateRequest = () => {
   return {

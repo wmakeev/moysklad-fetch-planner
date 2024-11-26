@@ -1,5 +1,9 @@
 import type { RequestInfo, RequestInit, Response } from 'undici'
 
+// TODO Нужно еще учитывать PARALLEL_LIMIT_OVERFLOW и накидывать определенный
+// коэфициент на задержку если были ошибки в неком окне в прошлом и запрещать
+// увеличивать лимит при пересмотре.
+
 /**
  * Общий интерфейс для элемента в истории запросов и ответов
  */
@@ -70,12 +74,24 @@ export interface RateLimitEvent {
   'X-Lognex-Retry-TimeInterval': number
 }
 
+export interface LimitOverflowEvent {
+  responseType: ResponseType
+  actionId: number
+  url: RequestInfo
+}
+
+export interface RequestDelayEvent {
+  delay: number
+  calculatedDelay: number
+}
+
 export interface EventHandler {
   emit(eventName: 'response', data: ResponseEvent): void
-  emit(eventName: 'delay', data: number): void
+  emit(eventName: 'delay', data: RequestDelayEvent): void
   emit(eventName: 'trigger', data: undefined): void
   emit(eventName: 'parallel-limit', data: number): void
   emit(eventName: 'rate-limit', data: RateLimitEvent): void
+  emit(eventName: 'limit-overflow', data: LimitOverflowEvent): void
 }
 
 // FIXME Согласовать интерфейсы DOM и node-fetch
@@ -109,11 +125,15 @@ function trimTimeline(timeline: TimelineItem[], toTime: number) {
  * Параметры планировщика запросов
  */
 export interface FetchPlannerParams {
+  // TODO Добавить возможность переназначать опциональные параметры внутренней конфигурации
+
   eventHandler?: EventHandler
   retry?: <U, T extends (...agrs: any[]) => Promise<U>>(thunk: T) => Promise<U>
 }
 
 export class FetchPlanner {
+  // TODO Часть параметров являются константами - различать от параметров состояния
+
   /**
    * Коэфициент для формулы экспоненциальной задержки в зависимости от значения
    * `X-RateLimit-Remaining`.
@@ -121,9 +141,14 @@ export class FetchPlanner {
   private exponentDelayRaito = 2
 
   /**
-   * Максимальное кол-во параллельных запросов (по умолчанию `5`)
+   * Максимальное кол-во параллельных запросов.
+   *
+   * По умолчанию: `4`
+   *
+   * API позволяет до 5 параллельных запросов, но для большей надежности
+   * лучше оставлять небольшой запас.
    */
-  private maxParallelLimit = 5
+  private maxParallelLimit = 4
 
   /**
    * Значение заголовка `X-Lognex-Retry-TimeInterval` из последнего
@@ -140,6 +165,20 @@ export class FetchPlanner {
    * Например: `45` (45 запросов на один интервал `retryTimeInterval`)
    * */
   private rateLimit: number | null = null
+
+  /**
+   * Максимальное время задержки перед выполнением следующего запроса.
+   *
+   * Устанавливается в случае если расчетное время задержки превышает указаное
+   * значение.
+   *
+   * Такая ситуация может произойти если:
+   * - работает слишком ного параллельных приложений
+   * - какое-либо паралельное приложение не контролирует лимиты
+   *
+   * По умолчанию `10000` (10 секунд)
+   */
+  private maxRequestDelayTimeMs = 10000
 
   /**
    * Значение заголовка `X-RateLimit-Remaining` из последнего
@@ -169,10 +208,10 @@ export class FetchPlanner {
   /**
    * Период в (мс) через которые происходим пересмотр `parallelLimitCorrection`
    */
-  private parallelLimitCorrectionPeriod = 3000
+  private parallelLimitCorrectionPeriod = 30000
 
   /**
-   * Шаг с которым вводится корректировка для `timeIntervalCorrection`
+   * Шаг с которым вводится корректировка для `parallelLimitCorrection`
    */
   private parallelLimitCorrectionStep = 1
 
@@ -307,14 +346,16 @@ export class FetchPlanner {
 
     const k = this.exponentDelayRaito * (1 / waterline - 1)
 
-    const delay = k * stdDelay
+    const calculatedDelay = k * stdDelay
+    let delay = calculatedDelay
 
-    this.eventHandler?.emit('delay', delay)
+    if (delay > this.maxRequestDelayTimeMs) {
+      delay = this.maxRequestDelayTimeMs
+    }
 
-    // TODO Ограничение на всякий случай. Иногда запросы зависают ..
-    // .. возможно по этой причине (не отлаживал).
-    // Как правильно можно ограничить время ожидания. Нужно задать в параметре?
-    return delay > 10000 ? 10000 : delay
+    this.eventHandler?.emit('delay', { delay, calculatedDelay })
+
+    return delay
   }
 
   /**
@@ -546,6 +587,12 @@ export class FetchPlanner {
 
             this.addToResponseTimeline(responseTimelineItem)
           }
+
+          this.eventHandler?.emit('limit-overflow', {
+            responseType,
+            actionId: action.actionId,
+            url: action.url
+          })
         } else {
           responseType = ResponseTypes.OK
 
