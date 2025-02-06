@@ -1,7 +1,8 @@
 # moysklad-fetch-planner <!-- omit in toc -->
 
 [![npm](https://img.shields.io/npm/v/moysklad-fetch-planner.svg?cacheSeconds=1800&style=flat-square)](https://www.npmjs.com/package/moysklad-fetch-planner)
-![GitHub Actions Workflow Status](https://img.shields.io/github/actions/workflow/status/wmakeev/moysklad-fetch-planner/main.yml?style=flat-square)
+[![GitHub Actions Workflow Status](https://img.shields.io/github/actions/workflow/status/wmakeev/moysklad-fetch-planner/main.yml?style=flat-square)](https://github.com/wmakeev/moysklad-fetch-planner/actions/workflows/main.yml)
+[![Codecov](https://img.shields.io/codecov/c/github/wmakeev/moysklad-fetch-planner?style=flat-square)](https://app.codecov.io/gh/wmakeev/moysklad-fetch-planner/tree/master/)
 ![no dependencies](https://img.shields.io/badge/dependencies-no-green?style=flat-square)
 
 > Планировщик запросов для API МойСклад
