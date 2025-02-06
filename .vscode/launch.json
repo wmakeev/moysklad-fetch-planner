@@ -7,21 +7,91 @@
     {
       "type": "node",
       "request": "launch",
-      "name": "Launch TS",
+      "name": "Launch TS ${file}",
       "skipFiles": [
         "<node_internals>/**"
       ],
       "program": "${file}",
       "envFile": "${workspaceFolder}/.env",
       "runtimeArgs": [
-        "-r",
-        "source-map-support/register"
+        "--enable-source-maps"
       ],
-      "args": ["-p", "31"],
       "preLaunchTask": "npm: compile",
       "outFiles": [
         "${workspaceFolder}/build/**/*.js"
       ],
+      "internalConsoleOptions": "openOnSessionStart",
+      "outputCapture": "std"
+    },
+    {
+      "type": "node",
+      "request": "launch",
+      "name": "Launch TS Test ${file}",
+      "skipFiles": [
+        "<node_internals>/**"
+      ],
+      "program": "${file}",
+      "envFile": "${workspaceFolder}/.env",
+      "runtimeArgs": [
+        "--enable-source-maps",
+        "--test-reporter=spec"
+      ],
+      "preLaunchTask": "npm: compile",
+      "outFiles": [
+        "${workspaceFolder}/build/**/*.js"
+      ],
+      "internalConsoleOptions": "openOnSessionStart",
+      "outputCapture": "std"
+    },
+    {
+      "type": "node",
+      "request": "launch",
+      "name": "Launch TS Test ${file} (--test-only)",
+      "skipFiles": [
+        "<node_internals>/**"
+      ],
+      "program": "${file}",
+      "envFile": "${workspaceFolder}/.env",
+      "runtimeArgs": [
+        "--enable-source-maps",
+        "--test-only",
+        "--test-reporter=spec"
+      ],
+      "preLaunchTask": "npm: compile",
+      "outFiles": [
+        "${workspaceFolder}/build/**/*.js"
+      ],
+      "internalConsoleOptions": "openOnSessionStart",
+      "outputCapture": "std"
+    },
+    {
+      "type": "node",
+      "request": "launch",
+      "name": "Launch Demo",
+      "skipFiles": [
+        "<node_internals>/**"
+      ],
+      "program": "${file}",
+      "envFile": "${workspaceFolder}/.env",
+      "runtimeArgs": [
+        "--enable-source-maps",
+      ],
+      "args": ["-p", "99"],
+      "preLaunchTask": "npm: compile",
+      "outFiles": [
+        "${workspaceFolder}/build/**/*.js"
+      ],
+      "internalConsoleOptions": "openOnSessionStart"
+    },
+    {
+      "type": "node",
+      "request": "launch",
+      "name": "Launch JS",
+      "skipFiles": [
+        "<node_internals>/**"
+      ],
+      "program": "${file}",
+      "envFile": "${workspaceFolder}/.env",
       "internalConsoleOptions": "openOnSessionStart"
     }
   ]

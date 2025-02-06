@@ -22,14 +22,16 @@
   },
   "scripts": {
     "env:example": "npx sync-dotenv",
-    "compile": "tsc",
-    "compile:prod": "rm -rf build/ && tsc --build tsconfig.prod.json",
+    "compile:dev": "tsc",
+    "compile": "rm -rf build/ && tsc --build tsconfig.prod.json",
     "lint": "eslint . --fix",
+    "coverage": "DEBUG=moysklad-fetch-planner:noop c8 node -r dotenv/config --test --enable-source-maps",
+    "coverage:report": "c8 report",
     "build:dev": "npm run lint && npm run compile",
-    "build": "rm -rf build/ && npm run lint && npm run compile:prod"
+    "build": "rm -rf build/ && npm run lint && npm run compile && npm run coverage"
   },
   "engines": {
-    "node": ">=14"
+    "node": ">=18"
   },
   "prettier": {
     "semi": false,
@@ -38,30 +40,34 @@
     "trailingComma": "none",
     "arrowParens": "avoid"
   },
+  "c8": {
+    "reporter": [
+      "lcov",
+      "text"
+    ]
+  },
   "author": {
     "name": "Vitaliy V. Makeev",
     "email": "w.makeev@gmail.com"
   },
   "license": "MIT",
   "devDependencies": {
-    "@tsconfig/esm": "^1.0.5",
+    "@eslint/js": "^9.19.0",
     "@tsconfig/node22": "^22.0.0",
     "@tsconfig/strictest": "^2.0.5",
-    "@types/node": "^22.10.0",
-    "@typescript-eslint/eslint-plugin": "^8.16.0",
-    "@typescript-eslint/parser": "^8.16.0",
-    "@typescript-eslint/typescript-estree": "^8.16.0",
-    "dotenv": "^16.4.5",
-    "eslint": "^8",
-    "eslint-config-prettier": "^8",
-    "eslint-plugin-n": "^17.14.0",
-    "eslint-plugin-prettier": "^5.2.1",
-    "moysklad": "^0.17.0",
-    "p-retry": "^6.2.1",
-    "prettier": "^3.4.1",
-    "source-map-support": "^0.5.21",
-    "typescript": "^5.7.2",
-    "typescript-eslint-language-service": "^5.0.5",
-    "undici": "^6.21.0"
+    "@types/highland": "^2.13.0",
+    "@types/node": "^22.10.10",
+    "@wmakeev/highland-tools": "^3.1.0",
+    "c8": "^10.1.3",
+    "csv-stringify": "^6.5.2",
+    "dotenv": "^16.4.7",
+    "eslint": "^9.19.0",
+    "eslint-plugin-n": "^17.15.1",
+    "highland": "^2.13.5",
+    "moysklad": "^0.18.0",
+    "prettier": "^3.4.2",
+    "typescript": "^5.7.3",
+    "typescript-eslint": "^8.21.0",
+    "undici": "^7.3.0"
   }
 }

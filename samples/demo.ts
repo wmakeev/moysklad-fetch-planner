@@ -1,21 +1,19 @@
+/* eslint-disable */
+// @ts-nocheck
 // node -r dotenv/config ./build/test/demo.test.js -p 1
 
 import fs from 'fs'
 import Moysklad from 'moysklad'
-import pRetry from 'p-retry'
 import path from 'path'
 import undici from 'undici'
-import {
-  FetchPlanner,
-  type RetryStrategyFunction,
-  type FetchPlannerParams
-} from '../src/index.js'
+import { FetchPlanner, type FetchPlannerOptions } from '../src/index.js'
 
 const TEST_REQUESTS_COUNT = 100
 
 export const generateRequest = () => {
   return {
-    url: 'entity/project/metadata',
+    // url: 'entity/project/metadata',
+    url: 'entity/invoiceout',
     query: {}
   }
 }
@@ -25,7 +23,7 @@ async function stage(procNum: number, reqCount: number) {
 
   let curEventObject: any = {}
 
-  const eventHandler: FetchPlannerParams['eventHandler'] = {
+  const eventHandler: FetchPlannerOptions['eventHandler'] = {
     emit(eventName, data) {
       curEventObject = {
         ...curEventObject,
@@ -42,26 +40,16 @@ async function stage(procNum: number, reqCount: number) {
     }
   }
 
-  const fetchRetry: RetryStrategyFunction = async thunk => {
-    return await pRetry(thunk, {
-      onFailedAttempt: error => {
-        console.log(
-          `[FETCH ERROR] ${
-            (error as any).cause?.message ?? error.message
-          } (retry ${error.attemptNumber} left ${error.retriesLeft})`
-        )
-      },
-      retries: 1
-    })
-  }
-
   const fetchPlanner = new FetchPlanner(undici.fetch, {
     eventHandler,
-    retry: fetchRetry
+    maxParallelLimit: 5,
+    maxRequestDelayTimeMs: 3000,
+    parallelLimitCorrectionPeriodMs: 1000,
+    throttlingCoefficient: 5
   })
 
   const fetch = fetchPlanner.getFetch()
-  const trigger = fetchPlanner.getTrigger()
+  const trigger = fetchPlanner.waitForFreeRequestSlot()
 
   const ms = Moysklad({
     apiVersion: '1.2',
@@ -95,7 +83,7 @@ async function stage(procNum: number, reqCount: number) {
         return res
       }, new Set())
       .values()
-  ]
+  ].sort()
 
   const reportLines = [reportHeaders]
 
@@ -128,21 +116,21 @@ if (procParamIndex !== -1) {
 }
 
 if (Number.isNaN(proc)) {
-  throw new Error('Procees arg is not number')
+  throw new Error('Process arg is not number')
 }
 
-const rcountParamIndex = process.argv.indexOf('-r')
+const rCountParamIndex = process.argv.indexOf('-r')
 
-let rcount = TEST_REQUESTS_COUNT
+let rCount = TEST_REQUESTS_COUNT
 
-if (rcountParamIndex !== -1) {
-  rcount = Number(process.argv[rcountParamIndex + 1] ?? '100')
+if (rCountParamIndex !== -1) {
+  rCount = Number(process.argv[rCountParamIndex + 1] ?? '100')
 }
 
-if (Number.isNaN(rcount)) {
+if (Number.isNaN(rCount)) {
   throw new Error('Requests count arg is not number')
 }
 
-stage(proc, rcount).catch(err => {
+stage(proc, rCount).catch(err => {
   console.log(err)
 })

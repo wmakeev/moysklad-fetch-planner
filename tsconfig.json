@@ -1,26 +1,15 @@
 {
   "extends": [
     "@tsconfig/node22/tsconfig.json",
-    "@tsconfig/strictest/tsconfig.json",
-    "@tsconfig/esm/tsconfig.json"
+    "@tsconfig/strictest/tsconfig.json"
   ],
   "compilerOptions": {
     "rootDir": ".",
     "outDir": "build",
-
     "sourceMap": true,
-
     "declaration": true,
-
     "noUnusedLocals": true,
     "exactOptionalPropertyTypes": false,
-
-    // -- Editor Support
-    "plugins": [
-      {
-        "name": "typescript-eslint-language-service"
-      }
-    ]
   },
-  "include": ["src/**/*", "test/**/*"]
+  "include": ["src/**/*", "samples/**/*", "test/**/*"]
 }
