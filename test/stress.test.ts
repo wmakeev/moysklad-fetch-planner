@@ -2,7 +2,7 @@ import { Piscina } from 'piscina'
 import asyncTimers from 'node:timers/promises'
 
 const TASKS = 3
-const COUNT = 50
+const COUNT = 100
 
 const piscina = new Piscina({
   // The URL must be a file:// URL
