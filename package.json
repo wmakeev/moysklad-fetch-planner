@@ -28,7 +28,8 @@
     "coverage": "DEBUG=moysklad-fetch-planner:noop c8 node -r dotenv/config --test --enable-source-maps",
     "coverage:report": "c8 report",
     "build:dev": "npm run lint && npm run compile",
-    "build": "rm -rf build/ && npm run lint && npm run compile && npm run coverage",
+    "build": "rm -rf build/ && npm run lint && npm run compile",
+    "test": "npm run build && npm run coverage",
     "version": "auto-changelog -p && git add CHANGELOG.md",
     "release": "np"
   },
