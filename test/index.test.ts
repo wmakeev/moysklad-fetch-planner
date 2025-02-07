@@ -257,7 +257,7 @@ test('FetchPlanner (jitter)', async () => {
     maxParallelLimit: 1,
     throttlingCoefficient: 1,
     maxRequestDelayTimeMs: 1000,
-    maxRequestDelayTimeJitter: 0
+    jitter: 0
   })
   const wrappedFetch1 = fetchPlanner1.getFetch()
 
@@ -287,7 +287,7 @@ test('FetchPlanner (jitter)', async () => {
     maxParallelLimit: 1,
     throttlingCoefficient: 1,
     maxRequestDelayTimeMs: 1000,
-    maxRequestDelayTimeJitter: 0.3
+    jitter: 0.3
   })
   const wrappedFetch2 = fetchPlanner2.getFetch()
 
@@ -318,7 +318,7 @@ test('FetchPlanner (delay reduce)', async () => {
     maxParallelLimit: 1,
     throttlingCoefficient: 1,
     maxRequestDelayTimeMs: 1000,
-    maxRequestDelayTimeJitter: 0
+    jitter: 0
   })
   const wrappedFetch1 = fetchPlanner1.getFetch()
 
@@ -424,7 +424,7 @@ test('FetchPlanner (parallel limit and throttling)', async () => {
   const fetchPlanner = new FetchPlanner(fetch, {
     maxParallelLimit: 2,
     maxRequestDelayTimeMs: 1000,
-    maxRequestDelayTimeJitter: 0,
+    jitter: 0,
     throttlingCoefficient: 1
   })
 
@@ -523,7 +523,7 @@ test('FetchPlanner (retry 429 TooManyRequests error)', async () => {
   const fetchPlanner = new FetchPlanner(fetch, {
     maxParallelLimit: 2,
     maxRequestDelayTimeMs: 1000,
-    maxRequestDelayTimeJitter: 0,
+    jitter: 0,
     throttlingCoefficient: 1
   })
 
@@ -578,7 +578,7 @@ test('FetchPlanner (retry 429 parallel limit overflow error)', async () => {
   const fetchPlanner = new FetchPlanner(fetch, {
     maxParallelLimit: 3,
     maxRequestDelayTimeMs: 1000,
-    maxRequestDelayTimeJitter: 0, // будет мешать тестированию
+    jitter: 0, // будет мешать тестированию
     throttlingCoefficient: 1,
     parallelLimitCorrectionPeriodMs: 1000
   })

@@ -65,6 +65,7 @@
     "eslint-plugin-n": "^17.15.1",
     "highland": "^2.13.5",
     "moysklad": "^0.18.0",
+    "piscina": "^5.0.0-alpha.0",
     "prettier": "^3.4.2",
     "typescript": "^5.7.3",
     "typescript-eslint": "^8.21.0",

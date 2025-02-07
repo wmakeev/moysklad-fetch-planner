@@ -82,6 +82,9 @@ interface RequestSlotHandler {
 
   /** Разрешить promise на стороне ожидающей триггер */
   resolve: (value: unknown) => void
+
+  /** Выбросить ошибку на стороне ожидающей триггер */
+  reject: (err: Error) => void
 }
 
 /** Событие с информацией о выполняемом запросе */
@@ -257,7 +260,7 @@ export interface FetchPlannerOptions {
    *
    * **По умолчанию:** `0.1` (Например: Если для `maxRequestDelayTimeMs` указано значение `3000`, то при расчете задержки значение `maxRequestDelayTimeMs` будет случайным образом определяться в диапазоне от `2850` до `3150`)
    */
-  maxRequestDelayTimeJitter: number
+  jitter: number
 
   /**
    * Период через который происходим пересмотр допустимого кол-ва параллельных
@@ -400,7 +403,7 @@ export class FetchPlanner {
       throttlingCoefficient: 5,
       maxParallelLimit: 4,
       maxRequestDelayTimeMs: 3000,
-      maxRequestDelayTimeJitter: 0.1,
+      jitter: 0.1,
       parallelLimitCorrectionPeriodMs: 10000
     }
 
@@ -434,15 +437,14 @@ export class FetchPlanner {
       )
     }
 
-    if (params?.maxRequestDelayTimeJitter !== undefined) {
+    if (params?.jitter !== undefined) {
       assert.ok(
-        typeof params.maxRequestDelayTimeJitter === 'number' &&
-          params.maxRequestDelayTimeJitter >= 0 &&
-          params.maxRequestDelayTimeJitter <= 0.3,
-        'Опция "maxRequestDelayTimeJitter" должна быть целым числом от 0 до 0.3'
+        typeof params.jitter === 'number' &&
+          params.jitter >= 0 &&
+          params.jitter <= 0.3,
+        'Опция "jitter" должна быть целым числом от 0 до 0.3'
       )
-      optionsDefault.maxRequestDelayTimeJitter =
-        params.maxRequestDelayTimeJitter
+      optionsDefault.jitter = params.jitter
     }
 
     if (params?.parallelLimitCorrectionPeriodMs !== undefined) {
@@ -552,37 +554,37 @@ export class FetchPlanner {
     const k =
       this.attenuationFnSteps[attenuationFnStep] /* c8 ignore next */ ?? 1
 
-    const jitterRange =
-      this.options.maxRequestDelayTimeMs *
-      this.options.maxRequestDelayTimeJitter
+    const jitterRange = this.options.maxRequestDelayTimeMs * this.options.jitter
 
     const jitter = jitterRange / 2 - Math.random() * jitterRange
     debug?.('calculateRequestDelayTime', `jitter - ${jitter}`)
 
-    const delay = k * (this.options.maxRequestDelayTimeMs + jitter)
+    const delayMs = Math.round(
+      k * (this.options.maxRequestDelayTimeMs + jitter)
+    )
 
-    debug?.('calculateRequestDelayTime', `delay - ${delay}`)
+    debug?.('calculateRequestDelayTime', `delayMs - ${delayMs}`)
 
-    return delay
+    return delayMs
   }
 
   /**
    * Планирует обработку запроса из очереди в будущем (тротлинг)
    *
-   * @param implicitDelay Явное указание времени на которое нужно отложить обработку
+   * @param implicitDelayMs Явное указание времени на которое нужно отложить обработку
    * запроса
    */
-  private planProcessAction(implicitDelay = 0) {
+  private planProcessAction(implicitDelayMs = 0) {
     if (this.actionsQueue.length === 0) {
       debug?.('planProcessAction', 'canceled (empty queue)')
       return
     }
 
-    const calculatedDelay = this.calculateRequestDelayTime()
+    const calculatedDelayMs = this.calculateRequestDelayTime()
 
-    const delay = Math.max(implicitDelay, calculatedDelay)
+    const delayMs = Math.max(implicitDelayMs, calculatedDelayMs)
 
-    const planTime = Date.now() + delay
+    const planTime = Date.now() + delayMs
 
     if (
       // Если запланирована другая обработка ..
@@ -596,7 +598,7 @@ export class FetchPlanner {
       return
     }
 
-    debug?.('planProcessAction', `planned after ${delay}`)
+    debug?.('planProcessAction', `planned after ${delayMs}`)
 
     this.nextRequestTime = planTime
 
@@ -618,10 +620,10 @@ export class FetchPlanner {
         return
       }
 
-      this.lastRequestDelay = delay
+      this.lastRequestDelay = delayMs
 
       this.processAction()
-    }, delay)
+    }, delayMs)
 
     this.processActionPlanedTimeout = {
       time: planTime,
@@ -666,6 +668,12 @@ export class FetchPlanner {
     }
   }
 
+  private rejectFreeRequestSlotTriggers(err: Error) {
+    this.requestSlotHandlers.forEach(it => {
+      it.reject(err)
+    })
+  }
+
   private parseNumberHeader(headers: Response['headers'], headerName: string) {
     const headerValue = headers.get(headerName)
 
@@ -702,24 +710,32 @@ export class FetchPlanner {
   private reviewParallelLimitCorrection() {
     const now = Date.now()
 
+    const periodStart =
+      now -
+      this.options.parallelLimitCorrectionPeriodMs *
+        // Jitter для равномерного распределения времени коррекции между разными
+        // экземплярами планировщика, которые могут работать параллельно
+        (1 + 2 * Math.random() * this.options.jitter)
+
+    /** Пора ли провести коррекцию? */
     const shouldCorrect =
       this.parallelLimitCorrection < 0 &&
-      this.parallelLimitCorrectionTime <
-        now - this.options.parallelLimitCorrectionPeriodMs
+      this.parallelLimitCorrectionTime < periodStart
 
     if (!shouldCorrect) return
 
-    // Обратно увеличиваем кол-во параллельных запросов
-
     this.parallelLimitCorrectionTime = now
 
+    // За прошлый период была ошибка. Отмена коррекции.
     if (
-      this.lastParallelLimitOverflowTime == null ||
-      this.lastParallelLimitOverflowTime <
-        now - this.options.parallelLimitCorrectionPeriodMs
+      this.lastParallelLimitOverflowTime != null &&
+      this.lastParallelLimitOverflowTime > periodStart
     ) {
-      this.parallelLimitCorrection++
+      return
     }
+
+    // Увеличить кол-во параллельных запросов на 1
+    this.parallelLimitCorrection++
   }
 
   private reduceParallelLimit() {
@@ -852,11 +868,16 @@ export class FetchPlanner {
       })
 
       .catch((err: unknown) => {
-        action.reject(
+        const err_ =
           err instanceof Error
             ? err
             : new Error('Unknown error', { cause: err })
-        )
+
+        action.reject(err_)
+
+        setImmediate(() => {
+          this.rejectFreeRequestSlotTriggers(err_)
+        })
       })
 
       .finally(() => {
@@ -917,10 +938,11 @@ export class FetchPlanner {
    * (по умолчанию - `0`)
    */
   waitForFreeRequestSlot(priority = 0) {
-    const triggerPromise = new Promise(resolve => {
+    const triggerPromise = new Promise((resolve, reject) => {
       this.requestSlotHandlers.push({
         priority,
-        resolve
+        resolve,
+        reject
       })
     })
 
