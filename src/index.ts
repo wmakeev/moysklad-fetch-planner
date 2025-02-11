@@ -586,18 +586,6 @@ export class FetchPlanner {
 
     const planTime = Date.now() + delayMs
 
-    if (
-      // Если запланирована другая обработка ..
-      this.processActionPlanedTimeout &&
-      // .. и запланирована позже чем текущий план, ..
-      this.processActionPlanedTimeout.time >= planTime
-    ) {
-      debug?.('planProcessAction', 'just planned')
-
-      // .. то пропускаем (ждем запланированного запуска)
-      return
-    }
-
     debug?.('planProcessAction', `planned after ${delayMs}`)
 
     this.nextRequestTime = planTime
