@@ -1,8 +1,8 @@
 import { Piscina } from 'piscina'
 import asyncTimers from 'node:timers/promises'
 
-const TASKS = 3
-const COUNT = 100
+const TASKS = 5
+const TIMEOUT_STEP = 10000
 
 const piscina = new Piscina({
   // The URL must be a file:// URL
@@ -14,11 +14,14 @@ const promises = []
 for (let i = 0; i < TASKS; i++) {
   promises.push(
     piscina.run(
-      { workerName: `stress-${i + 1}`, count: COUNT },
+      {
+        workerName: `stress-${i + 1}`,
+        duration: 2 * TIMEOUT_STEP * (TASKS - i)
+      },
       { name: 'stressTest' }
     )
   )
-  await asyncTimers.setTimeout(TASKS * COUNT * 5)
+  await asyncTimers.setTimeout(TIMEOUT_STEP)
 }
 
 console.time(`Stress test time`)

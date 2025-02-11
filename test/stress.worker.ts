@@ -39,9 +39,9 @@ const createEvent = (
 
 export async function stressTest(params: {
   workerName: string
-  count: number
+  duration: number
 }) {
-  const { workerName, count } = params
+  const { workerName, duration } = params
 
   const eventHandler = new EventEmitter<FetchPlannerEventMap>()
 
@@ -86,7 +86,14 @@ export async function stressTest(params: {
 
   const promises = []
 
-  for (let i = 0; i < count; i++) {
+  let isActive = true
+
+  setTimeout(() => {
+    isActive = false
+  }, duration)
+
+  // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
+  for (let i = 0; isActive; i++) {
     console.log(`worker ${workerName} send request ${i}`)
 
     await fetchPlanner.waitForFreeRequestSlot()
