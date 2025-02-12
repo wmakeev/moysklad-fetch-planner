@@ -6,6 +6,7 @@ import { mkdir } from 'node:fs/promises'
 import path from 'node:path'
 import { PassThrough } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
+import pRetry from 'p-retry'
 import { fetch } from 'undici'
 import {
   FetchPlanner,
@@ -82,7 +83,23 @@ export async function stressTest(params: {
     writeStream
   )
 
-  const ms = Moysklad({ fetch: fetchPlanner.getFetch() })
+  const ms = Moysklad({
+    fetch: fetchPlanner.getFetch(),
+    retry: (thunk, signal) => {
+      return pRetry(thunk, {
+        retries: 2,
+        shouldRetry: Moysklad.shouldRetryError,
+        onFailedAttempt: error => {
+          console.log(
+            error.message +
+              ` - attempt ${error.attemptNumber} failed /` +
+              ` ${error.retriesLeft} retries left`
+          )
+        },
+        signal
+      })
+    }
+  })
 
   const promises = []
 
