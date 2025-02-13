@@ -120,6 +120,19 @@ export interface ResponseEvent extends RequestEvent {
   endTime: number
 }
 
+/** Событие с ошибкой вызванной вызовом fetch */
+export interface FetchErrorEvent extends RequestEvent {
+  /**
+   * Ошибка
+   */
+  error: Error
+
+  /** Время получения ошибки */
+  errorTime: number
+}
+
+export type FetchPlannerEvents = RequestEvent | ResponseEvent | FetchErrorEvent
+
 /**
  * Обработчик событий
  */
@@ -137,11 +150,23 @@ export interface FetchPlannerEventHandler {
    * @see {@link ResponseEvent}
    */
   emit(eventName: 'response', data: ResponseEvent, instance: FetchPlanner): void
+
+  /**
+   * Событие `response` вызывается после получения ответа на запрос
+   *
+   * @see {@link FetchErrorEvent}
+   */
+  emit(
+    eventName: 'fetch-error',
+    data: FetchErrorEvent,
+    instance: FetchPlanner
+  ): void
 }
 
 export interface FetchPlannerEventMap {
-  request: [RequestEvent, FetchPlanner]
-  response: [ResponseEvent, FetchPlanner]
+  'request': [RequestEvent, FetchPlanner]
+  'response': [ResponseEvent, FetchPlanner]
+  'fetch-error': [FetchErrorEvent, FetchPlanner]
 }
 
 /**
@@ -656,12 +681,6 @@ export class FetchPlanner {
     }
   }
 
-  private rejectFreeRequestSlotTriggers(err: Error) {
-    this.requestSlotHandlers.forEach(it => {
-      it.reject(err)
-    })
-  }
-
   private parseNumberHeader(headers: Response['headers'], headerName: string) {
     const headerValue = headers.get(headerName)
 
@@ -804,7 +823,7 @@ export class FetchPlanner {
           responseType = ResponseTypes.RATE_LIMIT_OVERFLOW
 
           // Возвращаем запрос в начало очереди
-          this.actionsQueue = [action, ...this.actionsQueue]
+          this.actionsQueue.unshift(action)
 
           const lognexAuthCode = resp.headers.get('x-lognex-auth')
 
@@ -856,6 +875,8 @@ export class FetchPlanner {
       })
 
       .catch((err: unknown) => {
+        const errorTime = Date.now()
+
         const err_ =
           err instanceof Error
             ? err
@@ -863,19 +884,29 @@ export class FetchPlanner {
 
         action.reject(err_)
 
-        setImmediate(() => {
-          this.rejectFreeRequestSlotTriggers(err_)
-        })
+        this.options.eventHandler?.emit(
+          'fetch-error',
+          {
+            actionId: action.actionId,
+            url: action.url,
+            requestId,
+            startTime: requestStartTime,
+            error: err_,
+            errorTime
+          },
+          this
+        )
       })
 
       .finally(() => {
+        // TIPS Фактически запрос еще не выполнен (мы получили только заголовки)
+        // Нужно последить за тем будут ли часто приходить ошибки превышения
+        // лимита параллельных запросов
+        this.curInflightRequestsCount--
+
         this.checkFreeRequestSlotTrigger()
 
         this.planProcessAction(retryAfterMs ?? 0)
-
-        // Уменьшаем показатель после планирования, т.к. фактически запрос еще
-        // не выполнен (мы получили только заголовки)
-        this.curInflightRequestsCount--
       })
 
     this.planProcessAction()

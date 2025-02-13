@@ -10,6 +10,7 @@ import {
   FetchPlanner,
   FetchPlannerEventHandler,
   FetchPlannerEventMap,
+  FetchPlannerEvents,
   wrapFetch
 } from '../src/index.js'
 
@@ -116,14 +117,21 @@ test('FetchPlanner (simple GET)', async () => {
   assert.ok(result.ok)
 })
 
-test('FetchPlanner (event handler)', async t => {
+test('FetchPlanner (event handler)', async () => {
+  const events: {
+    event: keyof FetchPlannerEventMap
+    data: FetchPlannerEvents
+  }[] = []
+
   const eventHandler: FetchPlannerEventHandler = {
-    emit() {
-      return
+    emit(event, data, instance) {
+      assert.ok(instance instanceof FetchPlanner)
+      events.push({
+        event,
+        data
+      })
     }
   }
-
-  const emitMock = t.mock.method(eventHandler, 'emit').mock
 
   const fetchPlanner = new FetchPlanner(fetch, {
     eventHandler
@@ -141,52 +149,58 @@ test('FetchPlanner (event handler)', async t => {
 
   assert.ok(result.ok)
 
-  const calls = emitMock.calls
+  assert.strictEqual(events.length, 6)
 
-  assert.strictEqual(calls.length, 6)
+  assert.deepEqual(
+    events.map(ev => ev.event),
+    ['request', 'response', 'request', 'response', 'request', 'response']
+  )
 
-  const [call0_EvName, call0_Event] = calls[0]!.arguments
+  const { event: ev0_name, data: ev0_data } = events[0]!
 
-  assert.strictEqual(call0_EvName, 'request')
-  assert.strictEqual(call0_Event.actionId, 1)
-  assert.strictEqual(call0_Event.url, 'http://example.com/foo')
-  assert.strictEqual(call0_Event.requestId, 1)
-  assert.strictEqual(typeof call0_Event.startTime, 'number')
-  assert.strictEqual(typeof call0_Event.endTime, 'undefined')
-  assert.strictEqual(call0_Event.responseType, undefined)
+  assert.strictEqual(ev0_name, 'request')
+  assert.strictEqual(ev0_data.actionId, 1)
+  assert.strictEqual(ev0_data.url, 'http://example.com/foo')
+  assert.strictEqual(ev0_data.requestId, 1)
+  assert.strictEqual(typeof ev0_data.startTime, 'number')
+  assert.strictEqual('endTime' in ev0_data, false)
+  assert.strictEqual('responseType' in ev0_data, false)
 
-  const [call1_EvName, call1_Event] = calls[1]!.arguments
+  const { event: ev1_name, data: ev1_data } = events[1]!
 
-  assert.strictEqual(call1_EvName, 'response')
-  assert.strictEqual(call1_Event.actionId, 1)
-  assert.strictEqual(call1_Event.url, 'http://example.com/foo')
-  assert.strictEqual(call1_Event.requestId, 1)
-  assert.strictEqual(typeof call1_Event.startTime, 'number')
-  assert.strictEqual(typeof call1_Event.endTime, 'number')
-  assert.ok(call1_Event.startTime <= call1_Event.endTime)
-  assert.strictEqual(call1_Event.responseType, 'RATE_LIMIT_OVERFLOW')
+  assert.strictEqual(ev1_name, 'response')
+  assert.strictEqual(ev1_data.actionId, 1)
+  assert.strictEqual(ev1_data.url, 'http://example.com/foo')
+  assert.strictEqual(ev1_data.requestId, 1)
+  assert.strictEqual(typeof ev1_data.startTime, 'number')
+  assert.ok('endTime' in ev1_data)
+  assert.strictEqual(typeof ev1_data.endTime, 'number')
+  assert.ok(ev1_data.startTime <= ev1_data.endTime)
+  assert.strictEqual(ev1_data.responseType, 'RATE_LIMIT_OVERFLOW')
 
-  const [call3_EvName, call3_Event] = calls[3]!.arguments
+  const { event: ev3_name, data: ev3_data } = events[3]!
 
-  assert.strictEqual(call3_EvName, 'response')
-  assert.strictEqual(call3_Event.actionId, 1)
-  assert.strictEqual(call3_Event.url, 'http://example.com/foo')
-  assert.strictEqual(call3_Event.requestId, 2)
-  assert.strictEqual(typeof call3_Event.startTime, 'number')
-  assert.strictEqual(typeof call3_Event.endTime, 'number')
-  assert.ok(call3_Event.startTime <= call3_Event.endTime)
-  assert.strictEqual(call3_Event.responseType, 'PARALLEL_LIMIT_OVERFLOW')
+  assert.strictEqual(ev3_name, 'response')
+  assert.strictEqual(ev3_data.actionId, 1)
+  assert.strictEqual(ev3_data.url, 'http://example.com/foo')
+  assert.strictEqual(ev3_data.requestId, 2)
+  assert.strictEqual(typeof ev3_data.startTime, 'number')
+  assert.ok('endTime' in ev3_data)
+  assert.strictEqual(typeof ev3_data.endTime, 'number')
+  assert.ok(ev3_data.startTime <= ev3_data.endTime)
+  assert.strictEqual(ev3_data.responseType, 'PARALLEL_LIMIT_OVERFLOW')
 
-  const [call5_EvName, call5_Event] = calls[5]!.arguments
+  const { event: ev5_name, data: ev5_data } = events[5]!
 
-  assert.strictEqual(call5_EvName, 'response')
-  assert.strictEqual(call5_Event.actionId, 1)
-  assert.strictEqual(call5_Event.url, 'http://example.com/foo')
-  assert.strictEqual(call5_Event.requestId, 3)
-  assert.strictEqual(typeof call5_Event.startTime, 'number')
-  assert.strictEqual(typeof call5_Event.endTime, 'number')
-  assert.ok(call5_Event.startTime <= call5_Event.endTime)
-  assert.strictEqual(call5_Event.responseType, 'OK')
+  assert.strictEqual(ev5_name, 'response')
+  assert.strictEqual(ev5_data.actionId, 1)
+  assert.strictEqual(ev5_data.url, 'http://example.com/foo')
+  assert.strictEqual(ev5_data.requestId, 3)
+  assert.strictEqual(typeof ev5_data.startTime, 'number')
+  assert.ok('endTime' in ev5_data)
+  assert.strictEqual(typeof ev5_data.endTime, 'number')
+  assert.ok(ev5_data.startTime <= ev5_data.endTime)
+  assert.strictEqual(ev5_data.responseType, 'OK')
 })
 
 test('FetchPlanner (EventEmitter as event handler)', async t => {
