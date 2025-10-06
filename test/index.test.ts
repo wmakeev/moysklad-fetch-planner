@@ -35,6 +35,7 @@ const interceptSimpleHttpGet = () => {
 }
 
 const interceptHttpWithRateLimit = (
+  method: RequestInit['method'],
   reqPath: string,
   limit: number,
   remaining: number,
@@ -43,7 +44,7 @@ const interceptHttpWithRateLimit = (
   mockPool
     .intercept({
       path: `/${reqPath}`,
-      method: 'GET'
+      method: method
     })
     .defaultReplyHeaders({
       'X-RateLimit-Limit': String(limit),
@@ -173,6 +174,7 @@ test('FetchPlanner (event handler)', async () => {
   assert.strictEqual(ev0_name, 'request')
   assert.strictEqual(ev0_data.actionId, 1)
   assert.strictEqual(ev0_data.url, 'http://example.com/foo')
+  assert.strictEqual(ev0_data.method, undefined)
   assert.strictEqual(ev0_data.requestId, 1)
   assert.strictEqual(typeof ev0_data.startTime, 'number')
   assert.strictEqual('endTime' in ev0_data, false)
@@ -216,7 +218,7 @@ test('FetchPlanner (event handler)', async () => {
 })
 
 test('FetchPlanner (EventEmitter as event handler)', async t => {
-  t.plan(5)
+  t.plan(6)
 
   const eventHandler = new EventEmitter<FetchPlannerEventMap>()
 
@@ -226,6 +228,7 @@ test('FetchPlanner (EventEmitter as event handler)', async t => {
 
   eventHandler.on('request', function (ev, planner) {
     t.assert.equal(ev.actionId, 1)
+    t.assert.equal(ev.method, 'POST')
     t.assert.equal(planner.getRateLimit(), null)
   })
 
@@ -236,9 +239,11 @@ test('FetchPlanner (EventEmitter as event handler)', async t => {
 
   const wrappedFetch = fetchPlanner.getFetch()
 
-  interceptHttpWithRateLimit('foo', 10, 5, '')
+  interceptHttpWithRateLimit('POST', 'foo', 10, 5, '')
 
-  const response = await wrappedFetch('http://example.com/foo')
+  const response = await wrappedFetch('http://example.com/foo', {
+    method: 'POST'
+  })
 
   const result = (await response.json()) as { ok: boolean }
 
@@ -291,7 +296,7 @@ test('FetchPlanner (jitter)', async () => {
 
   let i = 10
   while (i-- > 0) {
-    interceptHttpWithRateLimit('foo', 10, 5, '')
+    interceptHttpWithRateLimit('GET', 'foo', 10, 5, '')
     const p = wrappedFetch1('http://example.com/foo')
     mock.timers.tick(510)
     await asyncTimers.setImmediate()
@@ -321,7 +326,7 @@ test('FetchPlanner (jitter)', async () => {
 
   i = 100
   while (i-- > 0) {
-    interceptHttpWithRateLimit('foo', 10, 5, '')
+    interceptHttpWithRateLimit('GET', 'foo', 10, 5, '')
     const p = wrappedFetch2('http://example.com/foo')
     mock.timers.tick(1000)
     await asyncTimers.setImmediate()
@@ -352,7 +357,7 @@ test('FetchPlanner (delay reduce)', async () => {
 
   let i = 5
   while (i-- > 0) {
-    interceptHttpWithRateLimit('foo', 10, 5, '')
+    interceptHttpWithRateLimit('GET', 'foo', 10, 5, '')
 
     await wrappedFetch1('http://example.com/foo')
 
@@ -375,7 +380,7 @@ test('FetchPlanner (POST with RateLimit)', async () => {
 
   const wrappedFetch = fetchPlanner.getFetch()
 
-  interceptHttpWithRateLimit('foo', 10, 8, 'data')
+  interceptHttpWithRateLimit('GET', 'foo', 10, 8, 'data')
 
   const response = await wrappedFetch('http://example.com/foo')
 
@@ -411,6 +416,7 @@ test('FetchPlanner (waitForRequestSlot)', async () => {
         order++
 
         interceptHttpWithRateLimit(
+          'GET',
           `foo/${order}`,
           10,
           10 - order,
@@ -457,13 +463,13 @@ test('FetchPlanner (parallel limit and throttling)', async () => {
   const wrappedFetch = fetchPlanner.getFetch()
 
   // Выполняем одновременно три запроса
-  interceptHttpWithRateLimit('foo/1', 10, 4, 'r1')
+  interceptHttpWithRateLimit('GET', 'foo/1', 10, 4, 'r1')
   const resp1Promise = wrappedFetch('http://example.com/foo/1')
 
-  interceptHttpWithRateLimit('foo/2', 10, 3, 'r2')
+  interceptHttpWithRateLimit('GET', 'foo/2', 10, 3, 'r2')
   const resp2Promise = wrappedFetch('http://example.com/foo/2')
 
-  interceptHttpWithRateLimit('foo/3', 10, 2, 'r3')
+  interceptHttpWithRateLimit('GET', 'foo/3', 10, 2, 'r3')
   const resp3Promise = wrappedFetch('http://example.com/foo/3')
 
   // Запросы сразу попадают в очередь
@@ -585,7 +591,7 @@ test('FetchPlanner (retry 429 TooManyRequests error)', async () => {
   // Ожидаем половину от времени задержки (запрос не должен быть отправлен)
   mock.timers.tick(500)
 
-  interceptHttpWithRateLimit('foo/1', 10, 1, 'r1')
+  interceptHttpWithRateLimit('GET', 'foo/1', 10, 1, 'r1')
 
   // Ожидаем вторую половину времени задержки
   mock.timers.tick(510)
@@ -611,8 +617,8 @@ test('FetchPlanner (retry 429 parallel limit overflow error)', async () => {
 
   const wrappedFetch = fetchPlanner.getFetch()
 
-  interceptHttpWithRateLimit('foo/1', 10, 9, 'r1')
-  interceptHttpWithRateLimit('foo/2', 10, 8, 'r2')
+  interceptHttpWithRateLimit('GET', 'foo/1', 10, 9, 'r1')
+  interceptHttpWithRateLimit('GET', 'foo/2', 10, 8, 'r2')
   // Запрос с ошибкой 429
   interceptHttpWith429ParallelLimitError('foo/3')
 
@@ -640,7 +646,7 @@ test('FetchPlanner (retry 429 parallel limit overflow error)', async () => {
   // Добавлена корректировка для лимита параллельных запросов
   assert.equal(fetchPlanner.getParallelLimitCorrection(), -1)
 
-  interceptHttpWithRateLimit('foo/3', 10, 9, 'r3')
+  interceptHttpWithRateLimit('GET', 'foo/3', 10, 9, 'r3')
 
   // Задержка по RateLimit
   mock.timers.tick(210)
@@ -656,7 +662,7 @@ test('FetchPlanner (retry 429 parallel limit overflow error)', async () => {
   // Ожидаем
   await asyncTimers.setTimeout(700)
 
-  interceptHttpWithRateLimit('foo/4', 10, 9, 'r4')
+  interceptHttpWithRateLimit('GET', 'foo/4', 10, 9, 'r4')
   const resp4Promise = wrappedFetch('http://example.com/foo/4')
   const result4 = await (await resp4Promise).json()
   assert.equal((result4 as { data: string }).data, 'r4')
@@ -667,7 +673,7 @@ test('FetchPlanner (retry 429 parallel limit overflow error)', async () => {
   // Ожидаем еще
   await asyncTimers.setTimeout(300)
 
-  interceptHttpWithRateLimit('foo/5', 10, 9, 'r5')
+  interceptHttpWithRateLimit('GET', 'foo/5', 10, 9, 'r5')
   const resp5Promise = wrappedFetch('http://example.com/foo/5')
   const result5 = await (await resp5Promise).json()
   assert.equal((result5 as { data: string }).data, 'r5')

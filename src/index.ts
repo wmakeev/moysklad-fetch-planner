@@ -101,6 +101,9 @@ export interface RequestEvent {
   /** Строка запроса */
   url: string | URL | Request
 
+  /** HTTP-метод запроса */
+  method: RequestInit['method']
+
   /** Время начала запроса */
   startTime: number
 }
@@ -877,6 +880,7 @@ export class FetchPlanner {
           {
             actionId: action.actionId,
             url: action.url,
+            method: action.options?.method,
             requestId,
             startTime: requestStartTime,
             endTime: requestEndTime,
@@ -901,6 +905,7 @@ export class FetchPlanner {
           {
             actionId: action.actionId,
             url: action.url,
+            method: action.options?.method,
             requestId,
             startTime: requestStartTime,
             error: err_,
@@ -928,6 +933,7 @@ export class FetchPlanner {
       {
         actionId: action.actionId,
         url: action.url,
+        method: action.options?.method,
         requestId,
         startTime: requestStartTime
       },
