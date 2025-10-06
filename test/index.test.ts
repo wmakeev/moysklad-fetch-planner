@@ -103,6 +103,18 @@ test('wrapFetch (simple)', async () => {
   assert.ok(result.ok)
 })
 
+test('wrapFetch (with options)', async () => {
+  const wrappedFetch = wrapFetch(fetch, { maxParallelLimit: 2 })
+
+  interceptSimpleHttpGet()
+
+  const response = await wrappedFetch('http://example.com/foo')
+
+  const result = (await response.json()) as { ok: boolean }
+
+  assert.ok(result.ok)
+})
+
 test('FetchPlanner (simple GET)', async () => {
   const fetchPlanner = new FetchPlanner(fetch)
 

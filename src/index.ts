@@ -18,7 +18,7 @@ if (typeof DEBUG === 'string' && DEBUG.includes(MODULE_NAME)) {
 
   if (items[0] === `${MODULE_NAME}:noop`) {
     // eslint-disable-next-line @typescript-eslint/no-empty-function
-    debug = () => {}
+    debug = () => { }
   }
   //
   else if (items.length > 0) {
@@ -195,7 +195,7 @@ export interface FetchPlannerOptions {
    *
    * Должен соответствовать следующему минимальному интерфейсу:
    *
-   * ```typescript
+   * ```ts
    * interface EventHandler {
    *   emit(eventName: string, data?: any): void
    * }
@@ -203,6 +203,18 @@ export interface FetchPlannerOptions {
    *
    * Можно использовать для логирования, сбора статистики и анализа нагрузки
    * на API.
+   *
+   * ```ts
+   * const eventHandler = new EventEmitter<FetchPlannerEventMap>()
+   *
+   * eventHandler.on('response', (ev, planner) => {
+   *   if (ev.responseType !== 'OK') {
+   *     console.log(ev.responseType, planner.getRateLimitRemaining())
+   *   }
+   * })
+   *
+   * const fetchPlannerEventHandler = new FetchPlanner(fetch, { eventHandler })
+   * ```
    *
    * @see {@link FetchPlannerEventHandler} детальное описание событий
    */
@@ -435,8 +447,8 @@ export class FetchPlanner {
     if (params?.eventHandler != null) {
       assert.ok(
         typeof params.eventHandler === 'object' &&
-          'emit' in params.eventHandler &&
-          typeof params.eventHandler.emit === 'function',
+        'emit' in params.eventHandler &&
+        typeof params.eventHandler.emit === 'function',
         'Опция "eventHandler" должна быть объектом с методом "emit"'
       )
       optionsDefault.eventHandler = params.eventHandler
@@ -445,7 +457,7 @@ export class FetchPlanner {
     if (params?.maxParallelLimit !== undefined) {
       assert.ok(
         typeof params.maxParallelLimit === 'number' &&
-          params.maxParallelLimit > 0,
+        params.maxParallelLimit > 0,
         'Опция "maxParallelLimit" должна быть целым числом больше нуля'
       )
       optionsDefault.maxParallelLimit = Math.round(params.maxParallelLimit)
@@ -454,7 +466,7 @@ export class FetchPlanner {
     if (params?.maxRequestDelayTimeMs !== undefined) {
       assert.ok(
         typeof params.maxRequestDelayTimeMs === 'number' &&
-          params.maxRequestDelayTimeMs > 0,
+        params.maxRequestDelayTimeMs > 0,
         'Опция "maxRequestDelayTimeMs" должна быть целым числом больше 0'
       )
       optionsDefault.maxRequestDelayTimeMs = Math.round(
@@ -465,8 +477,8 @@ export class FetchPlanner {
     if (params?.jitter !== undefined) {
       assert.ok(
         typeof params.jitter === 'number' &&
-          params.jitter >= 0 &&
-          params.jitter <= 0.3,
+        params.jitter >= 0 &&
+        params.jitter <= 0.3,
         'Опция "jitter" должна быть целым числом от 0 до 0.3'
       )
       optionsDefault.jitter = params.jitter
@@ -475,7 +487,7 @@ export class FetchPlanner {
     if (params?.parallelLimitCorrectionPeriodMs !== undefined) {
       assert.ok(
         typeof params.parallelLimitCorrectionPeriodMs === 'number' &&
-          params.parallelLimitCorrectionPeriodMs >= 1000,
+        params.parallelLimitCorrectionPeriodMs >= 1000,
         'Опция "parallelLimitCorrectionPeriodMs" должна быть целым числом больше либо равным 1000'
       )
       optionsDefault.parallelLimitCorrectionPeriodMs = Math.round(
@@ -486,8 +498,8 @@ export class FetchPlanner {
     if (params?.throttlingCoefficient !== undefined) {
       assert.ok(
         typeof params.throttlingCoefficient === 'number' &&
-          params.throttlingCoefficient >= 1 &&
-          params.throttlingCoefficient <= 20,
+        params.throttlingCoefficient >= 1 &&
+        params.throttlingCoefficient <= 20,
         'Опция "throttlingCoefficient" должна быть числом от 1 до 20'
       )
       optionsDefault.throttlingCoefficient = params.throttlingCoefficient
@@ -720,9 +732,9 @@ export class FetchPlanner {
     const periodStart =
       now -
       this.options.parallelLimitCorrectionPeriodMs *
-        // Jitter для равномерного распределения времени коррекции между разными
-        // экземплярами планировщика, которые могут работать параллельно
-        (1 + 2 * Math.random() * this.options.jitter)
+      // Jitter для равномерного распределения времени коррекции между разными
+      // экземплярами планировщика, которые могут работать параллельно
+      (1 + 2 * Math.random() * this.options.jitter)
 
     /** Пора ли провести коррекцию? */
     const shouldCorrect =
@@ -749,8 +761,8 @@ export class FetchPlanner {
     if (
       // Есть возможность снизить кол-во параллельных запросов?
       this.options.maxParallelLimit +
-        this.parallelLimitCorrection -
-        this.parallelLimitCorrectionStep >
+      this.parallelLimitCorrection -
+      this.parallelLimitCorrectionStep >
       0
     ) {
       // Да - Снижаем кол-во параллельных запросов с указанным шагом
@@ -768,7 +780,7 @@ export class FetchPlanner {
   private shouldProcessAction() {
     return (
       this.curInflightRequestsCount <
-        this.options.maxParallelLimit + this.parallelLimitCorrection &&
+      this.options.maxParallelLimit + this.parallelLimitCorrection &&
       this.actionsQueue.length > 0 &&
       this.processActionPlanedTimeout === null
     )
@@ -1040,6 +1052,6 @@ export class FetchPlanner {
 /**
  * Создает экземпляр планировщика и возвращает обернутый fetch
  */
-export function wrapFetch(fetchApi: Fetch, options?: FetchPlannerOptions) {
+export function wrapFetch(fetchApi: Fetch, options?: Partial<FetchPlannerOptions>) {
   return new FetchPlanner(fetchApi, options).getFetch()
 }
