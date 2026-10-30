@@ -166,12 +166,6 @@ importers:
 
   .:
     devDependencies:
-      '@tsconfig/node22':
-        specifier: 22.0.0
-        version: 22.0.0
-      '@tsconfig/strictest':
-        specifier: 2.0.5
-        version: 2.0.5
       '@types/highland':
         specifier: 2.13.0
         version: 2.13.0
@@ -1060,12 +1054,6 @@ packages:
   '@sindresorhus/merge-streams@4.0.0':
     resolution: {integrity: sha512-tlqY9xq5ukxTUZBmoOp+m61cqwQD5pHJtFY3Mn8CA8ps6yghLH/Hw8UPdqg4OLmFW3IFlcXnQNmo/dh8HzXYIQ==}
     engines: {node: '>=18'}
-
-  '@tsconfig/node22@22.0.0':
-    resolution: {integrity: sha512-twLQ77zevtxobBOD4ToAtVmuYrpeYUh3qh+TEp+08IWhpsrIflVHqQ1F1CiPxQGL7doCdBIOOCF+1Tm833faNg==}
-
-  '@tsconfig/strictest@2.0.5':
-    resolution: {integrity: sha512-ec4tjL2Rr0pkZ5hww65c+EEPYwxOi4Ryv+0MtjeaSQRJyq322Q27eOQiFbuNgw2hpL4hB1/W/HBGk3VKS43osg==}
 
   '@tybys/wasm-util@0.10.4':
     resolution: {integrity: sha512-W3c4gRigFS0T/Ma4qIYF3GDAc5AQdHb1yL5znJT1Zv1YaD9Kitx656wBjvr19qbiosmZT8lWDM5BEMynUqX65A==}
@@ -3228,10 +3216,6 @@ snapshots:
   '@sindresorhus/merge-streams@2.3.0': {}
 
   '@sindresorhus/merge-streams@4.0.0': {}
-
-  '@tsconfig/node22@22.0.0': {}
-
-  '@tsconfig/strictest@2.0.5': {}
 
   '@tybys/wasm-util@0.10.4':
     dependencies:

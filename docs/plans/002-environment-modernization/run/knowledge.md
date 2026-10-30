@@ -30,3 +30,5 @@
 - T50 принят:134правила,TS7,ESLint удалён. Process.exit прямой/computed/destructure ловится,alias объекта не ловится; это измеренный предел синтаксического правила. → ../evidence/toolchain-compatibility.md
 
 - T60 принят V7 на Node24.22.2: формат механический,идемпотентный; README code fences сохранены,планы/evidence исключены; старые2lint warnings остались. → journal/T60.accept-1.md
+
+- T70 принят V8: check немутирующий и передаёт ошибки5этапов; Knip diagnostics подтверждены. Прежний jitter-test test/index.test.ts:313 нестабилен (delaysDiffAvg<10), воспроизведён раз в дополнительных пробах; этап3, не менять критерий/threshold в миграции окружения. → journal/T70.accept-1.md

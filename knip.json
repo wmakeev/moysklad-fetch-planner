@@ -1,0 +1,18 @@
+{
+  "$schema": "https://unpkg.com/knip@6/schema.json",
+  "entry": [
+    "src/index.ts",
+    "test/index.test.ts",
+    "test/stress.test.ts",
+    "test/stress.worker.ts",
+    "samples/batchStat.ts",
+    "samples/demo.ts",
+    "samples/wait-for-request-slot-1.ts",
+    "samples/wait-for-request-slot-2.ts",
+    "scripts/check-coverage.mjs"
+  ],
+  "project": ["src/**/*.ts", "test/**/*.ts", "samples/**/*.ts", "scripts/**/*.{js,mjs,cjs,ts}"],
+  "includeEntryExports": false,
+  "ignoreDependencies": ["dotenv"],
+  "ignoreBinaries": ["report"]
+}

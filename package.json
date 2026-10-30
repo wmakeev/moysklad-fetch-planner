@@ -38,8 +38,10 @@
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "build:test": "rm -rf __temp/test-build/ && tsc -p tsconfig.test.json",
     "lint:fix": "pnpm run lint --fix",
-    "format": "oxfmt --write \"src/**/*.ts\" \"test/**/*.ts\" \"samples/**/*.ts\" \"scripts/**/*.mjs\" package.json tsconfig.json tsconfig.prod.json tsconfig.test.json .oxlintrc.json .oxfmtrc.json pnpm-workspace.yaml README.md",
-    "format:check": "oxfmt --check \"src/**/*.ts\" \"test/**/*.ts\" \"samples/**/*.ts\" \"scripts/**/*.mjs\" package.json tsconfig.json tsconfig.prod.json tsconfig.test.json .oxlintrc.json .oxfmtrc.json pnpm-workspace.yaml README.md"
+    "format": "oxfmt --write \"src/**/*.ts\" \"test/**/*.ts\" \"samples/**/*.ts\" \"scripts/**/*.mjs\" package.json knip.json tsconfig.json tsconfig.prod.json tsconfig.test.json .oxlintrc.json .oxfmtrc.json pnpm-workspace.yaml README.md",
+    "format:check": "oxfmt --check \"src/**/*.ts\" \"test/**/*.ts\" \"samples/**/*.ts\" \"scripts/**/*.mjs\" package.json knip.json tsconfig.json tsconfig.prod.json tsconfig.test.json .oxlintrc.json .oxfmtrc.json pnpm-workspace.yaml README.md",
+    "knip": "knip",
+    "check": "pnpm run typecheck && pnpm run lint && pnpm run format:check && pnpm run knip && pnpm run test"
   },
   "engines": {
     "node": ">=24"
@@ -61,8 +63,6 @@
   },
   "license": "MIT",
   "devDependencies": {
-    "@tsconfig/node22": "22.0.0",
-    "@tsconfig/strictest": "2.0.5",
     "@types/highland": "2.13.0",
     "@types/node": "22.20.5",
     "@wmakeev/highland-tools": "3.1.0",
