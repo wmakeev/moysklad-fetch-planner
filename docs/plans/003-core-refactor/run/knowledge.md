@@ -12,6 +12,8 @@
 
 - T20 принята: pacing и response-policy чистые; D07 исправлен, формула и defaults сохранены. Long timer chunks ещё T40, lifecycle ещё T30 → journal/T20.accept-1.md.
 
+- T30 принята: terminal lifecycle и observer exceptions проверены, red/green D01–D04 подтверждены; D01 фактически устранён уже T20 → journal/T30.accept-1.md, T30.з1.
+
 ## План и требования: расхождения
 
 - Нет.

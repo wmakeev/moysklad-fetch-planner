@@ -43,6 +43,7 @@ type ResponseType = ReturnType<typeof parseResponsePolicy>['responseType']
  * Параметры http запроса (Action) для отправки в очередь планировщика
  */
 interface FetchAction {
+  state: 'queued' | 'running' | 'terminal'
   actionId: number
   url: RequestInfo
   options?: RequestInit | undefined
@@ -682,114 +683,128 @@ export class FetchPlanner {
     )
   }
 
-  /**
-   * Запускает обработку очередного запроса из очереди запросов
-   */
+  /** The sole terminal transition; a terminal action can never re-enter the queue. */
+  private settleAction(action: FetchAction, result: Response | Error) {
+    if (action.state === 'terminal') return false
+    action.state = 'terminal'
+    if (result instanceof Error) action.reject(result)
+    else action.resolve(result)
+    return true
+  }
+
+  private warnObserverFailure() {
+    try {
+      process.emitWarning('FetchPlanner observer failed')
+    } catch {
+      // A diagnostic must never replace the original action error.
+    }
+  }
+
+  /** Ownership seam for T60: never await cleanup or touch a delivered response. */
+  private discardResponse(response: Response) {
+    try {
+      void response.body?.cancel().catch(() => {
+        // Rejected cleanup must not escape into the scheduler.
+      })
+    } catch {
+      // Cleanup is best effort, including synchronous body/cancel failures.
+    }
+  }
+
+  /** Starts one attempt; only its completion releases the transport slot. */
   private processAction() {
     this.reviewParallelLimitCorrection()
-
-    // наличие сообщений в очереди проверяется в shouldProcessActions
     const action = this.actionsQueue.shift()
-    if (action === undefined) {
-      throw new Error('Внутренняя ошибка FetchPlanner - очередь пуста')
+    if (action?.state !== 'queued') {
+      throw new Error('Внутренняя ошибка FetchPlanner - очередь пуста или action завершён')
     }
-
+    action.state = 'running'
     this.curInflightRequestsCount++
-
     const requestId = this.getNewRequestId()
     const requestStartTime = Date.now()
-    let retryAfterMs: number | null = null
+    this.lastRequestStartTime = requestStartTime
+    const metadata = {
+      actionId: action.actionId,
+      url: action.url,
+      method: action.options?.method,
+      requestId,
+      startTime: requestStartTime
+    }
+
+    const fail = (error: unknown) => {
+      const original = error instanceof Error ? error : new Error('Unknown error', { cause: error })
+      if (!this.settleAction(action, original)) return
+      try {
+        this.options.eventHandler?.emit(
+          'fetch-error',
+          { ...metadata, error: original, errorTime: Date.now() },
+          this
+        )
+      } catch {
+        this.warnObserverFailure()
+      }
+    }
 
     const fetchApi = this.fetchApi
-
     debug?.('processAction', `requestStartTime - ${requestStartTime}`)
-    this.lastRequestStartTime = requestStartTime
+    const run = async () => {
+      let retryAfterMs = 0
+      let response: Response | undefined
+      try {
+        // Call transport before request observers, preserving successful event order.
+        const transport = fetchApi(action.url, action.options)
+        try {
+          this.options.eventHandler?.emit('request', metadata, this)
+        } catch (error) {
+          fail(error)
+        }
+        // Even a terminal action retains its inflight slot until transport settles.
+        response = await transport
+        if (action.state === 'terminal') return
 
-    fetchApi(action.url, action.options)
-      .then(resp => {
         const requestEndTime = Date.now()
-
-        const policy = parseResponsePolicy(resp.status, resp.headers)
+        const policy = parseResponsePolicy(response.status, response.headers)
         if (policy.retryTimeInterval !== null) this.retryTimeInterval = policy.retryTimeInterval
         if (policy.limit !== null) this.rateLimit = policy.limit
         if (policy.remaining !== null) this.rateLimitRemaining = policy.remaining
-        const responseType = policy.responseType
 
-        if (responseType === 'OK') {
-          action.resolve(resp)
+        // Observer failure is terminal, so emit before either delivery or retry.
+        this.options.eventHandler?.emit(
+          'response',
+          { ...metadata, endTime: requestEndTime, responseType: policy.responseType },
+          this
+        )
+        if (policy.responseType === 'OK') {
+          this.settleAction(action, response)
+          response = undefined // Ownership passes to the consumer unchanged.
         } else {
-          // Возвращаем запрос в начало очереди для повтора.
-          this.actionsQueue.unshift(action)
-          if (responseType === 'PARALLEL_LIMIT_OVERFLOW') {
+          if (policy.responseType === 'PARALLEL_LIMIT_OVERFLOW') {
             this.reduceParallelLimit()
             this.lastParallelLimitOverflowTime = requestStartTime
             this.parallelLimitCorrectionTime = requestEndTime
           } else {
-            retryAfterMs = policy.retryAfterMs
+            retryAfterMs = policy.retryAfterMs ?? 0
           }
+          action.state = 'queued'
+          this.actionsQueue.unshift(action)
         }
-
-        this.options.eventHandler?.emit(
-          'response',
-          {
-            actionId: action.actionId,
-            url: action.url,
-            method: action.options?.method,
-            requestId,
-            startTime: requestStartTime,
-            endTime: requestEndTime,
-            responseType
-          },
-          this
-        )
-      })
-
-      .catch((err: unknown) => {
-        const errorTime = Date.now()
-
-        const err_ = err instanceof Error ? err : new Error('Unknown error', { cause: err })
-
-        action.reject(err_)
-
-        this.options.eventHandler?.emit(
-          'fetch-error',
-          {
-            actionId: action.actionId,
-            url: action.url,
-            method: action.options?.method,
-            requestId,
-            startTime: requestStartTime,
-            error: err_,
-            errorTime
-          },
-          this
-        )
-      })
-
-      .finally(() => {
-        // TIPS Фактически запрос еще не выполнен (мы получили только заголовки)
-        // Нужно последить за тем будут ли часто приходить ошибки превышения
-        // лимита параллельных запросов
+      } catch (error) {
+        fail(error)
+      } finally {
+        if (response !== undefined) this.discardResponse(response)
+        // Preserve the existing getter timing for the consumer settlement job.
+        await Promise.resolve()
         this.curInflightRequestsCount--
-
         this.checkFreeRequestSlotTrigger()
+        this.planProcessAction(retryAfterMs)
+      }
+    }
 
-        this.planProcessAction(retryAfterMs ?? 0)
-      })
-
+    // Contain even failures in internal completion/diagnostic hooks.
+    void run().catch(() => {
+      this.warnObserverFailure()
+    })
     this.planProcessAction()
-
-    this.options.eventHandler?.emit(
-      'request',
-      {
-        actionId: action.actionId,
-        url: action.url,
-        method: action.options?.method,
-        requestId,
-        startTime: requestStartTime
-      },
-      this
-    )
   }
 
   private fetch(url: RequestInfo, init?: RequestInit) {
@@ -797,6 +812,7 @@ export class FetchPlanner {
       const actionId = this.getNewActionId()
 
       this.actionsQueue.push({
+        state: 'queued',
         actionId,
         url,
         options: init,

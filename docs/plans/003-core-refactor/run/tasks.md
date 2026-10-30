@@ -37,8 +37,8 @@
 - Файлы: src/index.ts, src/action.ts(если нужен), test/lifecycle.test.ts, test/helpers/child.mjs.
 - Риск: high · пишет в боевую систему: нет · приёмка: отдельно · объём: полный
 - Вес: 3
-- Исполнитель: ступень 4 · gpt-6.1-sol (high) · не запущен
-- Верификатор: ступень 4 · gpt-6.1-sol (high) · свежий контекст; та же модель из-за недоступности Claude
+- Исполнитель T30/1: ступень 4 · gpt-6.1-sol (high) · t3 `node:delegated-task:command%3Amcp%3A2c6a6d24-3803-4f36-89a0-5f5bf3bedaaf%3Adelegate-task%3A003-T30-1-implementation` · done; бриф /tmp/orchestrate-fetch-planner-003/T30-1/brief.md
+- Верификатор T30/1: ступень 4 · gpt-6.1-sol (high) · t3 `node:delegated-task:command%3Amcp%3A2c6a6d24-3803-4f36-89a0-5f5bf3bedaaf%3Adelegate-task%3A003-T30-1-verifier` · V3 отдельно · passed; отчёт journal/T30.accept-1.md; свежий контекст, та же модель из-за недоступности Claude
 - Журнал: journal/T30.md
 
 ## T40 — общий serverNotBefore и единственный pump
