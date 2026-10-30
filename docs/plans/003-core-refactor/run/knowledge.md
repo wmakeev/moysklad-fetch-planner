@@ -20,6 +20,8 @@
 
 - T60 принята: полная ownership/cleanup матрица, strict/loopback и естественный exit проверены; runtime cleanup уже реализован T30, T60 закрепляет D08 регрессиями → journal/T60.accept-1.md.
 
+- T70 принята: фасад index и единственный scheduler owner в planner; все executable modules и wrapFetch включены в gate,32 независимые negative LCOV пробы отвергнуты → journal/T70.accept-1.md.
+
 ## План и требования: расхождения
 
 - Нет.

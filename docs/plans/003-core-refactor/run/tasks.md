@@ -85,8 +85,8 @@
 - Файлы: src/index.ts, src/planner.ts, src/pacing.ts, src/response-policy.ts, src/runtime.ts, scripts/check-coverage.mjs, test/index.test.ts, test/compatibility.test.ts; knip.json при необходимости обновить entry для внутренних модулей без исключения их из анализа.
 - Риск: high · пишет в боевую систему: нет · приёмка: отдельно · объём: полный
 - Вес: 3
-- Исполнитель: ступень 4 · gpt-6.1-sol (high) · не запущен
-- Верификатор: ступень 4 · gpt-6.1-sol (high) · свежий контекст; та же модель из-за недоступности Claude
+- Исполнитель T70/1: ступень 4 · gpt-6.1-sol (high) · t3 `node:delegated-task:command%3Amcp%3A2c6a6d24-3803-4f36-89a0-5f5bf3bedaaf%3Adelegate-task%3A003-T70-1-implementation` · done; бриф /tmp/orchestrate-fetch-planner-003/T70-1/brief.md
+- Верификатор T70/1: ступень 4 · gpt-6.1-sol (high) · t3 `node:delegated-task:command%3Amcp%3A2c6a6d24-3803-4f36-89a0-5f5bf3bedaaf%3Adelegate-task%3A003-T70-1-verifier` · V7 отдельно · passed; отчёт journal/T70.accept-1.md; свежий контекст, та же модель из-за недоступности Claude
 - Журнал: journal/T70.md
 
 ## T80 — исследовать совместимый Fetch type contract

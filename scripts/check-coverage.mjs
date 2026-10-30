@@ -20,21 +20,28 @@ const records = report
     return { file, lines }
   })
 
+// Every executable source module is mandatory. There are currently no type-only files.
+const executableModules = ['index', 'planner', 'pacing', 'response-policy', 'runtime']
+for (const name of executableModules) {
+  const file = path.join('src', `${name}.ts`)
+  const record = records.find(item => item.file === file)
+  assert.ok(record, `LCOV must contain ${file}; an incomplete or empty report is invalid`)
+  assert.ok(
+    record.lines.some(line => /^DA:\d+,[1-9]\d*(?:,.*)?$/.test(line)),
+    `LCOV ${file} must have executed lines`
+  )
+  assert.ok(
+    record.lines.some(line => /^FNDA:[1-9]\d*,.+$/.test(line)),
+    `LCOV ${file} must have executed functions`
+  )
+}
 const index = records.find(record => record.file === path.join('src', 'index.ts'))
-assert.ok(index, 'LCOV must contain src/index.ts; an empty report is invalid')
-assert.ok(
-  index.lines.some(line => /^DA:\d+,[1-9]\d*(?:,.*)?$/.test(line)),
-  'LCOV src/index.ts must have executed lines'
-)
-assert.ok(
-  index.lines.some(line => /^FNDA:[1-9]\d*,.+$/.test(line)),
-  'LCOV src/index.ts must have executed functions'
-)
+assert.ok(index)
 assert.ok(
   index.lines.some(line => /^FNDA:[1-9]\d*,wrapFetch$/.test(line)),
   'LCOV src/index.ts must include executed wrapFetch'
 )
 
 console.log(
-  'LCOV verified: original src/index.ts, executed lines/functions/wrapFetch, no test/samples'
+  `LCOV verified: original src modules (${executableModules.join(', ')}), executed lines/functions/wrapFetch, no test/samples`
 )

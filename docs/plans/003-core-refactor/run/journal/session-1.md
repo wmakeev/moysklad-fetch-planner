@@ -21,3 +21,6 @@
 - T50 commit по назначенным путям, состав проверен. T60/1 запущен high, последовательное выполнение продолжается.
 - T60/1 done, область проверена status/diff-stat; V6 проверяет ownership матрицу и общий child helper слепо в allowlist копии.
 - V6 passed:96 tests,34 strict и37 независимых проб, historical red cancel0→cancel1. Поведенческая часть T10–T60 принята без незакрытых пунктов.
+- T60 commit по назначенным путям, состав проверен. T70/1 high запущен один, без соседних исполнителей.
+- T70/1 done, область сверена status/diff-stat. V7 принимает слепо архитектуру, фасад и отрицательные coverage пробы полным offline объёмом.
+- V7 passed:98tests, baseline96 и собственные before/after пробы,32 negative LCOV; state owner один. T80 является исследовательским gate дляT90.
