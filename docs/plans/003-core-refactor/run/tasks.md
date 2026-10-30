@@ -46,11 +46,11 @@
 - Вид: правка кода.
 - Источник: ../01-plan.md, T40; F03,F12; D05; A3.
 - Критерий: `pnpm test`: red/green shared-pause/enqueue-during-pause на управляемом времени; старты отсутствуют до400мс после receipt429 и разрешены на границе. Соседний success/finally, enqueue, повторный pump, late headers и callback enqueue не сокращают deadline; два429 задают максимум новых абсолютных дедлайнов. Проверить скачок wall clock вперёд/назад без сокращения монотонной паузы, преобразование getNextRequestTime и длинные deadline2147483647/2147483648мс: после первого bounded chunk старт запрещён, разрешён лишь после остатка; TimerOverflowWarning отсутствует. Один активный scheduling timeout; устаревший callback не запускает action; пустая очередь не удерживает таймер. Pacing по-прежнему влияет вместе с server boundary; FIFO retry и публичный getNextRequestTime сохраняют смысл Unix timestamp/0, интервал внутри монотонный. Не сохранять старый timeout, если новая пауза позже.
-- Файлы: src/index.ts, src/runtime.ts, test/scheduler.test.ts.
+- Файлы: src/index.ts, src/runtime.ts, test/scheduler.test.ts; package.json только test:unit, test/helpers/runtime.ts и минимальная адаптация трёх старых тестов test/index.test.ts к monotonic clock.
 - Риск: high · пишет в боевую систему: нет · приёмка: отдельно · объём: полный
 - Вес: 3
-- Исполнитель: ступень 4 · gpt-6.1-sol (high) · не запущен
-- Верификатор: ступень 4 · gpt-6.1-sol (high) · свежий контекст; та же модель из-за недоступности Claude
+- Исполнитель T40/1: ступень 4 · gpt-6.1-sol (high) · t3 `node:delegated-task:command%3Amcp%3A2c6a6d24-3803-4f36-89a0-5f5bf3bedaaf%3Adelegate-task%3A003-T40-1-implementation` · done; бриф /tmp/orchestrate-fetch-planner-003/T40-1/brief.md
+- Верификатор T40/1: ступень 4 · gpt-6.1-sol (high) · t3 `node:delegated-task:command%3Amcp%3A2c6a6d24-3803-4f36-89a0-5f5bf3bedaaf%3Adelegate-task%3A003-T40-1-verifier` · V4 отдельно · passed; отчёт journal/T40.accept-1.md; свежий контекст, та же модель из-за недоступности Claude
 - Журнал: journal/T40.md
 
 ## T50 — ограниченная correction и восстановление

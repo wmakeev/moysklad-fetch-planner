@@ -1,6 +1,7 @@
 /* oxlint-disable no-var */
 
 import assert from 'node:assert'
+import { MAX_TIMEOUT_MS, monotonicNow } from './runtime.js'
 import {
   calculateRequestDelay,
   createAttenuationSteps,
@@ -408,7 +409,7 @@ export class FetchPlanner {
    * Время на которое запланирован следующий запрос.
    * Может изменяться в процессе обработки текущий запросов.
    */
-  private nextRequestTime = 0
+  private serverNotBefore = 0
 
   /**
    * Конструктор планировщика запросов
@@ -526,7 +527,7 @@ export class FetchPlanner {
         limit: this.rateLimit,
         remaining: this.rateLimitRemaining,
         retryTimeInterval: this.retryTimeInterval,
-        elapsed: Date.now() - this.lastRequestStartTime
+        elapsed: monotonicNow() - this.lastRequestStartTime
       },
       this.options,
       this.attenuationFnSteps,
@@ -535,54 +536,40 @@ export class FetchPlanner {
   }
 
   /**
-   * Планирует обработку запроса из очереди в будущем (тротлинг)
-   *
-   * @param implicitDelayMs Явное указание времени на которое нужно отложить обработку
-   * запроса
+   * Единственный вход перепланирования: общий серверный deadline и адаптивный темп.
    */
-  private planProcessAction(implicitDelayMs = 0) {
-    if (this.actionsQueue.length === 0) {
-      debug?.('planProcessAction', 'canceled (empty queue)')
-      return
-    }
-
-    const calculatedDelayMs = this.calculateRequestDelayTime()
-
-    const delayMs = Math.max(implicitDelayMs, calculatedDelayMs)
-
-    const planTime = requestDeadline(Date.now(), delayMs)
-
-    debug?.('planProcessAction', `planned after ${delayMs}`)
-
-    this.nextRequestTime = planTime
-
+  private pump() {
     if (this.processActionPlanedTimeout) {
       clearTimeout(this.processActionPlanedTimeout.timeout)
+      this.processActionPlanedTimeout = null
     }
+    if (!this.shouldProcessAction()) return
 
-    const timeout = setTimeout(() => {
-      if (this.processActionPlanedTimeout?.timeout === timeout) {
+    const now = monotonicNow()
+    const delayMs = Math.max(0, this.serverNotBefore - now, this.calculateRequestDelayTime())
+    const deadline = requestDeadline(now, delayMs)
+    this.scheduleWake(deadline, delayMs)
+  }
+
+  /** One owned wake, including bounded chunks of a longer absolute deadline. */
+  private scheduleWake(deadline: number, delayMs: number) {
+    const timeout = setTimeout(
+      () => {
+        // A canceled callback may already be queued: ownership must be checked first.
+        if (this.processActionPlanedTimeout?.timeout !== timeout) return
         this.processActionPlanedTimeout = null
-      }
-
-      if (this.nextRequestTime === planTime) {
-        this.nextRequestTime = 0
-      }
-
-      if (!this.shouldProcessAction()) {
-        debug?.('planProcessAction', 'processAction skipped')
-        return
-      }
-
-      this.lastRequestDelay = delayMs
-
-      this.processAction()
-    }, delayMs)
-
-    this.processActionPlanedTimeout = {
-      time: planTime,
-      timeout
-    }
+        if (!this.shouldProcessAction()) return
+        const remaining = Math.max(deadline, this.serverNotBefore) - monotonicNow()
+        if (remaining > 0) {
+          this.scheduleWake(Math.max(deadline, this.serverNotBefore), delayMs)
+          return
+        }
+        this.lastRequestDelay = delayMs
+        this.processAction()
+      },
+      Math.min(MAX_TIMEOUT_MS, Math.max(0, deadline - monotonicNow()))
+    )
+    this.processActionPlanedTimeout = { time: deadline, timeout }
   }
 
   /**
@@ -623,7 +610,7 @@ export class FetchPlanner {
    * причине превышения лимита.
    */
   private reviewParallelLimitCorrection() {
-    const now = Date.now()
+    const now = monotonicNow()
 
     const periodStart = safeTime(
       now -
@@ -722,7 +709,8 @@ export class FetchPlanner {
     this.curInflightRequestsCount++
     const requestId = this.getNewRequestId()
     const requestStartTime = Date.now()
-    this.lastRequestStartTime = requestStartTime
+    const requestStartMonotonic = monotonicNow()
+    this.lastRequestStartTime = requestStartMonotonic
     const metadata = {
       actionId: action.actionId,
       url: action.url,
@@ -748,7 +736,6 @@ export class FetchPlanner {
     const fetchApi = this.fetchApi
     debug?.('processAction', `requestStartTime - ${requestStartTime}`)
     const run = async () => {
-      let retryAfterMs = 0
       let response: Response | undefined
       try {
         // Call transport before request observers, preserving successful event order.
@@ -763,10 +750,18 @@ export class FetchPlanner {
         if (action.state === 'terminal') return
 
         const requestEndTime = Date.now()
+        const receiptTime = monotonicNow()
         const policy = parseResponsePolicy(response.status, response.headers)
         if (policy.retryTimeInterval !== null) this.retryTimeInterval = policy.retryTimeInterval
         if (policy.limit !== null) this.rateLimit = policy.limit
         if (policy.remaining !== null) this.rateLimitRemaining = policy.remaining
+
+        if (policy.retryAfterMs !== null) {
+          this.serverNotBefore = Math.max(
+            this.serverNotBefore,
+            requestDeadline(receiptTime, policy.retryAfterMs)
+          )
+        }
 
         // Observer failure is terminal, so emit before either delivery or retry.
         this.options.eventHandler?.emit(
@@ -780,10 +775,8 @@ export class FetchPlanner {
         } else {
           if (policy.responseType === 'PARALLEL_LIMIT_OVERFLOW') {
             this.reduceParallelLimit()
-            this.lastParallelLimitOverflowTime = requestStartTime
-            this.parallelLimitCorrectionTime = requestEndTime
-          } else {
-            retryAfterMs = policy.retryAfterMs ?? 0
+            this.lastParallelLimitOverflowTime = requestStartMonotonic
+            this.parallelLimitCorrectionTime = receiptTime
           }
           action.state = 'queued'
           this.actionsQueue.unshift(action)
@@ -796,7 +789,7 @@ export class FetchPlanner {
         await Promise.resolve()
         this.curInflightRequestsCount--
         this.checkFreeRequestSlotTrigger()
-        this.planProcessAction(retryAfterMs)
+        this.pump()
       }
     }
 
@@ -804,7 +797,7 @@ export class FetchPlanner {
     void run().catch(() => {
       this.warnObserverFailure()
     })
-    this.planProcessAction()
+    this.pump()
   }
 
   private fetch(url: RequestInfo, init?: RequestInit) {
@@ -821,7 +814,7 @@ export class FetchPlanner {
       })
     })
 
-    this.planProcessAction()
+    this.pump()
 
     return fetchPromise as Promise<Response>
   }
@@ -920,7 +913,10 @@ export class FetchPlanner {
    * или `0`, если нет запланированных запросов.
    */
   getNextRequestTime() {
-    return this.nextRequestTime
+    const deadline = this.processActionPlanedTimeout?.time
+    return deadline === undefined
+      ? 0
+      : requestDeadline(Date.now(), Math.max(0, deadline - monotonicNow()))
   }
 }
 

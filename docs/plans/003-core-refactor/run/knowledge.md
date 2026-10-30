@@ -14,6 +14,8 @@
 
 - T30 принята: terminal lifecycle и observer exceptions проверены, red/green D01–D04 подтверждены; D01 фактически устранён уже T20 → journal/T30.accept-1.md, T30.з1.
 
+- T40 принята: единый pump и monotonic deadline, независимые часы и bounded timer chunks проверены; D05 red/green подтверждён. Correction/recovery остаются T50 → journal/T40.accept-1.md.
+
 ## План и требования: расхождения
 
 - Нет.

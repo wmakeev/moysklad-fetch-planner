@@ -4,6 +4,7 @@ import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
 import { mock, test } from 'node:test'
 import asyncTimers from 'node:timers/promises'
+import { createRuntime } from './helpers/runtime.js'
 import { fetch, MockAgent, setGlobalDispatcher } from 'undici'
 import {
   FetchPlanner,
@@ -378,8 +379,8 @@ test('FetchPlanner (waitForRequestSlot)', async () => {
   ])
 })
 
-test('FetchPlanner (parallel limit and throttling)', async () => {
-  mock.timers.enable({ apis: ['setTimeout'] })
+test('FetchPlanner (parallel limit and throttling)', async t => {
+  const runtime = createRuntime(t)
 
   const fetchPlanner = new FetchPlanner(fetch, {
     maxParallelLimit: 2,
@@ -410,7 +411,7 @@ test('FetchPlanner (parallel limit and throttling)', async () => {
 
   // Первые запросы начинают обрабатываться через 0 мс таймаута, т.к.
   // без получения актуального RateLimit задержки нет.
-  mock.timers.tick(0)
+  runtime.tick(0)
 
   // Т.к. `maxParallelLimit=2`, то для обработки из очереди сразу достаются
   // два запроса. В очереди остается только 1.
@@ -458,7 +459,7 @@ test('FetchPlanner (parallel limit and throttling)', async () => {
   assert.ok(delay <= 700)
 
   // .. ожидаем 200мс
-  mock.timers.tick(710)
+  runtime.tick(710)
 
   // Третий запрос пошёл в обработку
   assert.equal(fetchPlanner.getActionsQueueLength(), 0)
@@ -477,8 +478,8 @@ test('FetchPlanner (parallel limit and throttling)', async () => {
   assert.equal(fetchPlanner.getNextRequestTime(), 0)
 })
 
-test('FetchPlanner (retry 429 TooManyRequests error)', async () => {
-  mock.timers.enable({ apis: ['setTimeout'] })
+test('FetchPlanner (retry 429 TooManyRequests error)', async t => {
+  const runtime = createRuntime(t)
 
   const fetchPlanner = new FetchPlanner(fetch, {
     maxParallelLimit: 2,
@@ -497,7 +498,7 @@ test('FetchPlanner (retry 429 TooManyRequests error)', async () => {
   assert.equal(fetchPlanner.getActionsQueueLength(), 1)
 
   // Нет задержки для первого запроса
-  mock.timers.tick(0)
+  runtime.tick(0)
 
   // Запрос ушел из очереди в обработку
   assert.equal(fetchPlanner.getActionsQueueLength(), 0)
@@ -517,12 +518,12 @@ test('FetchPlanner (retry 429 TooManyRequests error)', async () => {
   assert.ok(delay - 900 <= 100)
 
   // Ожидаем половину от времени задержки (запрос не должен быть отправлен)
-  mock.timers.tick(500)
+  runtime.tick(500)
 
   interceptHttpWithRateLimit('GET', 'foo/1', 10, 1, 'r1')
 
   // Ожидаем вторую половину времени задержки
-  mock.timers.tick(510)
+  runtime.tick(510)
 
   // Запрос отправляется повторно
   assert.equal(fetchPlanner.getCurInflightRequestsCount(), 1)
@@ -532,8 +533,8 @@ test('FetchPlanner (retry 429 TooManyRequests error)', async () => {
   assert.equal((result1 as { data: string }).data, 'r1')
 })
 
-test('FetchPlanner (retry 429 parallel limit overflow error)', async () => {
-  mock.timers.enable({ apis: ['setTimeout'] })
+test('FetchPlanner (retry 429 parallel limit overflow error)', async t => {
+  const runtime = createRuntime(t)
 
   const fetchPlanner = new FetchPlanner(fetch, {
     maxParallelLimit: 3,
@@ -555,7 +556,7 @@ test('FetchPlanner (retry 429 parallel limit overflow error)', async () => {
   const resp3Promise = wrappedFetch('http://example.com/foo/3')
 
   // Нет задержки для первых запросов
-  mock.timers.tick(0)
+  runtime.tick(0)
 
   // Запросы ушли из очереди в обработку
   assert.equal(fetchPlanner.getCurInflightRequestsCount(), 3)
@@ -577,7 +578,7 @@ test('FetchPlanner (retry 429 parallel limit overflow error)', async () => {
   interceptHttpWithRateLimit('GET', 'foo/3', 10, 9, 'r3')
 
   // Задержка по RateLimit
-  mock.timers.tick(210)
+  runtime.tick(210)
 
   // Запрос отправляется повторно
   assert.equal(fetchPlanner.getCurInflightRequestsCount(), 1)
@@ -585,13 +586,12 @@ test('FetchPlanner (retry 429 parallel limit overflow error)', async () => {
   const result3 = await (await resp3Promise).json()
   assert.equal((result3 as { data: string }).data, 'r3')
 
-  mock.timers.reset()
-
   // Ожидаем
-  await asyncTimers.setTimeout(700)
+  await runtime.advance(700)
 
   interceptHttpWithRateLimit('GET', 'foo/4', 10, 9, 'r4')
   const resp4Promise = wrappedFetch('http://example.com/foo/4')
+  runtime.tick(0)
   const result4 = await (await resp4Promise).json()
   assert.equal((result4 as { data: string }).data, 'r4')
 
@@ -599,10 +599,11 @@ test('FetchPlanner (retry 429 parallel limit overflow error)', async () => {
   assert.equal(fetchPlanner.getParallelLimitCorrection(), -1)
 
   // Ожидаем еще
-  await asyncTimers.setTimeout(300)
+  await runtime.advance(300)
 
   interceptHttpWithRateLimit('GET', 'foo/5', 10, 9, 'r5')
   const resp5Promise = wrappedFetch('http://example.com/foo/5')
+  runtime.tick(0)
   const result5 = await (await resp5Promise).json()
   assert.equal((result5 as { data: string }).data, 'r5')
 
