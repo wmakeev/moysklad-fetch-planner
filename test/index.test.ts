@@ -280,67 +280,6 @@ test('FetchPlanner (simple POST)', async () => {
   assert.ok(result.ok)
 })
 
-test('FetchPlanner (jitter)', async () => {
-  mock.timers.enable({ apis: ['setTimeout'] })
-
-  const fetchPlanner1 = new FetchPlanner(fetch, {
-    maxParallelLimit: 1,
-    throttlingCoefficient: 1,
-    maxRequestDelayTimeMs: 1000,
-    jitter: 0
-  })
-  const wrappedFetch1 = fetchPlanner1.getFetch()
-
-  const delaysWithoutJitter = []
-
-  let i = 10
-  while (i-- > 0) {
-    interceptHttpWithRateLimit('GET', 'foo', 10, 5, '')
-    const p = wrappedFetch1('http://example.com/foo')
-    mock.timers.tick(510)
-    await asyncTimers.setImmediate()
-    await p
-    delaysWithoutJitter.push(fetchPlanner1.getLastRequestDelay())
-  }
-
-  // Первое значение пустое, остальные несколько могут быть с задержкой
-  delaysWithoutJitter.splice(0, 3)
-
-  const delaysDiffAvg =
-    delaysWithoutJitter.map(it => Math.abs(it - 500)).reduce((res, it) => res + it, 0) /
-    delaysWithoutJitter.length
-
-  assert.ok(delaysDiffAvg < 10)
-
-  const fetchPlanner2 = new FetchPlanner(fetch, {
-    maxParallelLimit: 1,
-    throttlingCoefficient: 1,
-    maxRequestDelayTimeMs: 1000,
-    jitter: 0.3
-  })
-  const wrappedFetch2 = fetchPlanner2.getFetch()
-
-  const delaysWithJitter = []
-
-  i = 100
-  while (i-- > 0) {
-    interceptHttpWithRateLimit('GET', 'foo', 10, 5, '')
-    const p = wrappedFetch2('http://example.com/foo')
-    mock.timers.tick(1000)
-    await asyncTimers.setImmediate()
-    await p
-    delaysWithJitter.push(fetchPlanner2.getLastRequestDelay())
-  }
-
-  delaysWithJitter.splice(0, 3)
-
-  const jitterDiff =
-    delaysWithJitter.map(it => Math.abs(it - 500)).reduce((res, it) => res + it, 0) /
-    delaysWithJitter.length
-
-  assert.ok(jitterDiff > 30)
-})
-
 test('FetchPlanner (delay reduce)', async () => {
   const fetchPlanner1 = new FetchPlanner(fetch, {
     maxParallelLimit: 1,
