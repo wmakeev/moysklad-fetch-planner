@@ -26,6 +26,8 @@
 
 - T90 принята: реальный tarballTS5/TS7×bare/undici, F07red/green, generic/eventboundary контракты проверены; productionJS прежних5модулей идентичен, fetch-types толькоtype-only → journal/T90.accept-1.md.
 
+- T100 принята: native/undici runtime, metadata Request/init и replay границы проверены; one-shot ошибка транспорта не выдаётся за успешный replay → journal/T100.accept-1.md.
+
 ## План и требования: расхождения
 
 - Нет.

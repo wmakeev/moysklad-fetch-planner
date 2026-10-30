@@ -128,8 +128,8 @@
 - Файлы: test/fetch-contract.test.ts, test/package/fixtures/runtime.mjs, src/index.ts/src/planner.ts только нормализация metadata.
 - Риск: normal · пишет в боевую систему: нет · приёмка: отдельно · объём: полный
 - Вес: 2
-- Исполнитель: ступень 3 · gpt-6.1-sol (medium) · не запущен
-- Верификатор: ступень 3 · gpt-6.1-sol (medium) · свежий контекст; та же модель из-за недоступности Claude
+- Исполнитель T100/1: ступень 3 · gpt-6.1-sol (medium) · t3 `node:delegated-task:command%3Amcp%3A2c6a6d24-3803-4f36-89a0-5f5bf3bedaaf%3Adelegate-task%3A003-T100-1-implementation` · done; бриф /tmp/orchestrate-fetch-planner-003/T100-1/brief.md
+- Верификатор T100/1: ступень 3 · gpt-6.1-sol (medium) · t3 `node:delegated-task:command%3Amcp%3A2c6a6d24-3803-4f36-89a0-5f5bf3bedaaf%3Adelegate-task%3A003-T100-1-verifier` · V11 отдельно · passed; отчёт journal/T100.accept-1.md; свежий контекст, та же модель из-за недоступности Claude
 - Журнал: journal/T100.md
 
 ## T110 — зафиксировать D12 и публичную совместимость

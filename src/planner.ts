@@ -471,7 +471,9 @@ export class FetchPlanner<F extends Transport = UndiciFetch> {
     const metadata = {
       actionId: action.actionId,
       url: action.url,
-      method: action.options?.method,
+      method:
+        action.options?.method ??
+        (typeof action.url === 'object' && 'method' in action.url ? action.url.method : undefined),
       requestId,
       startTime: requestStartTime
     }

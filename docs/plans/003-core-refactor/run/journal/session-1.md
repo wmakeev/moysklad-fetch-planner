@@ -33,3 +33,6 @@
 - T80 commit по назначенным путям, состав проверен. T90/1 high запущен один; реализация только после принятого event/transport контракта.
 - T90/1 done, область сверена status/diff-stat; интерфейс package runner прочитан для нарезки и allowlist fixtures. V10 проверяет реальный пакет и runtime регрессию в копии.
 - V10 passed: полный package matrix/typecheck/check/coverage, F07redgreen, productionJS не менялся. Точечно прочитано замечание комментарияcoverage, классифицировано косметикой; JSDoc переданT130.
+- T90 commit по назначенным путям, состав проверен. T100/1 medium запущен, runtime матрица только fake/loopback.
+- T100/1 done, область сверена status/diff-stat; V11 проверяет runtime Fetch/metadata/replay и package matrix слепо в своей allowlist копии.
+- V11 passed:105tests, полная package matrix, самостоятельные edge cases и metadata redgreen. Новых предупреждений/ущерба нет.
