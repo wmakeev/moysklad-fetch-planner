@@ -50,3 +50,5 @@
 - V15partial:всеchecks/108tests/package/3Node/sameartifactпрошли, ноpublicJSDocпротиворечитцели. Точечнопрочитанplan.mdиsourceindex:137; названныйранееcommentдолгвозвращёнвT130/2, самоличноограниченныйscopeневажнееисходнойцели.
 - T130/2 done:commentfix, JS/declarationsбезкомментариевидентичныHEAD; V16самостоятельнопроверяетдокументацию иотсутствиеruntime/typeизменений.
 - V16 passed:документы/свежийtarball/normalizedJS/types/108offline проверены. T130повторнопринята, исходныйplanpartialархивированвplan-1.md, не утрачен.
+- T130/2 commit поназначеннымпутям, составпроверен. V17новаясквознаяприёмкафинальногоснимкасfreshartifact/3Node, исходныйpartialсохранён.
+- V17passed:108tests/fullpackage/samefreshartifact3Node/стыковые/negativeLCOV/исправленныйJSDoc. Все14задачзакрыты, передачиразобраны, HANDOFFпереписанбезgitсостояния. Агентов/сторожей/ожиданийнеосталось, внешнееревьюнебылозаказано. Разборпрогонапредлагаетсяотдельно, незапущен.

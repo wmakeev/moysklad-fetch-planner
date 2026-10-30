@@ -34,6 +34,9 @@
 
 - T130 принята повторно: публичный options/ResponseTypeJSDoc согласован сфактическимконтрактом, универсальнаяскоростьнеобещается; свежийtarballисправлен, runtime/typesбезкомментариевнеизменны → journal/T130.accept-2.md.
 
+- T140/2 passed:108tests, packageTS5/TS7×bare/undici, одинfreshartifactнаNode24.0.0/24.22.2/26.13.0, стыки/coverage/JSDocпроверены → journal/plan.md.
+- При закрытииархитектурныефакты сведены вREADME/docs/architecture; типовыеоснования — evidence/fetch-contract; межплановыеуроки иотложенныеполитики — .agents/HANDOFF.md. Частныедоказательства остаютсявжурналах.
+
 ## План и требования: расхождения
 
 - Нет.

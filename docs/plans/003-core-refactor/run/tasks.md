@@ -182,7 +182,12 @@
 - Бриф: /tmp/orchestrate-fetch-planner-003/T140-v1/brief.md.
 - Приёмка поведенческая; отдельный исполнитель не требуется, задача сама является приёмкой.
 
+- Верификатор T140/2: ступень 3 · gpt-6.1-sol (medium) · t3 `node:delegated-task:command%3Amcp%3A2c6a6d24-3803-4f36-89a0-5f5bf3bedaaf%3Adelegate-task%3A003-T140-2-verifier` · V17 сквозная приёмка · passed; отчёт journal/plan.md; прежний partial journal/plan-1.md.
+- Бриф повторной приёмки: /tmp/orchestrate-fetch-planner-003/T140-v2/brief.md.
+
 ## C0 — техническое уплотнение карточек
 
 - Критерий: tasks.md <=30000 байт без утраты вызовов/кругов/taskId/границ; критерии по ссылкам на первичный план.
 - Исполнитель C0/1: ступень 2 · gpt-6.1-sol (low) · t3 `node:delegated-task:command%3Amcp%3A2c6a6d24-3803-4f36-89a0-5f5bf3bedaaf%3Adelegate-task%3A003-C0-1-cleanup` · done; бриф /tmp/orchestrate-fetch-planner-003/C0-1/brief.md.
+
+- Закрытие прогона: все14задач приняты; итоговаяприёмка journal/plan.md, передача .agents/HANDOFF.md.
