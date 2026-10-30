@@ -1,4 +1,4 @@
-/* eslint-disable @typescript-eslint/no-non-null-assertion */
+/* oxlint-disable typescript/no-non-null-assertion */
 
 import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'

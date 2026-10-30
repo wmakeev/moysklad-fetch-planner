@@ -25,3 +25,6 @@
 - T30: prod/test/typecheck разделены, emit src совпал с baseline. resolveJsonModule нужен декларациям Piscina при skipLibCheck=false; это не ослабление strictness. Demo @ts-nocheck остаётся прежним ограничением. → journal/T30.md
 
 - T40: unit/coverage выполняют13тестов; LCOV измеряет реальное выполнение src и отбрасывает пустое/нулевое. Live guard внутри entrypoint до Piscina import; настоящее live не запускалось. Новый scripts/check-coverage.mjs включить в штатный lint в T50. → journal/T40.accept-1.md
+
+- При копировании/хешировании применять allowlist известных входов; .env и другие секретные файлы исключать до open/read даже ради hash. V6 нарушил запрет, вывода значений не было, временная карта удалена. → journal/T50.accept-1.md
+- T50 принят:134правила,TS7,ESLint удалён. Process.exit прямой/computed/destructure ловится,alias объекта не ловится; это измеренный предел синтаксического правила. → ../evidence/toolchain-compatibility.md

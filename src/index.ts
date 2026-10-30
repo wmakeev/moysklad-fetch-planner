@@ -1,7 +1,6 @@
-/* eslint-disable no-var */
+/* oxlint-disable no-var */
 
 import assert from 'node:assert'
-// eslint-disable-next-line n/no-unpublished-import
 import type { RequestInfo, RequestInit, Request, Response } from 'undici'
 
 //#region debug function
@@ -17,7 +16,7 @@ if (typeof DEBUG === 'string' && DEBUG.includes(MODULE_NAME)) {
     .filter(it => it !== '' && it.startsWith(MODULE_NAME))
 
   if (items[0] === `${MODULE_NAME}:noop`) {
-    // eslint-disable-next-line @typescript-eslint/no-empty-function
+    // oxlint-disable-next-line no-empty-function
     debug = () => { }
   }
   //

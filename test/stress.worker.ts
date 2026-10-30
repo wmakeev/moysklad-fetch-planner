@@ -143,7 +143,7 @@ export async function stressTest(params: {
     'organization,agent,positions.assortment.productFolder'
   ]
 
-  // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
+  // oxlint-disable-next-line typescript/no-unnecessary-condition
   for (let i = 0; isActive; i++) {
     console.log(`worker ${processNumber} send request ${i}`)
 

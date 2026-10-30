@@ -1,4 +1,4 @@
-/* eslint-disable */
+/* oxlint-disable */
 // @ts-nocheck
 // node -r dotenv/config ./build/test/demo.test.js -p 1
 
