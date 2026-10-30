@@ -1,0 +1,3 @@
+import { wrapFetch } from '../../../src/index.js'
+const invalid = () => Promise.resolve(1)
+wrapFetch(invalid)

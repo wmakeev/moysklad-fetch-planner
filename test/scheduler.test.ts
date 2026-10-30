@@ -17,7 +17,7 @@ for (const disturbance of ['success', 'enqueue']) {
     const runtime = createRuntime(t)
     const starts: number[] = []
     const replies: ((response: Response) => void)[] = []
-    const planner = new FetchPlanner(
+    const planner = new FetchPlanner<typeof import('undici').fetch>(
       () => {
         starts.push(performance.now())
         return new Promise(resolve => replies.push(resolve))
@@ -59,7 +59,7 @@ for (const jump of [10_000_000, -900_000]) {
   test(`Wall clock jump ${jump} preserves the monotonic server pause and Unix getter`, async t => {
     const runtime = createRuntime(t)
     let starts = 0
-    const planner = new FetchPlanner(
+    const planner = new FetchPlanner<typeof import('undici').fetch>(
       () => {
         starts++
         return Promise.resolve(
@@ -95,7 +95,7 @@ for (const duration of [2_147_483_647, 2_147_483_648]) {
     process.on('warning', onWarning)
     t.after(() => process.off('warning', onWarning))
     let starts = 0
-    const planner = new FetchPlanner(
+    const planner = new FetchPlanner<typeof import('undici').fetch>(
       () => {
         starts++
         return Promise.resolve(
@@ -138,7 +138,7 @@ for (const secondPause of [100, 500]) {
     const timers = trackTimeouts(t)
     const replies: ((response: Response) => void)[] = []
     const starts: string[] = []
-    const planner = new FetchPlanner(
+    const planner = new FetchPlanner<typeof import('undici').fetch>(
       url => {
         assert.equal(typeof url, 'string')
         assert.ok(typeof url === 'string')
@@ -190,10 +190,10 @@ for (const secondPause of [100, 500]) {
 test('Response callback enqueue and late success headers cannot shorten a received pause', async t => {
   const runtime = createRuntime(t)
   const timers = trackTimeouts(t)
-  const events = new EventEmitter<FetchPlannerEventMap>()
+  const events = new EventEmitter<FetchPlannerEventMap<typeof import('undici').fetch>>()
   const replies: ((response: Response) => void)[] = []
   const starts: number[] = []
-  const planner = new FetchPlanner(
+  const planner = new FetchPlanner<typeof import('undici').fetch>(
     () => {
       starts.push(performance.now())
       return new Promise(resolve => replies.push(resolve))
@@ -238,7 +238,7 @@ test('Response callback enqueue and late success headers cannot shorten a receiv
 test('Adaptive pacing can delay a retry beyond the server boundary', async t => {
   const runtime = createRuntime(t)
   let starts = 0
-  const planner = new FetchPlanner(
+  const planner = new FetchPlanner<typeof import('undici').fetch>(
     () => {
       starts++
       return Promise.resolve(
@@ -273,13 +273,13 @@ test('Adaptive pacing can delay a retry beyond the server boundary', async t => 
 test('Empty queue owns no timer while a terminal observer retains the server boundary for later enqueue', async t => {
   const runtime = createRuntime(t)
   const timers = trackTimeouts(t)
-  const events = new EventEmitter<FetchPlannerEventMap>()
+  const events = new EventEmitter<FetchPlannerEventMap<typeof import('undici').fetch>>()
   const failure = new Error('observer failed')
   events.once('response', () => {
     throw failure
   })
   let starts = 0
-  const planner = new FetchPlanner(
+  const planner = new FetchPlanner<typeof import('undici').fetch>(
     () => {
       starts++
       return Promise.resolve(
@@ -312,7 +312,7 @@ test('Empty queue owns no timer while a terminal observer retains the server bou
 test('Unsafe absolute retry deadline rejects before scheduling a timer', async t => {
   const runtime = createRuntime(t)
   const timers = trackTimeouts(t)
-  const planner = new FetchPlanner(() =>
+  const planner = new FetchPlanner<typeof import('undici').fetch>(() =>
     Promise.resolve(
       new Response(null, {
         status: 429,

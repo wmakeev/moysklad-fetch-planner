@@ -12,11 +12,11 @@ for (const scenario of ['invalid-header', 'response-observer']) {
     let starts = 0
     let settlements = 0
     const original = new Error('response observer failed')
-    const events = new EventEmitter<FetchPlannerEventMap>()
+    const events = new EventEmitter<FetchPlannerEventMap<typeof import('undici').fetch>>()
     events.on('response', () => {
       if (scenario === 'response-observer') throw original
     })
-    const planner = new FetchPlanner(
+    const planner = new FetchPlanner<typeof import('undici').fetch>(
       () => {
         starts++
         return Promise.resolve(
@@ -95,7 +95,7 @@ for (const event of ['request', 'response', 'fetch-error'] as const) {
       const runtime = createRuntime(t)
       const original = new Error('original transport failure')
       const observerError = new Error('observer failure')
-      const events = new EventEmitter<FetchPlannerEventMap>()
+      const events = new EventEmitter<FetchPlannerEventMap<typeof import('undici').fetch>>()
       const starts: string[] = []
       const failures: Error[] = []
       let settlements = 0
@@ -160,7 +160,7 @@ for (const late of ['response', 'rejection'] as const) {
   test(`Request observer rejection keeps inflight until late ${late} without a second settlement`, async t => {
     const runtime = createRuntime(t)
     const original = new Error('request observer failed')
-    const events = new EventEmitter<FetchPlannerEventMap>()
+    const events = new EventEmitter<FetchPlannerEventMap<typeof import('undici').fetch>>()
     let resolve!: (response: Response) => void
     let reject!: (error: Error) => void
     const transport = new Promise<Response>((res, rej) => {
@@ -177,7 +177,7 @@ for (const late of ['response', 'rejection'] as const) {
       cancellations++
       return Promise.resolve()
     })
-    const planner = new FetchPlanner(
+    const planner = new FetchPlanner<typeof import('undici').fetch>(
       url => {
         assert.ok(typeof url === 'string')
         starts.push(url)
@@ -220,7 +220,7 @@ for (const late of ['response', 'rejection'] as const) {
 for (const failure of ['header', 'observer', 'none'] as const) {
   test(`Non429 response ownership after ${failure} failure`, async t => {
     const runtime = createRuntime(t)
-    const events = new EventEmitter<FetchPlannerEventMap>()
+    const events = new EventEmitter<FetchPlannerEventMap<typeof import('undici').fetch>>()
     const original = new Error('observer failed')
     const response = new Response('consumer body', {
       headers: failure === 'header' ? { 'X-RateLimit-Limit': 'invalid' } : {}
@@ -231,7 +231,10 @@ for (const failure of ['header', 'observer', 'none'] as const) {
       events.on('response', () => {
         throw original
       })
-    const planner = new FetchPlanner(() => Promise.resolve(response), { eventHandler: events })
+    const planner = new FetchPlanner<typeof import('undici').fetch>(
+      () => Promise.resolve(response),
+      { eventHandler: events }
+    )
     const result = planner
       .getFetch()('http://offline.test/')
       .catch((error: unknown) => error)
@@ -253,7 +256,7 @@ for (const failure of ['header', 'observer', 'none'] as const) {
 test('Diagnostic failure preserves original error and queue progress', async t => {
   const runtime = createRuntime(t)
   const original = new Error('transport failed')
-  const events = new EventEmitter<FetchPlannerEventMap>()
+  const events = new EventEmitter<FetchPlannerEventMap<typeof import('undici').fetch>>()
   events.on('fetch-error', () => {
     throw new Error('secondary')
   })
@@ -261,7 +264,7 @@ test('Diagnostic failure preserves original error and queue progress', async t =
     throw new Error('diagnostic failed')
   })
   let starts = 0
-  const planner = new FetchPlanner(
+  const planner = new FetchPlanner<typeof import('undici').fetch>(
     () => {
       starts++
       if (starts === 1)

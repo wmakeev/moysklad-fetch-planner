@@ -62,7 +62,7 @@ test('FetchPlanner (jitter)', async t => {
         const runtime = createRuntime(t)
         runtime.setRandom(random)
         const starts: number[] = []
-        const planner = new FetchPlanner(
+        const planner = new FetchPlanner<typeof import('undici').fetch>(
           () => {
             starts.push(Date.now())
             return Promise.resolve(
@@ -106,7 +106,7 @@ test('FetchPlanner (jitter)', async t => {
 
 test('Runtime elapsed interval reduces planner delay without real waiting', async t => {
   const runtime = createRuntime(t)
-  const planner = new FetchPlanner(
+  const planner = new FetchPlanner<typeof import('undici').fetch>(
     () =>
       Promise.resolve(
         new Response(null, {
@@ -134,7 +134,10 @@ test('Runtime elapsed interval reduces planner delay without real waiting', asyn
 
 test('D07 rejects maxParallelLimit rounding to zero synchronously', () => {
   assert.throws(
-    () => new FetchPlanner(() => Promise.resolve(new Response(null)), { maxParallelLimit: 0.1 }),
+    () =>
+      new FetchPlanner<typeof import('undici').fetch>(() => Promise.resolve(new Response(null)), {
+        maxParallelLimit: 0.1
+      }),
     /maxParallelLimit/,
     'A parallel limit rounding to zero must fail before an action can remain pending'
   )

@@ -136,7 +136,7 @@ test('FetchPlanner (event handler)', async () => {
     data: FetchPlannerEvents
   }[] = []
 
-  const eventHandler: FetchPlannerEventHandler = {
+  const eventHandler: FetchPlannerEventHandler<typeof fetch> = {
     emit(event, data, instance) {
       assert.ok(instance instanceof FetchPlanner)
       events.push({
@@ -220,7 +220,7 @@ test('FetchPlanner (event handler)', async () => {
 test('FetchPlanner (EventEmitter as event handler)', async t => {
   t.plan(6)
 
-  const eventHandler = new EventEmitter<FetchPlannerEventMap>()
+  const eventHandler = new EventEmitter<FetchPlannerEventMap<typeof import('undici').fetch>>()
 
   const fetchPlanner = new FetchPlanner(fetch, {
     eventHandler
@@ -631,7 +631,12 @@ test('Numeric options reject unsafe values synchronously and preserve rounded bo
     }
     const minimum = name === 'parallelLimitCorrectionPeriodMs' ? 1000 : 1
     assert.equal(new FetchPlanner(fetch, { [name]: minimum }).getOptions()[name], minimum)
-    assert.equal(new FetchPlanner(fetch, { [name]: minimum - 0.4 }).getOptions()[name], minimum)
+    assert.equal(
+      new FetchPlanner(fetch, {
+        [name]: minimum - 0.4
+      }).getOptions()[name],
+      minimum
+    )
     assert.throws(() => new FetchPlanner(fetch, { [name]: minimum - 0.6 }))
     for (const value of [2147483647, 2147483648, Number.MAX_SAFE_INTEGER]) {
       assert.equal(new FetchPlanner(fetch, { [name]: value }).getOptions()[name], value)
@@ -649,8 +654,9 @@ test('Numeric options reject unsafe values synchronously and preserve rounded bo
   assert.equal(new FetchPlanner(fetch, { jitter: 0.3 }).getOptions().jitter, 0.3)
   for (const coefficient of [1, 2.5, 20]) {
     assert.equal(
-      new FetchPlanner(fetch, { throttlingCoefficient: coefficient }).getOptions()
-        .throttlingCoefficient,
+      new FetchPlanner(fetch, {
+        throttlingCoefficient: coefficient
+      }).getOptions().throttlingCoefficient,
       coefficient
     )
   }

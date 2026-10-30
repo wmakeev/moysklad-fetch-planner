@@ -14,6 +14,11 @@ const fixtures = path.join(root, 'test/package/fixtures')
 const manifest = /** @type {typeof import('../package.json')} */ (
   JSON.parse(await readFile(path.join(root, 'package.json'), 'utf8'))
 )
+assert.ok(
+  !process.argv[2] || ['bare', 'undici'].includes(process.argv[2]),
+  'Unknown consumer slice'
+)
+assert.ok(!process.argv[3] || ['ts5', 'ts7'].includes(process.argv[3]), 'Unknown compiler slice')
 const inputs = [
   'src',
   'test',
@@ -177,11 +182,12 @@ try {
   }
   assert.ok(tarball)
   for (const withUndici of [false, true]) {
+    if (process.argv[2] && process.argv[2] !== (withUndici ? 'undici' : 'bare')) continue
     const consumer = await external(`fetch-planner-consumer-${withUndici ? 'undici' : 'bare'}-`)
     await writeFile(path.join(consumer, 'package.json'), '{"private":true,"type":"module"}\n')
     const dependencies = [
       tarball,
-      '@types/node@22.20.5',
+      '@types/node@24.19.2',
       'ts5@npm:typescript@5.7.3',
       'ts7@npm:typescript@7.0.2'
     ]
@@ -207,6 +213,14 @@ try {
       )
     }
     const require = createRequire(path.join(consumer, 'package.json'))
+    assert.equal(
+      /** @type {{version: string}} */ (require('@types/node/package.json')).version,
+      '24.19.2'
+    )
+    assert.equal(
+      /** @type {{version: string}} */ (require('undici-types/package.json')).version,
+      '7.3.0'
+    )
     if (withUndici) {
       assert.equal(
         /** @type {{version: string}} */ (require('undici/package.json')).version,
@@ -229,10 +243,46 @@ try {
         )
     )
     console.log(run(process.execPath, ['runtime.mjs'], consumer).trim())
-    const source = (
-      await readFile(path.join(fixtures, `${withUndici ? 'with' : 'without'}-undici.ts`), 'utf8')
-    ).replace("'../../../src/index.js'", "'moysklad-fetch-planner'")
-    await writeFile(path.join(consumer, 'positive.ts'), source)
+    const positiveNames = [
+      'without-undici',
+      'native',
+      'custom',
+      'subclass',
+      'events',
+      'events-bytes',
+      ...(withUndici ? ['with-undici'] : [])
+    ]
+    const negativeNames = [
+      'transport',
+      'constructor',
+      'input-transport',
+      'body',
+      'method',
+      'planner-body',
+      'planner-method',
+      'event',
+      'event-method',
+      'union-input',
+      'callable-property',
+      ...(withUndici ? ['undici-body', 'undici-method', 'undici-bytes'] : [])
+    ].map(name => `negative-${name}`)
+    const names = [
+      ...positiveNames,
+      ...negativeNames,
+      'events-negative',
+      'events-overload-annotation'
+    ]
+    for (const name of names) {
+      await writeFile(
+        path.join(consumer, `${name}.ts`),
+        (
+          await readFile(
+            path.join(fixtures, `${name}.ts${positiveNames.includes(name) ? '' : '.txt'}`),
+            'utf8'
+          )
+        ).replaceAll("'../../../src/index.js'", "'moysklad-fetch-planner'")
+      )
+    }
     const config = {
       compilerOptions: {
         strict: true,
@@ -242,69 +292,101 @@ try {
         module: 'NodeNext',
         moduleResolution: 'NodeNext',
         lib: ['ES2023'],
-        types: ['node']
+        types: ['node'],
+        noUncheckedIndexedAccess: true,
+        noImplicitOverride: true
       },
-      files: ['positive.ts']
+      files: positiveNames.map(name => `${name}.ts`)
     }
-    await writeFile(path.join(consumer, 'tsconfig.json'), JSON.stringify(config))
-    const declaration = path.join(consumer, 'node_modules', manifest.name, manifest.types)
-    const original = await readFile(declaration, 'utf8')
+    const declarationDirectory = path.join(consumer, 'node_modules', manifest.name, 'build/src')
+    // Follow the emitted declaration graph: the dependency need not live in index.d.ts.
+    const declarationNames = (await readdir(declarationDirectory)).filter(name =>
+      name.endsWith('.d.ts')
+    )
+    const imports = []
+    for (const name of declarationNames) {
+      const file = path.join(declarationDirectory, name)
+      const source = await readFile(file, 'utf8')
+      if (source.includes("from 'undici-types'")) imports.push({ file, source, name })
+    }
+    assert.equal(imports.length, 1, 'Expected one real declaration dependency import')
     for (const [compiler, version] of [
       ['ts5', '5.7.3'],
       ['ts7', '7.0.2']
     ]) {
+      if (process.argv[3] && process.argv[3] !== compiler) continue
       assert.equal(
         /** @type {{version: string}} */ (require(`${compiler}/package.json`)).version,
         version
       )
       const args = [`node_modules/${compiler}/bin/tsc`, '-p', 'tsconfig.json', '--pretty', 'false']
+      await writeFile(path.join(consumer, 'tsconfig.json'), JSON.stringify(config))
       run(process.execPath, args, consumer)
-      if (withUndici) {
-        const cases = [
-          [
-            "import { wrapFetch } from 'moysklad-fetch-planner'\nconst invalidTransport = () => Promise.resolve(1)\nwrapFetch(invalidTransport)\n",
-            2345
-          ],
-          [
-            "import { wrapFetch } from 'moysklad-fetch-planner'\nimport { fetch } from 'undici'\nwrapFetch(fetch)('https://local.invalid/', { method: 42 })\n",
-            2322
+      console.log(
+        `A5: ${compiler}, undici=${withUndici}: native/legacy/custom/subclass/events positives passed`
+      )
+      const expected = /** @type {Record<string, [number, number | number[]][]>} */ (
+        JSON.parse(await readFile(path.join(fixtures, 'diagnostics.json'), 'utf8'))
+      )
+      const negativeFiles = [...negativeNames, 'events-negative', 'events-overload-annotation']
+      await writeFile(
+        path.join(consumer, 'tsconfig.json'),
+        JSON.stringify({
+          ...config,
+          files: [...config.files, ...negativeFiles.map(name => `${name}.ts`)]
+        })
+      )
+      const diagnostic = run(process.execPath, args, consumer, compiler === 'ts5' ? 2 : 1)
+      console.log(diagnostic.trim())
+      const actual = diagnostic
+        .split('\n')
+        .filter(line => line.includes('error TS'))
+        .map(line => {
+          const match = /^([^()]+)\((\d+),\d+\): error TS(\d+):/.exec(line)
+          assert.ok(match, line)
+          return [match[1], Number(match[2]), Number(match[3])]
+        })
+      const wanted = negativeFiles.flatMap(name =>
+        expected[name].map(
+          /** @param {[number, number | number[]]} entry */ ([line, code]) => [
+            `${name}.ts`,
+            line,
+            Array.isArray(code) ? code[compiler === 'ts5' ? 0 : 1] : code
           ]
-        ]
-        for (const [invalid, code] of cases) {
-          await writeFile(path.join(consumer, 'negative.ts'), invalid)
-          await writeFile(
-            path.join(consumer, 'tsconfig.json'),
-            JSON.stringify({ ...config, files: ['positive.ts', 'negative.ts'] })
-          )
-          const diagnostic = run(process.execPath, args, consumer, compiler === 'ts5' ? 2 : 1)
-          const errors = diagnostic.split('\n').filter(line => line.includes('error TS'))
-          assert.equal(errors.length, 1, diagnostic)
-          assert.match(errors[0], new RegExp(`^negative\\.ts\\(\\d+,\\d+\\): error TS${code}:`))
-        }
-      } else {
+        )
+      )
+      const compare = (/** @type {unknown} */ a, /** @type {unknown} */ b) =>
+        JSON.stringify(a).localeCompare(JSON.stringify(b))
+      assert.deepEqual(
+        actual.sort(compare),
+        wanted.sort(compare),
+        'Exact negative diagnostic file/line/code matrix'
+      )
+      if (!withUndici) {
+        const dependency = imports[0]
+        assert.ok(dependency)
+        await writeFile(path.join(consumer, 'tsconfig.json'), JSON.stringify(config))
         try {
-          assert.ok(original.includes("from 'undici-types'"))
-          await writeFile(declaration, original.replace("from 'undici-types'", "from 'undici'"))
+          await writeFile(
+            dependency.file,
+            dependency.source.replace("from 'undici-types'", "from 'undici'")
+          )
           const diagnostic = run(process.execPath, args, consumer, compiler === 'ts5' ? 2 : 1)
           const errors = diagnostic.split('\n').filter(line => line.includes('error TS'))
           assert.equal(errors.length, 1, diagnostic)
-          assert.match(
-            errors[0],
-            /index\.d\.ts\(1,\d+\): error TS2307: Cannot find module 'undici'/
-          )
+          assert.ok(errors[0]?.includes(`${dependency.name}(`), diagnostic)
+          assert.match(errors[0] ?? '', /error TS2307: Cannot find module 'undici'/)
+          console.log(diagnostic.trim())
         } finally {
-          await writeFile(declaration, original)
+          await writeFile(dependency.file, dependency.source)
         }
       }
-      await writeFile(path.join(consumer, 'tsconfig.json'), JSON.stringify(config))
       console.log(
-        `A8: TS ${version}, undici=${withUndici}: strict positive and exact negative diagnostics passed`
+        `A5: TS ${version}, undici=${withUndici}: exact transport/body/method/event/bytes negatives and declaration closure passed`
       )
     }
   }
-  console.log(
-    'A6–A8 passed. Native fetch type incompatibility remains for stage 3; no native type compatibility claimed.'
-  )
+  console.log('A5–A8 passed: native and undici Fetch contracts verified on fresh tarball.')
 } finally {
   for (const directory of temporary) await rm(directory, { recursive: true, force: true })
   assert.equal(await digest(root, inputs), before, 'Package checks mutated repository inputs')

@@ -16,3 +16,5 @@
 - 2026-10-30: T60 разрешён package.json только test:unit для подключения body-cleanup suite; критерии плана не меняются.
 - 2026-10-30: T70 разрешён package.json только test:unit для compatibility suite; словесная проверка state ownership задана самим принятым планом, дополнительного согласования не требует.
 - 2026-10-31: B1 воспроизвёл generic emit→overload target дыру, проверил две single-signature tuple-union формы. Это дефект prototype в границахT80, A5 не опровергнут; назначена доработкаT80/2 без смены критериев/productionAPI, затем новаяприёмка. → journal/T80.md, «Разбор причины B1».
+- 2026-10-31: T90 переносит дополнительные положительные/отрицательные packagefixtures из принятогоT80. Минимальные типовые/handler-signature адаптации существующихtests/samples разрешены только для того жеeventконтракта безсменыruntime/assertions; @types/node24.19.2 доказанT80. КритерииA5 не меняются.
+- 2026-10-31: V10 разрешён штатный package runner с установкой isolated consumer dependencies в своей копии: это A5 принятого плана, не изменение project dependencies проверяющим. Срезы bare/undici×ts5/ts7 допустимы при полном охвате неизменённых gates.

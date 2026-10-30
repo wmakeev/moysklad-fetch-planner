@@ -116,8 +116,8 @@
 - Файлы: src/index.ts, src/planner.ts, внутренние type helpers, test/package/fixtures/native.ts, test/package/fixtures/without-undici.ts, test/package/fixtures/with-undici.ts, scripts/check-package.mjs, при необходимости @types/node в package.json/pnpm-lock.yaml только по доказанномуT80 контракту.
 - Риск: high · пишет в боевую систему: нет · приёмка: отдельно · объём: полный
 - Вес: 3
-- Исполнитель: ступень 4 · gpt-6.1-sol (high) · не запущен
-- Верификатор: ступень 4 · gpt-6.1-sol (high) · свежий контекст; та же модель из-за недоступности Claude
+- Исполнитель T90/1: ступень 4 · gpt-6.1-sol (high) · t3 `node:delegated-task:command%3Amcp%3A2c6a6d24-3803-4f36-89a0-5f5bf3bedaaf%3Adelegate-task%3A003-T90-1-implementation` · done; бриф /tmp/orchestrate-fetch-planner-003/T90-1/brief.md
+- Верификатор T90/1: ступень 4 · gpt-6.1-sol (high) · t3 `node:delegated-task:command%3Amcp%3A2c6a6d24-3803-4f36-89a0-5f5bf3bedaaf%3Adelegate-task%3A003-T90-1-verifier` · V10 отдельно · passed; отчёт journal/T90.accept-1.md; свежий контекст, та же модель из-за недоступности Claude
 - Журнал: journal/T90.md
 
 ## T100 — runtime Fetch, metadata и границы replay

@@ -116,7 +116,7 @@ for (const max of [2, 4]) {
   test(`Late responses at max ${max} retain sent transports while new and reentrant work waits`, async t => {
     const runtime = createRuntime(t)
     const transport = deferredTransport()
-    const events = new EventEmitter<FetchPlannerEventMap>()
+    const events = new EventEmitter<FetchPlannerEventMap<typeof import('undici').fetch>>()
     const planner = new ObservedPlanner(transport.fetch, {
       maxParallelLimit: max,
       jitter: 0,
@@ -179,7 +179,7 @@ for (const max of [1, 2, 4]) {
       runtime.setRandom(random)
       const timers = trackTimeouts(t)
       const transport = deferredTransport()
-      const planner = new FetchPlanner(transport.fetch, {
+      const planner = new FetchPlanner<typeof import('undici').fetch>(transport.fetch, {
         maxParallelLimit: max,
         parallelLimitCorrectionPeriodMs: 1000,
         jitter: 0.3

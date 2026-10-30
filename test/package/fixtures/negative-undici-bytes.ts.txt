@@ -1,0 +1,3 @@
+import { wrapFetch } from '../../../src/index.js'
+import { fetch } from 'undici'
+void wrapFetch(fetch)('https://local.invalid/').then(response => response.bytes())

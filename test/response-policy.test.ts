@@ -115,7 +115,7 @@ test('Planner applies partial headers, preserves missing state and returns non-4
   ]
   const events: string[] = []
   let index = 0
-  const planner = new FetchPlanner(
+  const planner = new FetchPlanner<typeof import('undici').fetch>(
     () => {
       const response = responses[index++]
       assert.ok(response)
@@ -123,7 +123,7 @@ test('Planner applies partial headers, preserves missing state and returns non-4
     },
     {
       eventHandler: {
-        emit(name, data) {
+        emit(...[name, data]) {
           if (name === 'response' && 'responseType' in data) events.push(data.responseType)
         }
       }
@@ -144,7 +144,7 @@ test('Planner applies partial headers, preserves missing state and returns non-4
 test('Parsing valid and invalid headers cannot mutate a pending planner queue', async t => {
   const runtime = createRuntime(t)
   const response = new Response(null)
-  const planner = new FetchPlanner(() => Promise.resolve(response))
+  const planner = new FetchPlanner<typeof import('undici').fetch>(() => Promise.resolve(response))
   const pending = planner.getFetch()('http://offline.test/pending')
   assert.equal(planner.getActionsQueueLength(), 1)
   assert.equal(

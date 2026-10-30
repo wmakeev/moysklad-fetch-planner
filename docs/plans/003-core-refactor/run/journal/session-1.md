@@ -30,3 +30,6 @@
 - B1 done, прочитана диагностическая частьT80.md: причина доconstructor inference, NoInfer недостаточен, single tuple-union emit закрывает дыру. T80/2 дорабатывает в прежнихграницах, не меняетproduction.
 - T80/2 done, повторная слепая V9 с полным compile matrix и самостоятельными cross-family event probes. Ранний failed не переопределяется; критерий тот же.
 - V9 passed:226 strict compiler probes. T80/2 принята, gateT90 открыт.
+- T80 commit по назначенным путям, состав проверен. T90/1 high запущен один; реализация только после принятого event/transport контракта.
+- T90/1 done, область сверена status/diff-stat; интерфейс package runner прочитан для нарезки и allowlist fixtures. V10 проверяет реальный пакет и runtime регрессию в копии.
+- V10 passed: полный package matrix/typecheck/check/coverage, F07redgreen, productionJS не менялся. Точечно прочитано замечание комментарияcoverage, классифицировано косметикой; JSDoc переданT130.

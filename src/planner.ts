@@ -10,7 +10,7 @@ import {
   safeTime
 } from './pacing.js'
 import { parseResponsePolicy } from './response-policy.js'
-import type { RequestInfo, RequestInit, Response } from 'undici-types'
+import type { Scheduled, Transport, UndiciFetch } from './fetch-types.js'
 
 //#region debug function
 var debug: ((scope: string, msg: string) => void) | null = null
@@ -43,11 +43,11 @@ import type { FetchPlannerOptions } from './index.js'
 /**
  * Параметры http запроса (Action) для отправки в очередь планировщика
  */
-interface FetchAction {
+interface FetchAction<F extends Transport> {
   state: 'queued' | 'running' | 'terminal'
   actionId: number
-  url: RequestInfo
-  options?: RequestInit | undefined
+  url: Parameters<F>[0]
+  options?: Parameters<F>[1]
   resolve: (val: unknown) => void
   reject: (err: Error) => void
 }
@@ -67,12 +67,7 @@ interface RequestSlotHandler {
   reject: (err: Error) => void
 }
 
-/**
- * [Fetch API](https://developer.mozilla.org/en-US/docs/Web/API/Fetch_API)
- */
-type Fetch = (url: RequestInfo, init?: RequestInit) => Promise<Response>
-
-export class FetchPlanner {
+export class FetchPlanner<F extends Transport = UndiciFetch> {
   /**
    * Предварительно рассчитанная функция затухания для расчета времени задержки
    * в зависимости от текущего лимита.
@@ -82,7 +77,7 @@ export class FetchPlanner {
   /**
    * Опции планировщика запросов
    */
-  private readonly options: FetchPlannerOptions
+  private readonly options: FetchPlannerOptions<F>
 
   /**
    * Интервал в миллисекундах, в течение которого можно сделать кол-во запросов
@@ -135,7 +130,7 @@ export class FetchPlanner {
   /**
    * Очередь запросов
    */
-  private actionsQueue: FetchAction[] = []
+  private actionsQueue: FetchAction<F>[] = []
 
   /**
    * Время последней ошибки превышения лимита параллельных запросов
@@ -191,10 +186,10 @@ export class FetchPlanner {
    * @param params Опциональные параметры планировщика
    */
   constructor(
-    private fetchApi: Fetch,
-    params?: Partial<FetchPlannerOptions>
+    private fetchApi: F,
+    params?: Partial<FetchPlannerOptions<F>>
   ) {
-    const optionsDefault: FetchPlannerOptions = {
+    const optionsDefault: FetchPlannerOptions<F> = {
       eventHandler: undefined,
       throttlingCoefficient: 5,
       maxParallelLimit: 4,
@@ -433,7 +428,7 @@ export class FetchPlanner {
   }
 
   /** The sole terminal transition; a terminal action can never re-enter the queue. */
-  private settleAction(action: FetchAction, result: Response | Error) {
+  private settleAction(action: FetchAction<F>, result: Awaited<ReturnType<F>> | Error) {
     if (action.state === 'terminal') return false
     action.state = 'terminal'
     if (result instanceof Error) action.reject(result)
@@ -450,7 +445,7 @@ export class FetchPlanner {
   }
 
   /** Best-effort cleanup of an owned response; a pending cancel never holds a transport slot. */
-  private discardResponse(response: Response) {
+  private discardResponse(response: Awaited<ReturnType<F>>) {
     try {
       void response.body?.cancel().catch(() => {
         // Rejected cleanup must not escape into the scheduler.
@@ -495,10 +490,15 @@ export class FetchPlanner {
       }
     }
 
-    const fetchApi = this.fetchApi
+    // The queue retains Parameters<F> and delivers the same transport response.
+    // TS cannot correlate a constrained generic callable with its extracted tuple.
+    const fetchApi = this.fetchApi as unknown as (
+      url: Parameters<F>[0],
+      init?: Parameters<F>[1]
+    ) => Promise<Awaited<ReturnType<F>>>
     debug?.('processAction', `requestStartTime - ${requestStartTime}`)
     const run = async () => {
-      let response: Response | undefined
+      let response: Awaited<ReturnType<F>> | undefined
       try {
         // Call transport before request observers, preserving successful event order.
         const transport = fetchApi(action.url, action.options)
@@ -562,7 +562,7 @@ export class FetchPlanner {
     this.pump()
   }
 
-  private fetch(url: RequestInfo, init?: RequestInit) {
+  private fetch(url: Parameters<F>[0], init?: Parameters<F>[1]) {
     const fetchPromise = new Promise((resolve, reject) => {
       const actionId = this.getNewActionId()
 
@@ -578,7 +578,7 @@ export class FetchPlanner {
 
     this.pump()
 
-    return fetchPromise as Promise<Response>
+    return fetchPromise as Promise<Awaited<ReturnType<F>>>
   }
 
   /**
@@ -586,8 +586,8 @@ export class FetchPlanner {
    * Исходный fetch передается в параметрах конструктора при создании экземпляра
    * FetchPlanner.
    */
-  getFetch() {
-    return this.fetch.bind(this)
+  getFetch(): Scheduled<F> {
+    return this.fetch.bind(this) as Scheduled<F>
   }
 
   /**

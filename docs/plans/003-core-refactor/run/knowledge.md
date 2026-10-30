@@ -24,6 +24,8 @@
 
 - T80 принята кругом2: generic Scheduled сохраняет transport input/result, single mapped tuple-union emit держит event/instance связь; @types/node24.19.2 для native bytes доказан отдельно, directundici-types7.3.0 сохраняется → evidence/fetch-contract.md и journal/T80.accept-2.md.
 
+- T90 принята: реальный tarballTS5/TS7×bare/undici, F07red/green, generic/eventboundary контракты проверены; productionJS прежних5модулей идентичен, fetch-types толькоtype-only → journal/T90.accept-1.md.
+
 ## План и требования: расхождения
 
 - Нет.

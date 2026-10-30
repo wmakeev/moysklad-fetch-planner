@@ -1,0 +1,2 @@
+import { wrapFetch } from '../../../src/index.js'
+wrapFetch((input: number) => globalThis.fetch(String(input)))

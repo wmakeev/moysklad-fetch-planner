@@ -1,13 +1,13 @@
 import { FetchPlanner } from './planner.js'
 import type { parseResponsePolicy } from './response-policy.js'
-import type { RequestInfo, RequestInit, Request, Response } from 'undici-types'
+import type { Transport } from './fetch-types.js'
 
 export { FetchPlanner }
 
 type ResponseType = ReturnType<typeof parseResponsePolicy>['responseType']
 
 /** Событие с информацией о выполняемом запросе */
-export interface RequestEvent {
+export interface RequestEvent<F extends Transport = Transport> {
   /** Id задачи в планировщике */
   actionId: number
 
@@ -18,17 +18,17 @@ export interface RequestEvent {
   requestId: number
 
   /** Строка запроса */
-  url: string | URL | Request
+  url: Parameters<F>[0]
 
   /** HTTP-метод запроса */
-  method: RequestInit['method']
+  method: NonNullable<Parameters<F>[1]>['method']
 
   /** Время начала запроса */
   startTime: number
 }
 
 /** Событие с информацией о выполненном запросе */
-export interface ResponseEvent extends RequestEvent {
+export interface ResponseEvent<F extends Transport = Transport> extends RequestEvent<F> {
   /**
    * Тип запроса:
    *
@@ -43,7 +43,7 @@ export interface ResponseEvent extends RequestEvent {
 }
 
 /** Событие с ошибкой вызванной вызовом fetch */
-export interface FetchErrorEvent extends RequestEvent {
+export interface FetchErrorEvent<F extends Transport = Transport> extends RequestEvent<F> {
   /**
    * Ошибка
    */
@@ -53,49 +53,30 @@ export interface FetchErrorEvent extends RequestEvent {
   errorTime: number
 }
 
-export type FetchPlannerEvents = RequestEvent | ResponseEvent | FetchErrorEvent
+export type FetchPlannerEvents<F extends Transport = Transport> =
+  | RequestEvent<F>
+  | ResponseEvent<F>
+  | FetchErrorEvent<F>
 
-/**
- * Обработчик событий
- */
-export interface FetchPlannerEventHandler {
-  /**
-   * Событие `request` вызывается в момент выполнения запроса
-   *
-   * @see {@link RequestEvent}
-   */
-  emit(eventName: 'request', data: RequestEvent, instance: FetchPlanner): void
-
-  /**
-   * Событие `response` вызывается после получения ответа на запрос
-   *
-   * @see {@link ResponseEvent}
-   */
-  emit(eventName: 'response', data: ResponseEvent, instance: FetchPlanner): void
-
-  /**
-   * Событие `response` вызывается после получения ответа на запрос
-   *
-   * @see {@link FetchErrorEvent}
-   */
-  emit(eventName: 'fetch-error', data: FetchErrorEvent, instance: FetchPlanner): void
+/** Synchronous observers, correlated by the event map. */
+export interface FetchPlannerEventHandler<F extends Transport = Transport> {
+  emit: (
+    ...args: {
+      [K in keyof FetchPlannerEventMap<F>]: [name: K, ...args: FetchPlannerEventMap<F>[K]]
+    }[keyof FetchPlannerEventMap<F>]
+  ) => void
 }
 
-export interface FetchPlannerEventMap {
-  'request': [RequestEvent, FetchPlanner]
-  'response': [ResponseEvent, FetchPlanner]
-  'fetch-error': [FetchErrorEvent, FetchPlanner]
+export interface FetchPlannerEventMap<F extends Transport = Transport> {
+  'request': [RequestEvent<F>, FetchPlanner<F>]
+  'response': [ResponseEvent<F>, FetchPlanner<F>]
+  'fetch-error': [FetchErrorEvent<F>, FetchPlanner<F>]
 }
-
-/**
- * [Fetch API](https://developer.mozilla.org/en-US/docs/Web/API/Fetch_API)
- */
-type Fetch = (url: RequestInfo, init?: RequestInit) => Promise<Response>
 
 /**
  * Параметры планировщика запросов
  */
-export interface FetchPlannerOptions {
+export interface FetchPlannerOptions<F extends Transport = Transport> {
   /**
    * Обработчик событий планировщика.
    *
@@ -124,7 +105,7 @@ export interface FetchPlannerOptions {
    *
    * @see {@link FetchPlannerEventHandler} детальное описание событий
    */
-  eventHandler?: FetchPlannerEventHandler | undefined
+  eventHandler?: FetchPlannerEventHandler<F> | undefined
 
   /**
    * Коэффициент регулирующий интенсивность тротлинга запросов в зависимости
@@ -242,6 +223,9 @@ export interface FetchPlannerOptions {
 /**
  * Создает экземпляр планировщика и возвращает обернутый fetch
  */
-export function wrapFetch(fetchApi: Fetch, options?: Partial<FetchPlannerOptions>) {
+export function wrapFetch<F extends Transport>(
+  fetchApi: F,
+  options?: Partial<FetchPlannerOptions<F>>
+) {
   return new FetchPlanner(fetchApi, options).getFetch()
 }

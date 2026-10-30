@@ -23,7 +23,9 @@ test('Facade preserves runtime export names and wrapFetch response identity', as
   const runtime = createRuntime(t)
   assert.deepEqual(Object.keys(facade).sort(), ['FetchPlanner', 'wrapFetch'])
   const response = new Response('payload', { status: 500 })
-  const fetch = facade.wrapFetch(() => Promise.resolve(response), { jitter: 0 })
+  const fetch = facade.wrapFetch<typeof import('undici').fetch>(() => Promise.resolve(response), {
+    jitter: 0
+  })
   const result = fetch('http://offline.test/wrapped')
   await runtime.advance(0)
   assert.equal(await result, response)
@@ -32,7 +34,7 @@ test('Facade preserves runtime export names and wrapFetch response identity', as
 
 test('Subclass hook, protected fields, getters and EventEmitter retain one planner identity', async t => {
   const runtime = createRuntime(t)
-  const events = new EventEmitter<FetchPlannerEventMap>()
+  const events = new EventEmitter<FetchPlannerEventMap<typeof import('undici').fetch>>()
   const response = new Response('payload', {
     headers: {
       'X-RateLimit-Limit': '45',

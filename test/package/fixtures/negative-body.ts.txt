@@ -1,0 +1,2 @@
+import { wrapFetch } from '../../../src/index.js'
+wrapFetch(globalThis.fetch)('https://local.invalid/', { body: 42 })

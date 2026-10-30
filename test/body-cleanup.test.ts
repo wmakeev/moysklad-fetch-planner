@@ -13,7 +13,7 @@ for (const status of [429, 200, 500]) {
     test(`D08 HTTP${status} ${failure} discards the owned body exactly once`, async t => {
       const runtime = createRuntime(t)
       const original = new Error('observer failure')
-      const events = new EventEmitter<FetchPlannerEventMap>()
+      const events = new EventEmitter<FetchPlannerEventMap<typeof import('undici').fetch>>()
       let cancellations = 0
       let starts = 0
       let settlements = 0
@@ -44,7 +44,7 @@ for (const status of [429, 200, 500]) {
       })
       events.on('fetch-error', () => failures++)
       events.on('response', () => responses++)
-      const planner = new FetchPlanner(
+      const planner = new FetchPlanner<typeof import('undici').fetch>(
         () => {
           starts++
           return starts === 1 ? transport : Promise.resolve(new Response(null))
@@ -119,7 +119,7 @@ for (const cleanup of ['finite', 'rejected', 'hanging', 'synchronous', 'null'] a
     const delivered = new Response('consumer body')
     assert.ok(delivered.body)
     const cancelDelivered = t.mock.method(delivered.body, 'cancel')
-    const planner = new FetchPlanner(
+    const planner = new FetchPlanner<typeof import('undici').fetch>(
       () => Promise.resolve(++starts === 1 ? discarded : delivered),
       { jitter: 0, maxParallelLimit: 1 }
     )
@@ -159,7 +159,10 @@ for (const status of [200, 500]) {
     const response = new Response('consumer body', { status })
     assert.ok(response.body)
     const cancel = t.mock.method(response.body, 'cancel')
-    const planner = new FetchPlanner(() => Promise.resolve(response), { jitter: 0 })
+    const planner = new FetchPlanner<typeof import('undici').fetch>(
+      () => Promise.resolve(response),
+      { jitter: 0 }
+    )
     const result = planner.getFetch()(url)
     await runtime.advance(0)
     assert.equal(await result, response)

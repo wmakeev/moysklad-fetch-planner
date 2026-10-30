@@ -1,0 +1,8 @@
+import { wrapFetch } from '../../../src/index.js'
+import type { Request as UndiciRequest } from 'undici-types'
+const exercise = (transport: Transport, input: UndiciRequest) => wrapFetch(transport)(input)
+void exercise
+
+type NativeFetch = typeof globalThis.fetch
+type UndiciFetch = typeof import('undici-types').fetch
+type Transport = NativeFetch | UndiciFetch

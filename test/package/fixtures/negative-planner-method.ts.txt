@@ -1,0 +1,2 @@
+import { FetchPlanner } from '../../../src/index.js'
+new FetchPlanner(globalThis.fetch).getFetch()('https://local.invalid/', { method: 42 })

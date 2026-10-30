@@ -35,7 +35,7 @@
 | T60 | владение и cleanup непереданных ответов | T50 | normal | 2 | ✓ принята |
 | T70 | выделить владельца scheduler и сохранить фасад | T60 | high | 3 | ✓ принята |
 | T80 | исследовать совместимый Fetch type contract | T70 | normal | 2 | ✓ принята |
-| T90 | реализовать доказанную Fetch совместимость | T80 | high | 3 | ждёт |
+| T90 | реализовать доказанную Fetch совместимость | T80 | high | 3 | ✓ принята |
 | T100 | runtime Fetch, metadata и границы replay | T90 | normal | 2 | ждёт |
 | T110 | зафиксировать D12 и публичную совместимость | T100 | normal | 2 | ждёт |
 | T120 | устранить два прежних sample warnings | T110 | normal | 2 | ждёт |
@@ -48,7 +48,8 @@
 
 ## Передачи
 
-- T90: реализовать выбранный контракт evidence/fetch-contract.md включая single tuple-union emit и отрицательные cross-family handler probes; @types/node24.19.2 допустим по принятым доказательствамT80.
+- T130: примеры событий в JSDoc src/index.ts/src/planner.ts синхронизировать с принятым generic/eventHandler контрактом.
+
 
 - Все задачи: чужую заготовку errorLimits сохранить; D09/D10/D12 не объявлять полностью исправленными.
 - T140: закрытие D01 началось в T20, red исходного baseline/green проверены V3 → journal/T30.accept-1.md, T30.з1.

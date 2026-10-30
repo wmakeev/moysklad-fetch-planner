@@ -1,0 +1,24 @@
+import type {
+  FetchPlannerEventHandler,
+  RequestEvent,
+  ResponseEvent,
+  FetchErrorEvent,
+  FetchPlanner
+} from '../../../src/index.js'
+interface OldHandler {
+  emit(name: 'request', event: RequestEvent<NativeFetch>, planner: FetchPlanner<NativeFetch>): void
+  emit(
+    name: 'response',
+    event: ResponseEvent<NativeFetch>,
+    planner: FetchPlanner<NativeFetch>
+  ): void
+  emit(
+    name: 'fetch-error',
+    event: FetchErrorEvent<NativeFetch>,
+    planner: FetchPlanner<NativeFetch>
+  ): void
+}
+declare const old: OldHandler
+export const handler: FetchPlannerEventHandler<NativeFetch> = old
+
+type NativeFetch = typeof globalThis.fetch

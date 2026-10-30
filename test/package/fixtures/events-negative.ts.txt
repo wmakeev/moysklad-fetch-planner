@@ -1,0 +1,48 @@
+import { FetchPlanner, wrapFetch } from '../../../src/index.js'
+import type {
+  FetchPlannerEventMap,
+  FetchPlannerOptions,
+  RequestEvent,
+  ResponseEvent,
+  FetchErrorEvent
+} from '../../../src/index.js'
+import { EventEmitter } from 'node:events'
+import type { fetch as uf } from 'undici-types'
+declare const undiciFetch: typeof uf
+const nativeEvents = new EventEmitter<FetchPlannerEventMap<NativeFetch>>()
+const legacyEvents = new EventEmitter<FetchPlannerEventMap<UndiciFetch>>()
+new FetchPlanner(undiciFetch, { eventHandler: nativeEvents })
+wrapFetch(undiciFetch, { eventHandler: nativeEvents })
+new FetchPlanner<UndiciFetch>(undiciFetch, { eventHandler: nativeEvents })
+wrapFetch<UndiciFetch>(undiciFetch, { eventHandler: nativeEvents })
+const wrongFetchPlannerOptions: Partial<FetchPlannerOptions<UndiciFetch>> = {
+  eventHandler: nativeEvents
+}
+const typedHandler = {
+  emit(
+    name: 'request' | 'response' | 'fetch-error',
+    event: RequestEvent<NativeFetch> | ResponseEvent<NativeFetch> | FetchErrorEvent<NativeFetch>,
+    instance: FetchPlanner<NativeFetch>
+  ) {
+    void name
+    void event
+    void instance
+  }
+}
+new FetchPlanner(undiciFetch, { eventHandler: typedHandler })
+wrapFetch(undiciFetch, { eventHandler: typedHandler })
+const typedFetchPlannerOptions: Partial<FetchPlannerOptions<UndiciFetch>> = {
+  eventHandler: typedHandler
+}
+declare const nativePlanner: FetchPlanner<NativeFetch>
+declare const legacyPlanner: FetchPlanner<UndiciFetch>
+declare const request: RequestEvent<NativeFetch>
+nativeEvents.emit('response', request, nativePlanner)
+nativeEvents.emit('request', request, legacyPlanner)
+const response: ResponseEvent<NativeFetch> = { ...request, responseType: 'OK', endTime: 1 }
+response.method = 42
+new FetchPlanner(globalThis.fetch, { eventHandler: legacyEvents })
+export { wrongFetchPlannerOptions, typedFetchPlannerOptions }
+
+type NativeFetch = typeof globalThis.fetch
+type UndiciFetch = typeof import('undici-types').fetch

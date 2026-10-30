@@ -13,7 +13,8 @@ async function lifecycle() {
   const original = new Error('original failure')
   const secondary = new Error('secondary failure')
   const planner = new FetchPlanner(
-    () => {
+    /** @param {import('undici').RequestInfo} _input */
+    _input => {
       if (scenario === 'sync-transport') throw original
       if (scenario === 'error-observer') return Promise.reject(original)
       return delay(10).then(() => new Response(null))
@@ -21,8 +22,7 @@ async function lifecycle() {
     {
       jitter: 0,
       eventHandler: {
-        /** @param {string} name */
-        emit(name) {
+        emit(...[name]) {
           if (scenario === 'request-observer' && name === 'request') throw original
           if (scenario === 'error-observer' && name === 'fetch-error') throw secondary
         }
@@ -89,6 +89,7 @@ async function cleanupLoopback() {
         }
       })
       const planner = new FetchPlanner(
+        /** @param {import('undici').RequestInfo} url @param {import('undici').RequestInit} [init] */
         async (url, init) => {
           const response = await fetch(url, { ...init, dispatcher: agent })
           assert.equal(response.headers.get('content-type'), 'text/plain')
@@ -110,7 +111,7 @@ async function cleanupLoopback() {
           jitter: 0,
           maxParallelLimit: 1,
           eventHandler: {
-            emit(name) {
+            emit(...[name]) {
               if (
                 !observerFailed &&
                 ((mode.startsWith('late') && name === 'request') ||
@@ -153,7 +154,8 @@ async function cleanupLoopback() {
     assert.ok(bad.body)
     bad.body.cancel = () => Promise.reject(new Error('finite cancel rejection'))
     const planner = new FetchPlanner(
-      () => Promise.resolve(++starts === 1 ? bad : new Response(null)),
+      /** @param {import('undici').RequestInfo} _input */
+      _input => Promise.resolve(++starts === 1 ? bad : new Response(null)),
       { jitter: 0 }
     )
     assert.equal((await planner.getFetch()('http://offline.test/')).status, 200)

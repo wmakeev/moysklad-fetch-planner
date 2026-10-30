@@ -50,7 +50,7 @@ const createEvent = (
 export async function stressTest(params: { process: number; duration: number }) {
   const { process: processNumber, duration } = params
 
-  const eventHandler = new EventEmitter<FetchPlannerEventMap>()
+  const eventHandler = new EventEmitter<FetchPlannerEventMap<typeof fetch>>()
 
   const fetchPlanner = new FetchPlanner(fetch, {
     eventHandler,
