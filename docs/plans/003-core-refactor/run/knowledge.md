@@ -22,6 +22,8 @@
 
 - T70 принята: фасад index и единственный scheduler owner в planner; все executable modules и wrapFetch включены в gate,32 независимые negative LCOV пробы отвергнуты → journal/T70.accept-1.md.
 
+- T80 принята кругом2: generic Scheduled сохраняет transport input/result, single mapped tuple-union emit держит event/instance связь; @types/node24.19.2 для native bytes доказан отдельно, directundici-types7.3.0 сохраняется → evidence/fetch-contract.md и journal/T80.accept-2.md.
+
 ## План и требования: расхождения
 
 - Нет.

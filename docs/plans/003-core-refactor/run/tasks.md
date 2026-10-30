@@ -97,9 +97,16 @@
 - Файлы: docs/plans/003-core-refactor/evidence/fetch-contract.md, прототип только __temp/plan-core-refactor/types/.
 - Риск: normal · пишет в боевую систему: нет · приёмка: отдельно · объём: полный
 - Вес: 2
-- Исполнитель: ступень 4 · gpt-6.1-sol (high) · не запущен
-- Верификатор: ступень 4 · gpt-6.1-sol (high) · свежий контекст; та же модель из-за недоступности Claude
+- Исполнитель T80/1: ступень 4 · gpt-6.1-sol (high) · t3 `node:delegated-task:command%3Amcp%3A2c6a6d24-3803-4f36-89a0-5f5bf3bedaaf%3Adelegate-task%3A003-T80-1-research` · done; бриф /tmp/orchestrate-fetch-planner-003/T80-1/brief.md
+- Верификатор T80/1: ступень 4 · gpt-6.1-sol (high) · t3 `node:delegated-task:command%3Amcp%3A2c6a6d24-3803-4f36-89a0-5f5bf3bedaaf%3Adelegate-task%3A003-T80-1-verifier` · V8 отдельно · failed; отчёт journal/T80.accept-1.md; свежий контекст, та же модель из-за недоступности Claude
 - Журнал: journal/T80.md
+
+- Не закрыто круга1: согласованность eventHandler/instance; устранено в круге2 и проверено V9.
+- Разбор B1: ступень 3 · gpt-6.1-sol (medium) · t3 `node:delegated-task:command%3Amcp%3A2c6a6d24-3803-4f36-89a0-5f5bf3bedaaf%3Adelegate-task%3A003-T80-diagnose-1` · done; бриф /tmp/orchestrate-fetch-planner-003/T80-diagnose-1/brief.md
+
+- Исполнитель T80/2: ступень 4 · gpt-6.1-sol (high) · t3 `node:delegated-task:command%3Amcp%3A2c6a6d24-3803-4f36-89a0-5f5bf3bedaaf%3Adelegate-task%3A003-T80-2-research` · done; бриф /tmp/orchestrate-fetch-planner-003/T80-2/brief.md
+
+- Верификатор T80/2: ступень 4 · gpt-6.1-sol (high) · t3 `node:delegated-task:command%3Amcp%3A2c6a6d24-3803-4f36-89a0-5f5bf3bedaaf%3Adelegate-task%3A003-T80-2-verifier` · V9 отдельно · passed; отчёт journal/T80.accept-2.md; свежий контекст, та же модель из-за недоступности Claude
 
 ## T90 — реализовать доказанную Fetch совместимость
 

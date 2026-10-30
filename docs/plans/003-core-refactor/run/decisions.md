@@ -15,3 +15,4 @@
 - 2026-10-30: T50 разрешён package.json толькоtest:unit; при необходимости test/index.test.ts толькоминимальная адаптация часов без ослабленияassertions. Критерии не меняются, принятые runtime/helpers используются повторно [CONSIST].
 - 2026-10-30: T60 разрешён package.json только test:unit для подключения body-cleanup suite; критерии плана не меняются.
 - 2026-10-30: T70 разрешён package.json только test:unit для compatibility suite; словесная проверка state ownership задана самим принятым планом, дополнительного согласования не требует.
+- 2026-10-31: B1 воспроизвёл generic emit→overload target дыру, проверил две single-signature tuple-union формы. Это дефект prototype в границахT80, A5 не опровергнут; назначена доработкаT80/2 без смены критериев/productionAPI, затем новаяприёмка. → journal/T80.md, «Разбор причины B1».

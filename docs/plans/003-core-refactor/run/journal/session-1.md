@@ -24,3 +24,9 @@
 - T60 commit по назначенным путям, состав проверен. T70/1 high запущен один, без соседних исполнителей.
 - T70/1 done, область сверена status/diff-stat. V7 принимает слепо архитектуру, фасад и отрицательные coverage пробы полным offline объёмом.
 - V7 passed:98tests, baseline96 и собственные before/after пробы,32 negative LCOV; state owner один. T80 является исследовательским gate дляT90.
+- T70 commit по назначенным путям, состав проверен. T80/1 high запущен как исследование без production правок; T90 ждёт принятого type contract.
+- T80/1 done, status подтверждает отсутствие production правок. Прочитан evidence/fetch-contract.md как источник нового type решения; V8 проверяет compiler evidence отдельно без отчёта исполнителя.
+- V8 failed: настоящий native EventEmitter допускается undici planner. Точечно прочитана часть T80.accept-1.md по eventHandler для классификации причины; назначен отдельный B1 без правок, T90 остаётся зависимой.
+- B1 done, прочитана диагностическая частьT80.md: причина доconstructor inference, NoInfer недостаточен, single tuple-union emit закрывает дыру. T80/2 дорабатывает в прежнихграницах, не меняетproduction.
+- T80/2 done, повторная слепая V9 с полным compile matrix и самостоятельными cross-family event probes. Ранний failed не переопределяется; критерий тот же.
+- V9 passed:226 strict compiler probes. T80/2 принята, gateT90 открыт.
