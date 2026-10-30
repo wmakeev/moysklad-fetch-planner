@@ -1,15 +1,28 @@
 {
-  "extends": [
-    "@tsconfig/node22/tsconfig.json",
-    "@tsconfig/strictest/tsconfig.json"
-  ],
   "compilerOptions": {
-    "rootDir": ".",
-    "outDir": "build",
-    "sourceMap": true,
-    "declaration": true,
+    "target": "ES2022",
+    "lib": ["ES2023"],
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "strict": true,
+    "skipLibCheck": false,
+    "noUncheckedIndexedAccess": true,
+    "noImplicitOverride": true,
+    "noImplicitReturns": true,
+    "noPropertyAccessFromIndexSignature": true,
     "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noFallthroughCasesInSwitch": true,
+    "allowUnusedLabels": false,
+    "allowUnreachableCode": false,
+    "isolatedModules": true,
+    "checkJs": true,
+    "esModuleInterop": true,
     "exactOptionalPropertyTypes": false,
+    "types": ["node"],
+    "rootDir": ".",
+    "noEmit": true,
+    "resolveJsonModule": true
   },
-  "include": ["src/**/*", "samples/**/*", "test/**/*"]
+  "include": ["src/**/*", "test/**/*", "samples/**/*"]
 }

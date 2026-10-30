@@ -22,16 +22,18 @@
   },
   "scripts": {
     "env:example": "npx sync-dotenv",
-    "compile:dev": "tsc",
-    "compile": "rm -rf build/ && tsc --build tsconfig.prod.json",
+    "compile:dev": "pnpm run build:test",
+    "compile": "rm -rf build/ && tsc -p tsconfig.prod.json",
     "lint": "eslint . --fix",
     "coverage": "DEBUG=moysklad-fetch-planner:noop c8 node -r dotenv/config --test --enable-source-maps",
     "coverage:report": "c8 report",
-    "build:dev": "npm run lint && npm run compile",
-    "build": "rm -rf build/ && npm run lint && npm run compile",
+    "build:dev": "pnpm run build:test",
+    "build": "pnpm run compile",
     "test": "npm run build && npm run coverage",
     "version": "auto-changelog -p && git add CHANGELOG.md",
-    "release": "np"
+    "release": "np",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "build:test": "rm -rf __temp/test-build/ && tsc -p tsconfig.test.json"
   },
   "engines": {
     "node": ">=24"
