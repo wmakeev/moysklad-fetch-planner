@@ -73,8 +73,8 @@
 - Файлы: src/index.ts, src/response-policy.ts, test/body-cleanup.test.ts, test/helpers/child.mjs.
 - Риск: normal · пишет в боевую систему: нет · приёмка: отдельно · объём: полный
 - Вес: 2
-- Исполнитель: ступень 4 · gpt-6.1-sol (high) · не запущен
-- Верификатор: ступень 4 · gpt-6.1-sol (high) · свежий контекст; та же модель из-за недоступности Claude
+- Исполнитель T60/1: ступень 4 · gpt-6.1-sol (high) · t3 `node:delegated-task:command%3Amcp%3A2c6a6d24-3803-4f36-89a0-5f5bf3bedaaf%3Adelegate-task%3A003-T60-1-implementation` · done; бриф /tmp/orchestrate-fetch-planner-003/T60-1/brief.md
+- Верификатор T60/1: ступень 4 · gpt-6.1-sol (high) · t3 `node:delegated-task:command%3Amcp%3A2c6a6d24-3803-4f36-89a0-5f5bf3bedaaf%3Adelegate-task%3A003-T60-1-verifier` · V6 отдельно · passed; отчёт journal/T60.accept-1.md; свежий контекст, та же модель из-за недоступности Claude
 - Журнал: journal/T60.md
 
 ## T70 — выделить владельца scheduler и сохранить фасад

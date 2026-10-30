@@ -677,7 +677,7 @@ export class FetchPlanner {
     }
   }
 
-  /** Ownership seam for T60: never await cleanup or touch a delivered response. */
+  /** Best-effort cleanup of an owned response; a pending cancel never holds a transport slot. */
   private discardResponse(response: Response) {
     try {
       void response.body?.cancel().catch(() => {

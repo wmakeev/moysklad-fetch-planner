@@ -18,6 +18,8 @@
 
 - T50 принята: correction ограничена в переходе состояния, max1/2/4 и monotonic recovery проверены; D06 red/green подтверждён → journal/T50.accept-1.md.
 
+- T60 принята: полная ownership/cleanup матрица, strict/loopback и естественный exit проверены; runtime cleanup уже реализован T30, T60 закрепляет D08 регрессиями → journal/T60.accept-1.md.
+
 ## План и требования: расхождения
 
 - Нет.
