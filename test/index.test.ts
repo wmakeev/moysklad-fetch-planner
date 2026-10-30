@@ -670,6 +670,12 @@ test('Planner retains defaults and the mutable options object', () => {
   assert.equal(options.parallelLimitCorrectionPeriodMs, 10000)
   assert.equal(options.jitter, 0.1)
   assert.equal(options.throttlingCoefficient, 5)
+  assert.equal(options.eventHandler, undefined)
+  assert.deepEqual(options.errorLimits, {
+    sameEntityPutRequestsPerMinuteLimit: 100,
+    sameRequestsErrorPerMinuteLimit: 100,
+    tooManyRequestsErrorPerMinuteLimit: 100
+  })
   assert.equal(planner.getOptions(), options)
   options.jitter = 0.2
   assert.equal(planner.getOptions().jitter, 0.2)

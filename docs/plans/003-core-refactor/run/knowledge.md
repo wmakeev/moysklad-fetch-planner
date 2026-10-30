@@ -28,6 +28,8 @@
 
 - T100 принята: native/undici runtime, metadata Request/init и replay границы проверены; one-shot ошибка транспорта не выдаётся за успешный replay → journal/T100.accept-1.md.
 
+- T110 принята: D12 errorLimits characterization и публичная совместимость закреплены, source не менялся → journal/T110.accept-1.md.
+
 ## План и требования: расхождения
 
 - Нет.
