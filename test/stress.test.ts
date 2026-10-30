@@ -1,5 +1,12 @@
 import asyncTimers from 'node:timers/promises'
-import { Piscina } from 'piscina'
+
+if (process.env['MOYSKLAD_LIVE_STRESS'] !== '1') {
+  throw new Error(
+    'Live stress is disabled. Set MOYSKLAD_LIVE_STRESS=1 explicitly and supply credentials externally to enable live requests.'
+  )
+}
+
+const { Piscina } = await import('piscina')
 
 const TASKS = 5
 const STEP_TIME_GAP = 6000

@@ -25,11 +25,14 @@
     "compile:dev": "pnpm run build:test",
     "compile": "rm -rf build/ && tsc -p tsconfig.prod.json",
     "lint": "eslint . --fix",
-    "coverage": "DEBUG=moysklad-fetch-planner:noop c8 node -r dotenv/config --test --enable-source-maps",
-    "coverage:report": "c8 report",
+    "coverage": "pnpm run build:test && c8 pnpm run test:unit && pnpm run coverage:check",
+    "coverage:report": "c8 report && pnpm run coverage:check",
+    "coverage:check": "node scripts/check-coverage.mjs",
     "build:dev": "pnpm run build:test",
     "build": "pnpm run compile",
-    "test": "npm run build && npm run coverage",
+    "test": "pnpm run build:test && pnpm run test:unit",
+    "test:unit": "node --test --enable-source-maps __temp/test-build/test/index.test.js",
+    "test:live": "pnpm run build:test && node --enable-source-maps __temp/test-build/test/stress.test.js",
     "version": "auto-changelog -p && git add CHANGELOG.md",
     "release": "np",
     "typecheck": "tsc --noEmit -p tsconfig.json",
@@ -46,6 +49,11 @@
     "arrowParens": "avoid"
   },
   "c8": {
+    "include": [
+      "__temp/test-build/src/**/*.js",
+      "src/**/*.ts"
+    ],
+    "exclude-after-remap": true,
     "reporter": [
       "lcov",
       "text"

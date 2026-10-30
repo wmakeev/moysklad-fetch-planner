@@ -47,8 +47,8 @@
 - Вид/source/deps: ../01-plan.md, T40.
 - Риск: normal · пишет в боевую систему: нет · приёмка: отдельно · объём: полный
 - Журнал: `journal/T40.md`
-- Исполнитель: ступень 3, gpt-6.1-sol (medium).
-- Верификатор: ступень 3, gpt-6.1-sol (medium); свежий контекст, ограничение независимости: та же модель.
+- Исполнитель T40/1: ступень 3 · gpt-6.1-sol (medium) · t3 `node:delegated-task:command%3Amcp%3Aa507b654-c3da-4647-a87e-8cb1e9a713e5%3Adelegate-task%3Afetch-planner-002-T40-1-implementation`.
+- Верификатор T40/1: ступень 3 · gpt-6.1-sol (medium) · t3 `node:delegated-task:command%3Amcp%3Aa507b654-c3da-4647-a87e-8cb1e9a713e5%3Adelegate-task%3Afetch-planner-002-T40-1-verifier` · V5 отдельно · passed · отчёт journal/T40.accept-1.md; ограничение независимости: та же модель.
 
 ## T50 — перенести существенные правила в type-aware oxlint
 

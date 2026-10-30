@@ -23,3 +23,5 @@
 - T20: pnpm12 strict frozen clean/repeat приняты; version c8 проверять installed manifest/lock, не его --version из cwd root. TS5 и ESLint остаются только до T50. → journal/T20.accept-1.md
 
 - T30: prod/test/typecheck разделены, emit src совпал с baseline. resolveJsonModule нужен декларациям Piscina при skipLibCheck=false; это не ослабление strictness. Demo @ts-nocheck остаётся прежним ограничением. → journal/T30.md
+
+- T40: unit/coverage выполняют13тестов; LCOV измеряет реальное выполнение src и отбрасывает пустое/нулевое. Live guard внутри entrypoint до Piscina import; настоящее live не запускалось. Новый scripts/check-coverage.mjs включить в штатный lint в T50. → journal/T40.accept-1.md
