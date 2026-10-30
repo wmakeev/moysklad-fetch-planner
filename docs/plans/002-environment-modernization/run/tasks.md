@@ -10,6 +10,16 @@
 - Исполнитель T10/1: ступень 4 · gpt-6.1-sol (high) · t3 `node:delegated-task:command%3Amcp%3A7ed5933d-0a92-414a-b976-974d9e66189b%3Adelegate-task%3Afetch-planner-002-T10-1-implementation`.
 - Верификатор T10/1: ступень 4 · gpt-6.1-sol (high) · t3 `node:delegated-task:command%3Amcp%3A7ed5933d-0a92-414a-b976-974d9e66189b%3Adelegate-task%3Afetch-planner-002-T10-1-verifier` · V1 отдельно · passed · отчёт `journal/T10.accept-1.md`; ограничение независимости: та же модель.
 
+## T15 — минимум Node 24 и пересмотр U2
+
+- Критерий: package.json engines.node = >=24; root engines в существующем package-lock.json согласован. name/version/main/types и алгоритмы не изменены. Компиляция и все 13 offline тестов проходят на закреплённом рабочем Node 24.22.2. Отчёт отделяет снятые ограничения Node 18 от остающихся потерь Node-правил; каждой рекомендации есть воспроизводимая проба и альтернативное решение. Дополнительный lint pipeline и молчаливое принятие потерь не вводятся.
+- Файлы: package.json, package-lock.json (только engines), test/index.test.ts (одна unused-disable строка), evidence/node24-floor.md.
+- Вид: правка кода и исследование · source: решение владельца «да, поднимай» · deps: T10.
+- Риск: normal · пишет в боевую систему: нет · приёмка: отдельно · объём: полный
+- Журнал: journal/T15.md.
+- Исполнитель T15/1: ступень 4 · gpt-6.1-sol (high) · t3 `node:delegated-task:command%3Amcp%3Aa507b654-c3da-4647-a87e-8cb1e9a713e5%3Adelegate-task%3Afetch-planner-002-T15-1-implementation`; пересмотр основания U2 после изменения публичного минимума.
+- Верификатор T15/1: ступень 4 · gpt-6.1-sol (high) · t3 `node:delegated-task:command%3Amcp%3Aa507b654-c3da-4647-a87e-8cb1e9a713e5%3Adelegate-task%3Afetch-planner-002-T15-1-verifier` · V2 отдельно · partial (только описание результатов), текст исправлен оркестратором; код независимо прошёл · отчёт `journal/T15.accept-1.md`; ограничение независимости: та же модель.
+
 ## T20 — перейти на закреплённый pnpm и локальные инструменты
 
 - Критерий: в новой временной копии без node_modules `pnpm install --frozen-lockfile` проходит; повторная установка не меняет lock; CLI запускаются через pnpm exec; manifest содержит прежние name/version/main/types/engines; единственный lock — pnpm. Состав зависимостей сопоставлен с T10, случайных массовых upgrades нет.

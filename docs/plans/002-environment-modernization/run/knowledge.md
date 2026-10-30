@@ -17,3 +17,5 @@
 ## Процесс: уроки и промахи
 
 - Нет.
+
+- После Node floor24 новый lint warning устранён удалением лишней test-директивы; V2 подтвердил 2 прежних warnings и 13 tests. Node guard возможен на emitted JS без TS5 parser; однако это второй lint шаг. Один oxlint может запретить process.exit, но не заменяет все Node/dependency guards. → ../evidence/node24-floor.md
