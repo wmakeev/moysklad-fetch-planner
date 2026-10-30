@@ -1,29 +1,129 @@
-name: Test and coverage action
+name: Check and runtime compatibility
+
 on:
+  pull_request:
   push:
     branches:
       - master
+
+permissions:
+  contents: read
+
 jobs:
-  coverage:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .node-version
+          package-manager-cache: false
+      - uses: pnpm/action-setup@v6.1.0
+        with:
+          run_install: false
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm check
+      - run: pnpm coverage
+
+  unit:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        node-version: ['22.x']
+        node-version: ['26.x']
     steps:
-      - name: Check out repository code
-        uses: actions/checkout@v4
-
-      - name: Use Node.js ${{ matrix.node-version }}
-        uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7
         with:
           node-version: ${{ matrix.node-version }}
-
-      - run: npm ci
-      - run: npm run test
-        env:
-          MOYSKLAD_TOKEN: ${{ secrets.MOYSKLAD_TOKEN }}
-
-      - name: Upload coverage reports to Codecov
-        uses: codecov/codecov-action@v5
+          package-manager-cache: false
+      - uses: pnpm/action-setup@v6.1.0
         with:
-          token: ${{ secrets.CODECOV_TOKEN }}
+          run_install: false
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm test
+
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .node-version
+          package-manager-cache: false
+      - uses: pnpm/action-setup@v6.1.0
+        with:
+          run_install: false
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm test:package
+
+  artifact:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .node-version
+          package-manager-cache: false
+      - uses: pnpm/action-setup@v6.1.0
+        with:
+          run_install: false
+      - run: pnpm install --frozen-lockfile
+      - name: Build one package and prepare runtime fixture
+        shell: bash
+        run: |
+          artifact="$RUNNER_TEMP/runtime-artifact"
+          mkdir -p "$artifact"
+          pnpm pack --pack-destination "$artifact"
+          mv "$artifact"/*.tgz "$artifact/package.tgz"
+          sed \
+            -e "s|'../../../src/index.js'|'moysklad-fetch-planner'|" \
+            -e "s|import \* as deep from 'moysklad-fetch-planner'|import * as deep from 'moysklad-fetch-planner/build/src/index.js'|" \
+            test/package/fixtures/runtime.mjs > "$artifact/runtime.mjs"
+          grep -Eq "^import .+ from 'moysklad-fetch-planner'$" "$artifact/runtime.mjs"
+          grep -Eq "^import .+ from 'moysklad-fetch-planner/build/src/index[.]js'$" "$artifact/runtime.mjs"
+          cd "$artifact"
+          sha256sum package.tgz runtime.mjs > SHA256SUMS
+      - uses: actions/upload-artifact@v7
+        with:
+          name: runtime-package
+          path: ${{ runner.temp }}/runtime-artifact/
+          if-no-files-found: error
+          retention-days: 7
+
+  runtime:
+    needs: artifact
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node-version: ['24.0.0', '24.x', '26.x']
+    steps:
+      - uses: actions/setup-node@v7
+        with:
+          node-version: ${{ matrix.node-version }}
+          package-manager-cache: false
+      - uses: actions/download-artifact@v8
+        with:
+          name: runtime-package
+          path: ${{ runner.temp }}/runtime-artifact
+      - name: Install artifact without development dependencies and smoke test
+        shell: bash
+        run: |
+          cd "$RUNNER_TEMP/runtime-artifact"
+          sha256sum --check SHA256SUMS
+          consumer="$(mktemp -d)"
+          trap 'rm -rf "$consumer"' EXIT
+          printf '{"private":true,"type":"module"}\n' > "$consumer/package.json"
+          npm install --prefix "$consumer" --ignore-scripts --omit=dev --no-audit --no-fund --package-lock=false "$PWD/package.tgz"
+          test ! -d "$consumer/node_modules/undici"
+          cp runtime.mjs "$consumer/runtime.mjs"
+          node --version
+          node "$consumer/runtime.mjs"

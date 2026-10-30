@@ -34,3 +34,5 @@
 - T70 принят V8: check немутирующий и передаёт ошибки5этапов; Knip diagnostics подтверждены. Прежний jitter-test test/index.test.ts:313 нестабилен (delaysDiffAvg<10), воспроизведён раз в дополнительных пробах; этап3, не менять критерий/threshold в миграции окружения. → journal/T70.accept-1.md
 
 - T80 принят V9: настоящий npm/pnpm tarball absent/stale build, isolated bare/undici consumers TS5/TS7,TS2307 gate пройдены. Native Fetch дефект остаётся; API не менялся. → journal/T80.accept-1.md
+
+- T90: локальные shell и runtime24.0.0/24.22.2/26.13.0 прошли; реального Actions-run не было. После sed обязательны проверки specifiers, иначе namespace rename молча убирал deep import; D1 исправлен с отрицательной пробой, независимый recheck в финале. → journal/T90.accept-1.md
