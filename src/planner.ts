@@ -80,8 +80,8 @@ export class FetchPlanner<F extends Transport = UndiciFetch> {
   private readonly options: FetchPlannerOptions<F>
 
   /**
-   * Интервал в миллисекундах, в течение которого можно сделать кол-во запросов
-   * указанных в заголовке `X-RateLimit-Limit`.
+   * Интервал бюджета в миллисекундах. `X-RateLimit-Limit` задаёт единицы
+   * бюджета; число запросов зависит от их веса.
    *
    * Значение приходит в заголовке `X-Lognex-Retry-TimeInterval`.
    */
@@ -91,7 +91,7 @@ export class FetchPlanner<F extends Transport = UndiciFetch> {
    * Значение заголовка `X-RateLimit-Limit` из последнего
    * полученного ответа сервера.
    *
-   * Например: `45` (45 запросов на один интервал `retryTimeInterval`)
+   * Например: `45` единиц бюджета на интервал `retryTimeInterval`.
    * */
   protected rateLimit: number | null = null
 

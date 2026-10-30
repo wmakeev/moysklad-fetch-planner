@@ -32,12 +32,14 @@
 
 - T120 принята: sample warnings устранены, lint/typecheck0warnings/0errors без запуска sample → journal/T120.accept-1.md.
 
-- T130 принята: README/architecture и generic/eventHandlerJSDoc сверены, прежние optionJSDoc внеизменённойобласти содержат неточности; фактические границы смотреть вREADME/architecture → journal/T130.accept-1.md, T130.з1.
+- T130 принята повторно: публичный options/ResponseTypeJSDoc согласован сфактическимконтрактом, универсальнаяскоростьнеобещается; свежийtarballисправлен, runtime/typesбезкомментариевнеизменны → journal/T130.accept-2.md.
 
 ## План и требования: расхождения
 
 - Нет.
 
 ## Процесс: уроки и промахи
+
+- Самостоятельно суженный файловыйscope документации не отменяет сквозную цель: публичные JSDoc попадают вtarball и должны проверяться наряду сREADME. Финальнаяприёмка обнаружила оставленное обещание и вернулаT130 → journal/plan-1.md.
 
 - Allowlist до чтения: секретные .env и .env.* включая example не открывать, не копировать и не хешировать.
