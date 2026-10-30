@@ -1,6 +1,14 @@
 /* oxlint-disable no-var */
 
 import assert from 'node:assert'
+import {
+  calculateRequestDelay,
+  createAttenuationSteps,
+  requestDeadline,
+  roundPositiveOption,
+  safeTime
+} from './pacing.js'
+import { parseResponsePolicy } from './response-policy.js'
 import type { RequestInfo, RequestInit, Request, Response } from 'undici-types'
 
 //#region debug function
@@ -29,36 +37,7 @@ if (typeof DEBUG === 'string' && DEBUG.includes(MODULE_NAME)) {
 /* c8 ignore stop */
 //#endregion
 
-/**
- * Код для ошибки `Превышено ограничение на одновременное количество запросов`.
- * Этот код передается в заголовке ответа `X-Lognex-Auth`
- */
-const LOGNEX_PARALLEL_LIMIT_OVERFLOW_ERROR_CODE = '429005'
-
-/**
- * `Превышено ограничение на количество запросов в единицу времени`
- */
-// const LOGNEX_RATE_LIMIT_OVERFLOW_ERROR_CODE = '429002'
-
-// TODO Нужно еще учитывать PARALLEL_LIMIT_OVERFLOW и накидывать определенный
-// коэффициент на задержку если были ошибки в неком окне в прошлом и запрещать
-// увеличивать лимит при пересмотре.
-
-/**
- * Тип результата выполнения запроса
- */
-const ResponseTypes = {
-  /** Запрос выполнен без ошибок */
-  OK: 'OK',
-
-  /** Запрос не выполнен по причине превышения лимита `X-RateLimit-Limit` */
-  RATE_LIMIT_OVERFLOW: 'RATE_LIMIT_OVERFLOW',
-
-  /** Запрос не выполнен по причине превышения лимита параллельных запросов */
-  PARALLEL_LIMIT_OVERFLOW: 'PARALLEL_LIMIT_OVERFLOW'
-} as const
-
-type ResponseType = keyof typeof ResponseTypes
+type ResponseType = ReturnType<typeof parseResponsePolicy>['responseType']
 
 /**
  * Параметры http запроса (Action) для отправки в очередь планировщика
@@ -171,18 +150,6 @@ export interface FetchPlannerEventMap {
  * [Fetch API](https://developer.mozilla.org/en-US/docs/Web/API/Fetch_API)
  */
 type Fetch = (url: RequestInfo, init?: RequestInit) => Promise<Response>
-
-const RateLimitHeaderSetterByName = {
-  'x-lognex-retry-timeInterval': function (val) {
-    this.retryTimeInterval = val
-  },
-  'x-ratelimit-limit': function (val) {
-    this.rateLimit = val
-  },
-  'x-ratelimit-remaining': function (val) {
-    this.rateLimitRemaining = val
-  }
-} satisfies Record<string, (this: FetchPlanner, value: number) => void>
 
 /**
  * Параметры планировщика запросов
@@ -309,6 +276,26 @@ export interface FetchPlannerOptions {
    * **По умолчанию:** `10000` (10 секунд)
    */
   parallelLimitCorrectionPeriodMs: number
+
+  /**
+   * Ограничения на кол-во запросов, за превышение которых МойСклад блокирует доступ к API.
+   */
+  errorLimits: {
+    /**
+     * Максимальное кол-во идентичных запросов за минуту, которые завершились ошибкой, в течение последнего часа.
+     */
+    sameRequestsErrorPerMinuteLimit: number
+
+    /**
+     * Максимальное кол-во идентичных запросов за минуту, которые завершились ошибкой, в течение последнего часа.
+     */
+    tooManyRequestsErrorPerMinuteLimit: number
+
+    /**
+     * Максимальное кол-во PUT запросов к одной и той же сущности за минуту в течение последнего часа.
+     */
+    sameEntityPutRequestsPerMinuteLimit: number
+  }
 }
 
 export class FetchPlanner {
@@ -439,7 +426,12 @@ export class FetchPlanner {
       maxParallelLimit: 4,
       maxRequestDelayTimeMs: 3000,
       jitter: 0.1,
-      parallelLimitCorrectionPeriodMs: 10000
+      parallelLimitCorrectionPeriodMs: 10000,
+      errorLimits: {
+        sameEntityPutRequestsPerMinuteLimit: 100,
+        sameRequestsErrorPerMinuteLimit: 100,
+        tooManyRequestsErrorPerMinuteLimit: 100
+      }
     }
 
     if (params?.eventHandler != null) {
@@ -453,43 +445,44 @@ export class FetchPlanner {
     }
 
     if (params?.maxParallelLimit !== undefined) {
-      assert.ok(
-        typeof params.maxParallelLimit === 'number' && params.maxParallelLimit > 0,
-        'Опция "maxParallelLimit" должна быть целым числом больше нуля'
+      optionsDefault.maxParallelLimit = roundPositiveOption(
+        params.maxParallelLimit,
+        1,
+        'maxParallelLimit'
       )
-      optionsDefault.maxParallelLimit = Math.round(params.maxParallelLimit)
     }
 
     if (params?.maxRequestDelayTimeMs !== undefined) {
-      assert.ok(
-        typeof params.maxRequestDelayTimeMs === 'number' && params.maxRequestDelayTimeMs > 0,
-        'Опция "maxRequestDelayTimeMs" должна быть целым числом больше 0'
+      optionsDefault.maxRequestDelayTimeMs = roundPositiveOption(
+        params.maxRequestDelayTimeMs,
+        1,
+        'maxRequestDelayTimeMs'
       )
-      optionsDefault.maxRequestDelayTimeMs = Math.round(params.maxRequestDelayTimeMs)
     }
 
     if (params?.jitter !== undefined) {
       assert.ok(
-        typeof params.jitter === 'number' && params.jitter >= 0 && params.jitter <= 0.3,
+        typeof params.jitter === 'number' &&
+          Number.isFinite(params.jitter) &&
+          params.jitter >= 0 &&
+          params.jitter <= 0.3,
         'Опция "jitter" должна быть целым числом от 0 до 0.3'
       )
       optionsDefault.jitter = params.jitter
     }
 
     if (params?.parallelLimitCorrectionPeriodMs !== undefined) {
-      assert.ok(
-        typeof params.parallelLimitCorrectionPeriodMs === 'number' &&
-          params.parallelLimitCorrectionPeriodMs >= 1000,
-        'Опция "parallelLimitCorrectionPeriodMs" должна быть целым числом больше либо равным 1000'
-      )
-      optionsDefault.parallelLimitCorrectionPeriodMs = Math.round(
-        params.parallelLimitCorrectionPeriodMs
+      optionsDefault.parallelLimitCorrectionPeriodMs = roundPositiveOption(
+        params.parallelLimitCorrectionPeriodMs,
+        1000,
+        'parallelLimitCorrectionPeriodMs'
       )
     }
 
     if (params?.throttlingCoefficient !== undefined) {
       assert.ok(
         typeof params.throttlingCoefficient === 'number' &&
+          Number.isFinite(params.throttlingCoefficient) &&
           params.throttlingCoefficient >= 1 &&
           params.throttlingCoefficient <= 20,
         'Опция "throttlingCoefficient" должна быть числом от 1 до 20'
@@ -499,9 +492,7 @@ export class FetchPlanner {
 
     this.options = optionsDefault
 
-    this.attenuationFnSteps = Array.from({ length: 101 }, (_, i) =>
-      Math.pow(1 - i / 100, optionsDefault.throttlingCoefficient)
-    )
+    this.attenuationFnSteps = createAttenuationSteps(optionsDefault.throttlingCoefficient)
   }
 
   /**
@@ -529,58 +520,17 @@ export class FetchPlanner {
    * @returns Интервал ожидания ms
    */
   private calculateRequestDelayTime() {
-    // Если текущие значения X-Lognex-Retry-TimeInterval, X-RateLimit-Limit,
-    // X-RateLimit-Remaining не получены, то вероятно мы еще не отправляли
-    // запросов. В ожидании нет необходимости.
-    if (this.rateLimit === null || this.rateLimitRemaining === null) {
-      debug?.('calculateRequestDelayTime', 'no known rate limit')
-      return 0
-    }
-
-    // Необходимо уменьшать задержку с течением времени после получения
-    // последних актуальных заголовков RateLimit
-    const timeFromLastRequest = Date.now() - this.lastRequestStartTime
-    debug?.('calculateRequestDelayTime', `timeFromLastRequest - ${timeFromLastRequest}`)
-
-    // Прошло достаточно времени чтобы отменить задержку для запроса
-    if (timeFromLastRequest >= this.retryTimeInterval) return 0
-
-    const waterlineCorrection = timeFromLastRequest / this.retryTimeInterval
-    debug?.('calculateRequestDelayTime', `waterlineCorrection - ${waterlineCorrection}`)
-
-    /**
-     * Процент оставшегося лимита
-     *
-     * - `0` - 0% лимита (`X-RateLimit-Remaining = 0`)
-     * - `1` - 100% лимита (`X-RateLimit-Remaining = 45`)
-     */
-    const waterline = this.rateLimitRemaining / this.rateLimit
-    debug?.(
-      'calculateRequestDelayTime',
-      `rateLimitRemaining[${this.rateLimitRemaining}] / rateLimit[${this.rateLimit}] = waterline[${waterline}]`
+    return calculateRequestDelay(
+      {
+        limit: this.rateLimit,
+        remaining: this.rateLimitRemaining,
+        retryTimeInterval: this.retryTimeInterval,
+        elapsed: Date.now() - this.lastRequestStartTime
+      },
+      this.options,
+      this.attenuationFnSteps,
+      Math.random()
     )
-
-    const attenuationFnStep = Math.round((waterline + waterlineCorrection) * 100)
-    debug?.('calculateRequestDelayTime', `attenuationFnStep - ${attenuationFnStep}`)
-
-    // После корректировки задержка минимальна
-    if (attenuationFnStep > 100) {
-      debug?.('calculateRequestDelayTime', 'delay - 0')
-      return 0
-    }
-
-    const k = this.attenuationFnSteps[attenuationFnStep] /* c8 ignore next */ ?? 1
-
-    const jitterRange = this.options.maxRequestDelayTimeMs * this.options.jitter
-
-    const jitter = jitterRange / 2 - Math.random() * jitterRange
-    debug?.('calculateRequestDelayTime', `jitter - ${jitter}`)
-
-    const delayMs = Math.round(k * (this.options.maxRequestDelayTimeMs + jitter))
-
-    debug?.('calculateRequestDelayTime', `delayMs - ${delayMs}`)
-
-    return delayMs
   }
 
   /**
@@ -599,7 +549,7 @@ export class FetchPlanner {
 
     const delayMs = Math.max(implicitDelayMs, calculatedDelayMs)
 
-    const planTime = Date.now() + delayMs
+    const planTime = requestDeadline(Date.now(), delayMs)
 
     debug?.('planProcessAction', `planned after ${delayMs}`)
 
@@ -667,33 +617,6 @@ export class FetchPlanner {
     }
   }
 
-  private parseNumberHeader(headers: Response['headers'], headerName: string) {
-    const headerValue = headers.get(headerName)
-
-    if (headerValue == null) return null
-
-    const parsedHeaderValue = Number.parseInt(headerValue)
-
-    if (Number.isNaN(parsedHeaderValue)) {
-      throw new Error(`Некорректный формат заголовка ${headerName} - "${headerValue}"`)
-    }
-
-    return parsedHeaderValue
-  }
-
-  private parseRateLimitHeader(
-    headers: Response['headers'],
-    headerName: keyof typeof RateLimitHeaderSetterByName
-  ) {
-    const setter = RateLimitHeaderSetterByName[headerName]
-
-    const value = this.parseNumberHeader(headers, headerName)
-
-    if (value == null) return
-
-    setter.call(this, value)
-  }
-
   /**
    * Увеличивает лимит параллельных запросов, если он был ранее занижен по
    * причине превышения лимита.
@@ -701,12 +624,14 @@ export class FetchPlanner {
   private reviewParallelLimitCorrection() {
     const now = Date.now()
 
-    const periodStart =
+    const periodStart = safeTime(
       now -
-      this.options.parallelLimitCorrectionPeriodMs *
-        // Jitter для равномерного распределения времени коррекции между разными
-        // экземплярами планировщика, которые могут работать параллельно
-        (1 + 2 * Math.random() * this.options.jitter)
+        safeTime(
+          this.options.parallelLimitCorrectionPeriodMs *
+            // Jitter для равномерного распределения времени коррекции между экземплярами
+            (1 + 2 * Math.random() * this.options.jitter)
+        )
+    )
 
     /** Пора ли провести коррекцию? */
     const shouldCorrect =
@@ -784,60 +709,23 @@ export class FetchPlanner {
       .then(resp => {
         const requestEndTime = Date.now()
 
-        let responseType: ResponseType
+        const policy = parseResponsePolicy(resp.status, resp.headers)
+        if (policy.retryTimeInterval !== null) this.retryTimeInterval = policy.retryTimeInterval
+        if (policy.limit !== null) this.rateLimit = policy.limit
+        if (policy.remaining !== null) this.rateLimitRemaining = policy.remaining
+        const responseType = policy.responseType
 
-        // X-Lognex-Retry-TimeInterval
-        this.parseRateLimitHeader(resp.headers, 'x-lognex-retry-timeInterval')
-
-        // X-RateLimit-Limit
-        this.parseRateLimitHeader(resp.headers, 'x-ratelimit-limit')
-
-        // X-RateLimit-Remaining
-        this.parseRateLimitHeader(resp.headers, 'x-ratelimit-remaining')
-
-        // Запрос без ошибки
-        if (resp.status !== 429) {
-          responseType = ResponseTypes.OK
+        if (responseType === 'OK') {
           action.resolve(resp)
-        }
-
-        // Ошибка превышения лимита
-        else {
-          responseType = ResponseTypes.RATE_LIMIT_OVERFLOW
-
-          // Возвращаем запрос в начало очереди
+        } else {
+          // Возвращаем запрос в начало очереди для повтора.
           this.actionsQueue.unshift(action)
-
-          const lognexAuthCode = resp.headers.get('x-lognex-auth')
-
-          // Заголовок `X-Lognex-Retry-After` отсутствует когда ошибка вызвана
-          // превышением кол-ва параллельных запросов.
-
-          // Превышен лимит параллельных запросов
-          if (lognexAuthCode === LOGNEX_PARALLEL_LIMIT_OVERFLOW_ERROR_CODE) {
-            // Кто-то работает в параллельном процессе, снижаем наш maxParallelLimit
+          if (responseType === 'PARALLEL_LIMIT_OVERFLOW') {
             this.reduceParallelLimit()
-
             this.lastParallelLimitOverflowTime = requestStartTime
             this.parallelLimitCorrectionTime = requestEndTime
-
-            responseType = ResponseTypes.PARALLEL_LIMIT_OVERFLOW
-          }
-
-          // Превышен лимит за единицу времени
-          else {
-            // X-Lognex-Retry-After
-            const retryAfterHeader = resp.headers.get('x-lognex-retry-after')
-
-            if (retryAfterHeader != null) {
-              const retryAfterHeaderNum = Number.parseInt(retryAfterHeader)
-
-              if (Number.isNaN(retryAfterHeaderNum)) {
-                throw new Error(`Неверный формат X-Lognex-Retry-After - ${retryAfterHeader}`)
-              }
-
-              retryAfterMs = retryAfterHeaderNum
-            }
+          } else {
+            retryAfterMs = policy.retryAfterMs
           }
         }
 
@@ -954,7 +842,9 @@ export class FetchPlanner {
   }
 
   /**
-   * Возвращает параметры планировщика по умолчанию либо указанные при его создании
+   * Возвращает параметры планировщика по умолчанию либо указанные при его создании.
+   * Объект остаётся изменяемым, но mutation не поддерживается как конфигурирование:
+   * предварительно рассчитанная таблица коэффициентов при этом не обновляется.
    */
   getOptions() {
     return this.options

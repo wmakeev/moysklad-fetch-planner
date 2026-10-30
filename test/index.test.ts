@@ -609,3 +609,61 @@ test('FetchPlanner (retry 429 parallel limit overflow error)', async () => {
   // Лимит параллельных запросов восстановлен в исходное значение
   assert.equal(fetchPlanner.getParallelLimitCorrection(), 0)
 })
+
+test('Numeric options reject unsafe values synchronously and preserve rounded bounds', () => {
+  const integerOptions = [
+    'maxParallelLimit',
+    'maxRequestDelayTimeMs',
+    'parallelLimitCorrectionPeriodMs'
+  ] as const
+  for (const name of [...integerOptions, 'jitter', 'throttlingCoefficient']) {
+    for (const value of ['1', null, true, {}, []]) {
+      assert.throws(
+        () => Reflect.construct(FetchPlanner, [fetch, { [name]: value }]),
+        new RegExp(name)
+      )
+    }
+  }
+  for (const name of integerOptions) {
+    for (const value of [0, -1, 0.1, NaN, Infinity, -Infinity, Number.MAX_SAFE_INTEGER + 1]) {
+      assert.throws(() => new FetchPlanner(fetch, { [name]: value }), new RegExp(name))
+    }
+    const minimum = name === 'parallelLimitCorrectionPeriodMs' ? 1000 : 1
+    assert.equal(new FetchPlanner(fetch, { [name]: minimum }).getOptions()[name], minimum)
+    assert.equal(new FetchPlanner(fetch, { [name]: minimum - 0.4 }).getOptions()[name], minimum)
+    assert.throws(() => new FetchPlanner(fetch, { [name]: minimum - 0.6 }))
+    for (const value of [2147483647, 2147483648, Number.MAX_SAFE_INTEGER]) {
+      assert.equal(new FetchPlanner(fetch, { [name]: value }).getOptions()[name], value)
+    }
+  }
+  for (const name of ['jitter', 'throttlingCoefficient'] as const) {
+    for (const value of [NaN, Infinity, -Infinity, -1, Number.MAX_SAFE_INTEGER + 1]) {
+      assert.throws(() => new FetchPlanner(fetch, { [name]: value }), new RegExp(name))
+    }
+  }
+  assert.throws(() => new FetchPlanner(fetch, { jitter: 0.31 }))
+  assert.throws(() => new FetchPlanner(fetch, { throttlingCoefficient: 0 }))
+  assert.throws(() => new FetchPlanner(fetch, { throttlingCoefficient: 20.1 }))
+  assert.equal(new FetchPlanner(fetch, { jitter: 0 }).getOptions().jitter, 0)
+  assert.equal(new FetchPlanner(fetch, { jitter: 0.3 }).getOptions().jitter, 0.3)
+  for (const coefficient of [1, 2.5, 20]) {
+    assert.equal(
+      new FetchPlanner(fetch, { throttlingCoefficient: coefficient }).getOptions()
+        .throttlingCoefficient,
+      coefficient
+    )
+  }
+})
+
+test('Planner retains defaults and the mutable options object', () => {
+  const planner = new FetchPlanner(fetch)
+  const options = planner.getOptions()
+  assert.equal(options.maxParallelLimit, 4)
+  assert.equal(options.maxRequestDelayTimeMs, 3000)
+  assert.equal(options.parallelLimitCorrectionPeriodMs, 10000)
+  assert.equal(options.jitter, 0.1)
+  assert.equal(options.throttlingCoefficient, 5)
+  assert.equal(planner.getOptions(), options)
+  options.jitter = 0.2
+  assert.equal(planner.getOptions().jitter, 0.2)
+})

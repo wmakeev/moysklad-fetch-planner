@@ -10,6 +10,8 @@
 
 - T10 принята: offline entrypoint включает два suite, harness находится в test/helpers/runtime.ts без production injection API → journal/T10.accept-1.md.
 
+- T20 принята: pacing и response-policy чистые; D07 исправлен, формула и defaults сохранены. Long timer chunks ещё T40, lifecycle ещё T30 → journal/T20.accept-1.md.
+
 ## План и требования: расхождения
 
 - Нет.
