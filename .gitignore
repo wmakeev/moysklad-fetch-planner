@@ -17,3 +17,6 @@ node_modules
 
 #coverage
 /coverage/
+
+# Local plans and execution journals
+/.plans/
