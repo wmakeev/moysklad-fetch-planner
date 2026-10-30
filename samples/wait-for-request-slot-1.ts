@@ -34,9 +34,6 @@ const SOURCE_DELAY_MS = 5
 /** Лимит на кол-во параллельных запросов */
 const PARALLEL_LIMIT = 4
 
-/** Включен ли режим триггера по свободным слотам */
-const IS_SLOT_WAIT_ON = true
-
 const fetchPlanner = new FetchPlanner(fetch, {
   maxParallelLimit: PARALLEL_LIMIT
 })
@@ -102,7 +99,7 @@ async function sample1(items: DocumentRef[]) {
 
         return (err, it, push, next) => {
           // error
-          if (err) {
+          if (err instanceof Error) {
             push(err)
             next()
           }
@@ -127,7 +124,7 @@ async function sample1(items: DocumentRef[]) {
 
             next()
 
-            if (!isWaiting && IS_SLOT_WAIT_ON) {
+            if (!isWaiting) {
               isWaiting = true
 
               fetchPlanner

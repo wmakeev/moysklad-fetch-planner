@@ -39,3 +39,6 @@
 - T100 commit по назначенным путям, состав проверен. T110/1 medium запущен как тестоваяфиксация безsourceправок.
 - T110/1 done, diff-stat двухразрешённыхтестов сверён. V12 принимает characterization исовместимость, безsourceправок.
 - V12 passed:108tests, D12/совместимость подтверждены, source неизменён; только прежние warnings/hints.
+- T110 commit по назначенным путям, состав проверен. T120/1 Sol low поразрешённойзамене ступени2, live sample не запускается.
+- T120/1 done:lint/typecheck0warnings/0errors. V13 проверяетdiffсемантикуисвоиreadonlychecks, sampleнезапускается.
+- V13 passed:lint/typecheck0warnings/0errors, логикаsampleсохранена, liveнезапускался.

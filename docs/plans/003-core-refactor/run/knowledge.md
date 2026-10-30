@@ -30,6 +30,8 @@
 
 - T110 принята: D12 errorLimits characterization и публичная совместимость закреплены, source не менялся → journal/T110.accept-1.md.
 
+- T120 принята: sample warnings устранены, lint/typecheck0warnings/0errors без запуска sample → journal/T120.accept-1.md.
+
 ## План и требования: расхождения
 
 - Нет.
