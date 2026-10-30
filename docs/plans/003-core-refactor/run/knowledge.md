@@ -32,6 +32,8 @@
 
 - T120 принята: sample warnings устранены, lint/typecheck0warnings/0errors без запуска sample → journal/T120.accept-1.md.
 
+- T130 принята: README/architecture и generic/eventHandlerJSDoc сверены, прежние optionJSDoc внеизменённойобласти содержат неточности; фактические границы смотреть вREADME/architecture → journal/T130.accept-1.md, T130.з1.
+
 ## План и требования: расхождения
 
 - Нет.

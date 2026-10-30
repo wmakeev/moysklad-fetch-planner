@@ -80,19 +80,14 @@ export interface FetchPlannerOptions<F extends Transport = Transport> {
   /**
    * Обработчик событий планировщика.
    *
-   * Должен соответствовать следующему минимальному интерфейсу:
-   *
-   * ```ts
-   * interface EventHandler {
-   *   emit(eventName: string, data?: any): void
-   * }
-   * ```
+   * Синхронный FetchPlannerEventHandler<F>: emit получает коррелированный tuple
+   * имени события, данных и FetchPlanner<F>. Async listeners не ожидаются.
    *
    * Можно использовать для логирования, сбора статистики и анализа нагрузки
    * на API.
    *
    * ```ts
-   * const eventHandler = new EventEmitter<FetchPlannerEventMap>()
+   * const eventHandler = new EventEmitter<FetchPlannerEventMap<typeof globalThis.fetch>>()
    *
    * eventHandler.on('response', (ev, planner) => {
    *   if (ev.responseType !== 'OK') {
@@ -100,7 +95,7 @@ export interface FetchPlannerOptions<F extends Transport = Transport> {
    *   }
    * })
    *
-   * const fetchPlannerEventHandler = new FetchPlanner(fetch, { eventHandler })
+   * const fetchPlanner = new FetchPlanner(globalThis.fetch, { eventHandler })
    * ```
    *
    * @see {@link FetchPlannerEventHandler} детальное описание событий

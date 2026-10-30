@@ -164,8 +164,8 @@
 - Файлы: README.md, docs/architecture.md.
 - Риск: normal · пишет в боевую систему: нет · приёмка: отдельно · объём: полный
 - Вес: 2
-- Исполнитель: ступень 3 · gpt-6.1-sol (medium) · не запущен
-- Верификатор: ступень 3 · gpt-6.1-sol (medium) · свежий контекст; та же модель из-за недоступности Claude
+- Исполнитель T130/1: ступень 3 · gpt-6.1-sol (medium) · t3 `node:delegated-task:command%3Amcp%3A2c6a6d24-3803-4f36-89a0-5f5bf3bedaaf%3Adelegate-task%3A003-T130-1-implementation` · done; бриф /tmp/orchestrate-fetch-planner-003/T130-1/brief.md
+- Верификатор T130/1: ступень 3 · gpt-6.1-sol (medium) · t3 `node:delegated-task:command%3Amcp%3A2c6a6d24-3803-4f36-89a0-5f5bf3bedaaf%3Adelegate-task%3A003-T130-1-verifier` · V14 отдельно · passed; отчёт journal/T130.accept-1.md; свежий контекст, та же модель из-за недоступности Claude
 - Журнал: journal/T130.md
 
 ## T140 — сквозная приёмка003 и передача этапу4

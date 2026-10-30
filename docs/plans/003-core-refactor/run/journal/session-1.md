@@ -42,3 +42,6 @@
 - T110 commit по назначенным путям, состав проверен. T120/1 Sol low поразрешённойзамене ступени2, live sample не запускается.
 - T120/1 done:lint/typecheck0warnings/0errors. V13 проверяетdiffсемантикуисвоиreadonlychecks, sampleнезапускается.
 - V13 passed:lint/typecheck0warnings/0errors, логикаsampleсохранена, liveнезапускался.
+- T120 commit по назначенным путям, состав проверен. T130/1 medium запущен, только документация/оговорённые комментарии.
+- T130/1 done, областьсверенаstatus/diff-stat; V14 самостоятельно сверяетдокументациюсsource/tests/primarydocs.
+- V14 passed; точечно прочитана группа JSDoc замечаний. Старые optionsJSDoc внеT130 зафиксированы долгом вHANDOFF, безснижения критериев003.

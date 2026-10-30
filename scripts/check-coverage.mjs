@@ -20,7 +20,7 @@ const records = report
     return { file, lines }
   })
 
-// Every executable source module is mandatory. There are currently no type-only files.
+// Every executable source module is mandatory; fetch-types.ts contains only types.
 const executableModules = ['index', 'planner', 'pacing', 'response-policy', 'runtime']
 for (const name of executableModules) {
   const file = path.join('src', `${name}.ts`)

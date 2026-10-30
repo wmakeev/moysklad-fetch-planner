@@ -1,415 +1,156 @@
 # moysklad-fetch-planner <!-- omit in toc -->
 
-[![npm](https://img.shields.io/npm/v/moysklad-fetch-planner.svg?cacheSeconds=1800&style=flat-square)](https://www.npmjs.com/package/moysklad-fetch-planner) [![GitHub Actions Workflow Status](https://img.shields.io/github/actions/workflow/status/wmakeev/moysklad-fetch-planner/main.yml?style=flat-square)](https://github.com/wmakeev/moysklad-fetch-planner/actions/workflows/main.yml) [![Codecov](https://img.shields.io/codecov/c/github/wmakeev/moysklad-fetch-planner?style=flat-square)](https://app.codecov.io/gh/wmakeev/moysklad-fetch-planner/tree/master/) ![no dependencies](https://img.shields.io/badge/dependencies-no-green?style=flat-square)
+[![npm](https://img.shields.io/npm/v/moysklad-fetch-planner.svg?cacheSeconds=1800&style=flat-square)](https://www.npmjs.com/package/moysklad-fetch-planner) [![GitHub Actions Workflow Status](https://img.shields.io/github/actions/workflow/status/wmakeev/moysklad-fetch-planner/main.yml?style=flat-square)](https://github.com/wmakeev/moysklad-fetch-planner/actions/workflows/main.yml) [![Codecov](https://img.shields.io/codecov/c/github/wmakeev/moysklad-fetch-planner?style=flat-square)](https://app.codecov.io/gh/wmakeev/moysklad-fetch-planner/tree/master/)
 
 > Планировщик запросов для API МойСклад
 
-Позволяет выполнять асинхронные запросы к МойСклад без опасения получить ошибку превышения лимитов - `429 Too Many Requests`.
+Добавляет очередь, адаптивную задержку по заголовкам ответа и локальное ограничение параллелизма к переданному fetch. Повторяет 429, но не гарантирует отсутствие 429, заданную скорость или защиту аккаунта от отключения API. Между процессами нет общего счётчика или координатора.
 
-Чтобы уложиться в доступные лимиты полученные из заголовков ответа сервера (напр. `X-RateLimit-Limit` и `X-RateLimit-Remaining`), планировщик автоматически вносит задержку между выполнением отдельных запросов, а так же регулирует максимальное кол-во параллельных запросов. Прозрачно выполняет повтор запроса если ошибки избежать не удалось.
-
-Такой подход позволяет обеспечить быстрое выполнение запросов с минимальной задержкой в моменте и стабильную работу при длительной высокой нагрузке, в том числе, при наличии задач в других процессах, разделяющих с вашим приложением общий лимит.
-
-## Содержание <!-- omit in toc -->
-
-- [Быстрый старт](#быстрый-старт)
-  - [С использованием fetch](#с-использованием-fetch)
-  - [С использованием библиотеки moysklad](#с-использованием-библиотеки-moysklad)
-- [Принцип работы](#принцип-работы)
-  - [Параллельные запросы](#параллельные-запросы)
-- [Конфигурация](#конфигурация)
-  - [Обработчик событий `eventHandler`](#обработчик-событий-eventhandler)
-  - [Коэффициент тротлинга `throttlingCoefficient`](#коэффициент-тротлинга-throttlingcoefficient)
-    - [Рекомендации](#рекомендации)
-  - [Максимальное кол-во параллельных запросов `maxParallelLimit`](#максимальное-кол-во-параллельных-запросов-maxparallellimit)
-  - [Максимальное время задержки между запросами `maxRequestDelayTimeMs`](#максимальное-время-задержки-между-запросами-maxrequestdelaytimems)
-  - [Jitter `jitter`](#jitter-jitter)
-  - [Период пересмотра параллельных запросов `parallelLimitCorrectionPeriodMs`](#период-пересмотра-параллельных-запросов-parallellimitcorrectionperiodms)
-- [Использование](#использование)
-  - [Создание экземпляра планировщика](#создание-экземпляра-планировщика)
-  - [wrapFetch(fetch, options)](#wrapfetchfetch-options)
-- [Методы FetchPlanner](#методы-fetchplanner)
-  - [getFetch()](#getfetch)
-  - [waitForFreeRequestSlot(priority)](#waitforfreerequestslotpriority)
-  - [getOptions()](#getoptions)
-  - [getRateLimit()](#getratelimit)
-  - [getRateLimitRemaining()](#getratelimitremaining)
-  - [getActionsQueueLength()](#getactionsqueuelength)
-  - [getRequestSlotHandlersCount()](#getrequestslothandlerscount)
-  - [getParallelLimitCorrection()](#getparallellimitcorrection)
-  - [getCurInflightRequestsCount()](#getcurinflightrequestscount)
-  - [getLastRequestDelay()](#getlastrequestdelay)
-  - [getNextRequestTime()](#getnextrequesttime)
-- [События](#события)
-  - [Подписка на события](#подписка-на-события)
-  - [Виды событий](#виды-событий)
-    - [`request` - отправка запроса](#request---отправка-запроса)
-    - [`response` - получение ответа](#response---получение-ответа)
-    - [`fetch-error` - ошибка при попытке выполнить запрос](#fetch-error---ошибка-при-попытке-выполнить-запрос)
-- [Пример: Разделение лимита между разными процессами](#пример-разделение-лимита-между-разными-процессами)
-- [Разработка и проверки](#разработка-и-проверки)
-- [Будущий выпуск](#будущий-выпуск)
+Минимальный runtime — Node 24. Устройство и границы реализации: [docs/architecture.md](docs/architecture.md).
 
 ## Быстрый старт
 
-### С использованием fetch
+### С использованием native fetch
 
 ```ts
-import { wrapFetch } from 'moysklad-fetch-planner'
+import { FetchPlanner, wrapFetch } from 'moysklad-fetch-planner'
 
-const wrappedFetch = wrapFetch(fetch)
+const planner = new FetchPlanner(globalThis.fetch)
+const scheduled: typeof globalThis.fetch = planner.getFetch()
+// Сокращённый вариант без доступа к getters:
+const wrapped: typeof globalThis.fetch = wrapFetch(globalThis.fetch)
 
-const result = await wrappedFetch(
-  'https://api.moysklad.ru/api/remap/1.2/entity/customerorder?limit=100',
-  {
-    headers: {
-      'Authorization': '...'
-      'Accept-Encoding': 'gzip'
-    }
-  }
-)
+// Токен передаёт вызывающее приложение; планировщик его не создаёт.
+export async function loadOrders(token: string) {
+  const response: Response = await scheduled(
+    new URL('https://api.moysklad.ru/api/remap/1.2/entity/customerorder?limit=100'),
+    { headers: { 'Authorization': `Bearer ${token}`, 'Accept-Encoding': 'gzip' } }
+  )
+  if (!response.ok) throw new Error(`HTTP ${response.status}`)
+  const data: unknown = await response.json()
+  return data // Форму JSON проверяет вызывающее приложение.
+}
 
-console.log(`Номер первого заказа - ${result.rows[0].name}`)
+void wrapped
 ```
 
-### С использованием библиотеки [moysklad](https://github.com/wmakeev/moysklad)
+Возвращается исходный Response; JSON не разбирается автоматически. Входы Request/URL и init принадлежат выбранному transport. Для native fetch проверены Request, FormData, File, string/Buffer и stream; поддержка первой отправки тела не означает возможность его повтора после 429.
+
+### С использованием библиотеки moysklad
 
 ```ts
 import Moysklad from 'moysklad'
 import { wrapFetch } from 'moysklad-fetch-planner'
 
-// Логин и пароль указаны в переменных окружения
-const ms = Moysklad({ fetch: wrapFetch(fetch) })
-
+// Аутентификацию настраивает приложение через Moysklad.
+const ms = Moysklad({ fetch: wrapFetch(globalThis.fetch) })
 const result = await ms.GET('entity/customerorder', { limit: 100 })
-
-console.log(`Номер первого заказа - ${result.rows[0].name}`)
+console.log(result.rows[0]?.name)
 ```
 
 ## Принцип работы
 
-При создании экземпляра планировщика передается объект с интерфейсом [Fetch API](https://developer.mozilla.org/en-US/docs/Web/API/Window/fetch).
+`new FetchPlanner(transport, options).getFetch()` и `wrapFetch(transport, options)` создают новую функцию для постановки запросов в очередь. У каждого экземпляра независимая очередь. Без данных о лимитах адаптивная задержка равна нулю, но локальный предел параллелизма действует.
 
-> Начиная с версии Node.js 18+ [fetch](https://nodejs.org/docs/latest/api/globals.html#fetch) входит в стандартную библиотеку и доступен в глобальной области видимости.
+По `X-RateLimit-Limit`, `X-RateLimit-Remaining` и `X-Lognex-Retry-TimeInterval` рассчитывается задержка с учётом времени с последнего старта, таблицы затухания из 101 шага и jitter. Это обратная связь по полученным заголовкам, а не резервирование серверного бюджета. Оптимальный темп и равномерное распределение между приложениями не гарантируются.
 
-```ts
-const fetchPlanner = new FetchPlanner(fetch)
-```
+### Повторы и параллелизм
 
-Создается прокси-метод для fetch с тем же интерфейсом, но с поддержкой планирования запросов к API МойСклад.
+429 возвращает action в начало очереди перед остальными FIFO-запросами. Повторы не ограничены числом попыток. Для `RATE_LIMIT_OVERFLOW` значение `X-Lognex-Retry-After` задаёт общую паузу в миллисекундах: новый hint может продлить deadline, а успешный или поздний ответ не может сократить его. Адаптивная задержка может отложить старт ещё дальше.
 
-```ts
-const wrappedFetch = fetchPlanner.getFetch()
-```
+Только HTTP 429 с `X-Lognex-Auth: 429005` классифицируется как `PARALLEL_LIMIT_OVERFLOW`: локальный предел уменьшается с шагом 1, оставаясь не ниже 1, затем постепенно восстанавливается до `maxParallelLimit`. Для этой legacy-ветки Retry-After не используется. JSON-код 1073 не читается; `X-Lognex-Reset` и стандартный HTTP `Retry-After` не участвуют в планировании. При 429 без `X-Lognex-Retry-After` или с его нулевым значением дополнительного fallback backoff нет: остаётся только текущая адаптивная задержка, которая может быть нулевой.
 
-Все запросы отправленные через обернутый fetch попадают в планировщик и добавляются в очередь. При наличия свободного лимита, запрос извлекается из очереди и выполняется.
+Inflight учитывает ожидание transport до получения Response (заголовков), а не чтение body потребителем. Медленная загрузка тела может продолжаться после освобождения локального слота. Даже если request observer уже отверг action, отправленный transport занимает слот до своего завершения.
 
-Текущий доступный лимит определяется из соответствующих [HTTP заголовков](https://dev.moysklad.ru/doc/api/remap/1.2/index.html#mojsklad-json-api-obschie-swedeniq-obrabotka-oshibok:~:text=%D0%BF%D0%BE%D0%BC%D0%BE%D1%89%D1%8C%D1%8E%20%D1%81%D0%BB%D0%B5%D0%B4%D1%83%D1%8E%D1%89%D0%B8%D1%85%20%D0%B7%D0%B0%D0%B3%D0%BE%D0%BB%D0%BE%D0%B2%D0%BA%D0%BE%D0%B2-,X%2DRateLimit%2DLimit,-%2D%20%D0%BA%D0%BE%D0%BB%D0%B8%D1%87%D0%B5%D1%81%D1%82%D0%B2%D0%BE%20%D0%B7%D0%B0%D0%BF%D1%80%D0%BE%D1%81%D0%BE%D0%B2%2C%20%D0%BA%D0%BE%D1%82%D0%BE%D1%80%D1%8B%D0%B5) в ответах сервера API МойСклад.
+### Владение ответом и replay
 
-Планировщик автоматически рассчитывает задержку для каждого отдельного запроса которая нужна для того, чтобы не превышать указанные лимиты.
+При передаче потребителю planner сохраняет идентичность Response и не читает и не отменяет body. Потребитель сам читает или освобождает тело. Любой непереданный Response, включая перехваченный 429, ошибки заголовков/observer и поздний ответ terminal action, получает best-effort `body.cancel()`. Синхронная ошибка, rejection или зависание cancel не блокируют очередь; завершение стороннего cancel не гарантируется.
 
-> Первые запросы отправленные в планировщик, вплоть до получения первого ответа в заголовках которого содержится информация о лимитах, выполняются без задержки.
+При повторе используются те же input/init/body. Нет автоматического clone, buffering или body factory. Повтор string/Buffer проверен; потреблённый либо locked Request/stream может завершиться ошибкой transport. Такая ошибка отвергает action один раз и не ретраится. Повторяемость произвольного тела и безопасность повторного бизнес-действия определяет приложение.
 
-Задержка динамически меняется в зависимости от размера доступного лимита. Если лимит близок к 100%, то задержка минимальна и начинает расти с уменьшением лимита, достигая [максимального значения](#максимальное-время-задержки-между-запросами-maxrequestdelaytimems) при 0% от лимита.
+Signal передаётся transport без отдельной planner cancellation. Прерывание ещё стоящего в очереди action не удаляет его и не освобождает waiter немедленно (D09). Публичного stop нет.
 
-В случае, если ошибка `429 Too Many Requests` всё же произошла, планировщик возвращает запрос обратно в начало очереди и повторяет его в штатном режиме согласно описанной логике.
+## Лимиты API МойСклад
 
-### Параллельные запросы
+Актуальность: **31.10.2026**, повторно прочитаны публичные первоисточники [ограничений](https://raw.githubusercontent.com/moysklad/api-remap-1.2-doc/master/md/_restrictions.md) и [заголовков/ошибок](https://raw.githubusercontent.com/moysklad/api-remap-1.2-doc/master/md/_general.md), без проверки на аккаунте. Правила могут меняться.
 
-Помимо лимита на кол-во запросов за единицу времени (RateLimit), МойСклад имеет лимит на кол-во параллельных запросов. Текущее кол-во выполняемых параллельных запросов не возвращается в ответе сервера API МойСклад. Поэтому планировщик может сделать вывод о превышении этого лимита только по факту получения ошибки `429 Too Many Requests` со значением `429005` в заголовке `X-Lognex-Auth`.
+С 16.02.2026 бюджет считается отдельно для пользователя и решения, а не для аккаунта целиком. Номинал 45 единиц за 3 секунды расходуется с весом запроса:
 
-При каждой такой ошибке, максимальное допустимое кол-во параллельных запросов снижается на единицу вплоть до `1`.
+| Аутентификация / endpoint | Вес запроса по документации |
+| --- | --- |
+| Токен публичного/приватного решения, обычные endpoints | 1 |
+| Токен решения «Черновик» / «На модерации» с 13.04.2026 | 4 |
+| Логин/пароль или токен пользователя | 2 с 12.05.2026; 3 с 01.09.2026; 4 с 01.12.2026 |
+| GET report/stock/all и report/stock/bystore при любой аутентификации | 5 |
 
-Через [определенное время](#период-пересмотра-параллельных-запросов-parallellimitcorrectionperiodms) происходит пересмотр значения максимального значения параллельных запросов. И если за это время ошибка не повторялась, то значение снова увеличивается на `1`, постепенно восстанавливаясь до [максимума](#максимальное-кол-во-параллельных-запросов-maxparallellimit).
+Поэтому 45 единиц не означают универсальные 45 HTTP-запросов за 3 секунды. `X-RateLimit-Limit` и `Remaining` нужно читать с учётом весов. Отдельно действуют до 5 параллельных запросов на пользователя/решение и до 20 на аккаунт; заголовки бюджета эту параллельность не показывают. В документации её превышение обозначено HTTP 429 с JSON-кодом 1073. Библиотека пока распознаёт только legacy-заголовок, описанный выше.
+
+Первоисточник также описывает автоматическое отключение API при более 200 идентичных ошибочных запросов в минуту, более 200 ответов 429 в минуту или более 100 PUT к одной сущности в минуту в течение последнего часа. Планировщик не ведёт защитные счётчики этих условий и не предотвращает отключение. Несколько экземпляров могут видеть расход одного identity через заголовки, но это не обеспечивает общий предел или защиту от соседней нагрузки.
 
 ## Конфигурация
 
-Для тонкой настройки планировщика можно передавать опции:
+Все поля `options` опциональны; передавайте их конструктору или `wrapFetch`. Нечисловые значения, NaN, бесконечности и небезопасные числа отклоняются согласно границам ниже.
 
-```ts
-const wrappedFetch = wrapFetch(fetch, options)
-```
+| Опция | Default | Допустимые значения и смысл |
+| --- | --- | --- |
+| `eventHandler` | `undefined` | Синхронный объект с `emit`, тип `FetchPlannerEventHandler<F>`; пример ниже |
+| `throttlingCoefficient` | 5 | Конечное число от 1 до 20; степень затухания |
+| `maxParallelLimit` | 4 | Округляется до безопасного целого ≥1; runtime не ограничивает сверху числом 5 |
+| `maxRequestDelayTimeMs` | 3000 | Округляется до безопасного целого ≥1; масштаб адаптивной задержки в мс |
+| `jitter` | 0.1 | Конечная доля от 0 до 0.3 |
+| `parallelLimitCorrectionPeriodMs` | 10000 | Округляется до безопасного целого ≥1000; период восстановления параллелизма в мс |
+| `errorLimits` | Три поля по 100 | Незавершённая чужая заготовка, защитного эффекта нет |
 
-или
+Значение `maxParallelLimit` выбирает приложение с учётом серверных ограничений и соседних запросов. Округление сохраняется: например, 0.6 становится 1, а 0.1 отвергается. Конечность и безопасность арифметики deadline дополнительно проверяются перед таймером.
 
-```ts
-const fetchPlanner = new FetchPlanner(fetch, options)
-```
+При `jitter: 0.1` масштаб 3000 мс меняется от 2850 до 3150 мс по формуле `maximum = maxRequestDelayTimeMs * (1 + jitter / 2 - random * jitter)`. Поэтому `maxRequestDelayTimeMs` не является жёстким потолком ожидания: jitter и серверная пауза могут его превысить. Восстановление параллелизма использует прежнюю формулу периода `period * (1 + 2 * random * jitter)`.
 
-Параметры `options` (все опциональны):
-
-### Обработчик событий `eventHandler`
-
-Должен соответствовать следующему минимальному интерфейсу:
-
-```typescript
-interface EventHandler {
-  emit(eventName: string, data?: any): void
-}
-```
-
-Можно использовать для логирования, сбора статистики и анализа нагрузки на API.
-
-[Подробнее в разделе "События"](#события)
-
-### Коэффициент тротлинга `throttlingCoefficient`
-
-**По умолчанию:** `5` (допускается значение от 1 до 20)
-
-Коэффициент регулирующий интенсивность тротлинга запросов в зависимости от доступных в текущий момент лимитов.
-
-> Процент оставшегося лимита запросов можно рассчитать как отношение значений в заголовках ответа API `X-RateLimit-Remaining` к `X-RateLimit-Limit`.
-
-При минимальном значении коэффициента `throttlingCoefficient` равном `1` задержка нарастает линейно от `0` мс при 100% лимита до `maxRequestDelayTimeMs` мс при 0% лимита. При значении коэффициента больше `1`, задержка начинает нарастать нелинейно, уменьшая задержку при лимитах близких к 100% и увеличивая при уменьшении лимита. Например если коэффициент равен `10`, то тротлинга практически не будет вплоть до ~30% от лимита, а далее начнется резкое увеличение задержки до `maxRequestDelayTimeMs`.
-
-На иллюстрации пример зависимости размера задержки от лимита при различных коэффициентах:
-
-![Зависимость задержки от лимита](./resource/coefficient-and-delay.svg)
-
-#### Рекомендации
-
-- Если известно, что приложение будет работать в окружении других параллельных задач, разделяющих между собой лимит запросов, то имеет смысл установить меньший коэффициент в диапазоне от 1 до 4.
-
-- Если приложение самостоятельно разделяет доступные лимиты и важна максимальная производительность для серий последовательных запросов, когда задержка минимальна в первые секунды и начинает нарастать уже при сохранении нагрузки, то можно увеличивать коэффициент.
-
-Важно понимать, что, вне зависимости от размера коэффициента, при постоянной интенсивной нагрузке на API задержка всегда выходит на одно и то же среднее значение примерно равное отношению `X-Lognex-Retry-TimeInterval` / `X-RateLimit-Limit` (~66 мс).
-
-### Максимальное кол-во параллельных запросов `maxParallelLimit`
-
-**По умолчанию:** `4` (максимальное значение для МойСклад `5`)
-
-API МойСклад позволяет до 5 параллельных запросов, но для большей надежности лучше оставлять небольшой запас. Планировщик умеет определять ситуации, когда приложение сталкивается с лимитом на кол-во параллельных запросов, постепенно уменьшая указанный лимит. Но если на одном аккаунте работает много приложений или приложение интенсивно использует API, то лучше сразу явно ограничить кол-во параллельных запросов до 2-3 или даже меньше.
-
-### Максимальное время задержки между запросами `maxRequestDelayTimeMs`
-
-**По умолчанию:** `3000` (3 секунды)
-
-Максимальное время задержки перед выполнением следующего запроса.
-
-Устанавливается в случае когда оставшийся лимит равен нулю (либо произошла ошибка превышения лимита на кол-во запросов в единицу времени).
-
-Такая ситуация может произойти если:
-
-- работает слишком много параллельных приложений
-- какое-либо параллельное приложение не контролирует лимиты
-
-Задержка между запросами всегда лежит в диапазоне от 0 до `maxRequestDelayTimeMs`.
-
-### Jitter `jitter`
-
-**По умолчанию** `0.1` (максимальное значение `0.3`)
-
-Доля от значения `maxRequestDelayTimeMs` в пределах которой будет случайным образом изменено значение `maxRequestDelayTimeMs` при расчете величины задержки между запросами.
-
-Указание jitter'a (дрожания) способствует более равномерному распределению запросов при одновременной параллельной работе нескольких приложений.
-
-Так же jitter применяется для расчета времени [коррекции кол-ва параллельных запросов](#период-пересмотра-параллельных-запросов-parallellimitcorrectionperiodms).
-
-### Период пересмотра параллельных запросов `parallelLimitCorrectionPeriodMs`
-
-**По умолчанию:** `10000` (10 секунд)
-
-Период через которые происходим пересмотр допустимого кол-ва параллельных запросов.
-
-Лимит уменьшается при каждой ошибке превышения кол-ва параллельных запросов с шагом `1`
-
-Лимит постепенно увеличивается снова до `maxParallelLimit` с шагом `1` через указанный промежуток времени.
-
-## Использование
-
-Каждый отдельный экземпляр планировщика имеет независимую очередь запросов.
-
-### Создание экземпляра планировщика
-
-```js
-import { FetchPlanner } from 'moysklad-fetch-planner'
-
-const fetchPlanner = new FetchPlanner(fetch, {
-  maxRequestDelayTimeMs: 1000
-})
-
-const wrappedFetch = fetchPlanner.getFetch()
-
-const authHeader = 'Basic ' + Buffer.from(
-  `${process.env.MOYSKLAD_LOGIN}:${process.env.MOYSKLAD_PASSWORD}`
-).toString('base64')
-
-const result = await wrappedFetch(
-  'https://api.moysklad.ru/api/remap/1.2/customerorder?limit=100',
-  {
-    headers: {
-      'Authorization': authHeader
-      'Accept-Encoding': 'gzip'
-    }
-  }
-)
-
-console.log(`Номер первого заказа - ${result.rows[0].name}`)
-```
-
-### wrapFetch(fetch, options)
-
-Сокращенный вариант - передать fetch в функцию wrapFetch, которая создаст экземпляр планировщика и вернет обернутый fetch.
-
-**Параметры:**
-
-- `fetch` - функция `fetch` с интерфейсом FetchAPI
-- `options` - параметры [конфигурации](#конфигурация)
-
-```js
-import { wrapFetch } from 'moysklad-fetch-planner'
-
-const wrappedFetch = wrapFetch(fetch, {
-  maxRequestDelayTimeMs: 1000
-})
-
-// ... см. пример выше
-```
+`errorLimits` содержит `sameRequestsErrorPerMinuteLimit`, `tooManyRequestsErrorPerMinuteLimit`, `sameEntityPutRequestsPerMinuteLimit`. Сейчас переданные значения 1/2/3 игнорируются и `getOptions()` возвращает defaults 100/100/100. Нет counters/window/guard, retry budget или stop. Судьба заготовки D12 остаётся этапу 4; не используйте её как защитную настройку.
 
 ## Методы FetchPlanner
 
-### getFetch()
+| Метод | Результат |
+| --- | --- |
+| `getFetch()` | Новая вызываемая функция с параметрами выбранного transport и Promise его Response; callable properties transport не копируются |
+| `waitForFreeRequestSlot(priority = 0)` | Promise уведомления о свободной ёмкости; меньшее число приоритета обслуживается раньше |
+| `getOptions()` | Тот же mutable объект опций, не snapshot; mutation не поддерживается как конфигурирование, таблица коэффициентов не пересчитывается |
+| `getRateLimit()` / `getRateLimitRemaining()` | Последние полученные значения соответствующих заголовков либо null до первого значения |
+| `getActionsQueueLength()` | Число ожидающих actions |
+| `getRequestSlotHandlersCount()` | Число ожидающих уведомления handlers |
+| `getParallelLimitCorrection()` | Коррекция в диапазоне от `1 - maxParallelLimit` до 0 при поддержанном использовании |
+| `getCurInflightRequestsCount()` | Число незавершённых transport-попыток до headers, включая transport terminal action |
+| `getLastRequestDelay()` | Последняя рассчитанная задержка старта в мс |
+| `getNextRequestTime()` | Unix timestamp в мс для запланированного пробуждения либо 0, если таймера нет |
 
-Возвращает обернутый fetch для выполнения запросов через планировщик. Исходный fetch передается в параметрах конструктора при создании экземпляра FetchPlanner.
-
-### waitForFreeRequestSlot(priority)
-
-Ожидание фактического наличия свободного слота для выполнения запроса.
-
-Параметры:
-
-- `priority` - Приоритет (`number`). Чем меньше число, тем раньше будет выделен слот (по умолчанию - `0`)
-
-В примере ниже в цикле выполнятся сразу 100 запросов.
-
-- Если поставить `await` перед `ms.GET(...)`, то все запросы будут выполнятся последовательно, что не подходит для ситуации когда задача выполнить запросы параллельно.
-
-- Если убрать строку `await fetchPlanner.waitForFreeRequestSlot()`, то все 100 запросов сразу попадут в очередь планировщика, что не будет хорошим решением при большом кол-ве запросов.
-
-- В данном случае с использованием `await fetchPlanner.waitForFreeRequestSlot()` запросы будут выполнятся параллельно, в то же время, не будут забивать очередь планировщика. И мы можем контролировать поток выполнения внутри цикла.
-
-```js
-const resultsPromises = []
-
-for (let i = 1; i < 100; i++) {
-  await fetchPlanner.waitForFreeRequestSlot()
-
-  const resultsPromise = ms.GET('entity/product', {
-    offset: Math.round(Math.random() * 100) + 1,
-    limit: 1
-  })
-
-  resultsPromises.push(resultsPromise)
-}
-
-const results = await Promise.all(resultsPromises)
-```
-
-### getOptions()
-
-Возвращает параметры планировщика по умолчанию либо указанные при его создании.
-
-### getRateLimit()
-
-Возвращает текущее актуальное значение заголовка `X-RateLimit-Limit`.
-
-### getRateLimitRemaining()
-
-Возвращает текущее актуальное значение заголовка `X-RateLimit-Remaining`.
-
-### getActionsQueueLength()
-
-Возвращает текущую длину очереди запросов.
-
-### getRequestSlotHandlersCount()
-
-Возвращает количество обработчиков ожидающих свободного слота.
-
-### getParallelLimitCorrection()
-
-Возвращает текущую коррекцию кол-ва допустимых параллельных запросов.
-
-### getCurInflightRequestsCount()
-
-Возвращает текущее кол-во незавершенных запросов (ожидающих ответа сервера)
-
-### getLastRequestDelay()
-
-Возвращает задержку последнего запроса (ms)
-
-### getNextRequestTime()
-
-Возвращает время мс (Unix Timestamp) на которое запланирован следующий запрос или `0`, если нет запланированных запросов.
+`waitForFreeRequestSlot` проверяет сумму queue + inflight относительно эффективного параллелизма. Это уведомление без permit: оно не резервирует ёмкость, не удерживает блокировку и не гарантирует немедленную отправку в обход общей серверной паузы. Несколько производителей должны учитывать, что уведомление не ограничивает размер очереди само по себе.
 
 ## События
 
-### Подписка на события
-
-Пример подписки на события планировщика:
-
-```js
+```ts
 import { EventEmitter } from 'node:events'
-import { FetchPlanner, FetchPlannerEventMap } from 'moysklad-fetch-planner'
+import { FetchPlanner, type FetchPlannerEventMap } from 'moysklad-fetch-planner'
 
-const eventHandler = new EventEmitter<FetchPlannerEventMap>()
-
-eventHandler.on('request', function (ev, planner) {
-  console.log(ev.actionId, planner.getRateLimit())
+const eventHandler = new EventEmitter<FetchPlannerEventMap<typeof globalThis.fetch>>()
+eventHandler.on('response', (event, planner) => {
+  console.log(event.actionId, event.responseType, planner.getRateLimitRemaining())
 })
-
-eventHandler.on('response', (ev, planner) => {
-  console.log(ev.actionId, planner.getRateLimit())
-})
-
-const fetchPlanner = new FetchPlanner(fetch, {
-  eventHandler
-})
+const planner = new FetchPlanner(globalThis.fetch, { eventHandler })
+void planner
 ```
 
-### Виды событий
+Используйте один и тот же тип transport `F` в planner, `FetchPlannerEventMap<F>`, `RequestEvent<F>`, `ResponseEvent<F>` и `FetchErrorEvent<F>`. Собственный handler должен соответствовать экспортированному `FetchPlannerEventHandler<F>`: `emit` получает коррелированный tuple имени события, данных и `FetchPlanner<F>`. В типизированном обработчике `emit(...[name, event, planner])` проверка имени позволяет сузить тип данных; произвольный набор overloads не заменяет этот контракт.
 
-#### `request` - отправка запроса
+| Событие       | Данные                                                                           |
+| ------------- | -------------------------------------------------------------------------------- |
+| `request`     | `actionId`, `requestId`, исходный `url: Parameters<F>[0]`, `method`, `startTime` |
+| `response`    | Поля request плюс `responseType` и `endTime`                                     |
+| `fetch-error` | Поля request плюс `error: Error` и `errorTime`                                   |
 
-Содержит поля:
+`actionId` относится к одному пользовательскому action, `requestId` меняется с каждой попыткой. Времена событий — `Date.now()`. `method` берётся из `init.method`, иначе из Request; для строкового URL без init остаётся undefined, хотя transport может отправить GET.
 
-| Наименование | Тип | Описание |
-| --- | --- | --- |
-| `actionId` | `number` | Id задачи в планировщике. |
-| `url` | `string` или `URL` или `Request` | Url запроса. |
-| `requestId` | `number` | Id отдельного запроса. Одна задача может выполнятся несколько раз при повторе в случае ошибки. |
-| `startTime` | `number` | [Время начала запроса](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Date/now) |
+`responseType: 'OK'` означает любой статус кроме 429, включая 4xx/5xx; проверяйте `response.ok` и тело самостоятельно. Другие значения — `RATE_LIMIT_OVERFLOW` и legacy `PARALLEL_LIMIT_OVERFLOW`. HTTP-ошибка сама по себе не вызывает `fetch-error`; оно относится к transport, разбору заголовков или синхронному исключению observer.
 
-#### `response` - получение ответа
-
-Содержит все поля из события `request` и дополнительно:
-
-| Наименование | Тип | Описание |
-| --- | --- | --- |
-| `responseType` | `string` | Тип запроса. `OK` - успешный запрос; `RATE_LIMIT_OVERFLOW` - ошибка 429 TooManyRequests; `PARALLEL_LIMIT_OVERFLOW` - ошибка превышения лимита параллельных запросов |
-| `endTime` | `number` | Время получения ответа |
-
-#### `fetch-error` - ошибка при попытке выполнить запрос
-
-Содержит все поля из события `request` и дополнительно:
-
-| Наименование | Тип      | Описание               |
-| ------------ | -------- | ---------------------- |
-| `error`      | `Error`  | Объект ошибки          |
-| `errorTime`  | `number` | Время получения ошибки |
-
-## Пример: Разделение лимита между разными процессами
-
-Алгоритм планировщика позволяет динамически управлять частотой запросов в зависимости от значения текущих лимитов API МойСклад. Поэтому даже при одновременной работе нескольких приложений в разных процессах нагрузка не будет превышать в среднем 15 запросов в секунду (в соответствии с лимитами API МойСклад - не более 45 запросов в течение 3-х секунд).
-
-На графике, по собранной статистике из реального теста, видно как пять интенсивно выполняющих запросы приложения из разных процессов автоматически делят между собой доступный лимит.
-
-По оси X время (кол-во секунд с момента запуска первого процесса), по оси Y кол-во запросов в секунду. Общая нагрузка, независимо от кол-ва работающих приложений, в любой момент времени соответствует ~15 запросам в секунду.
-
-![Разделение лимита между процессами](./resource/stress.svg)
-
-Отдельные пики при старте очередного приложения связаны с тем, что в момент запуска планировщик "не знает" о текущих лимитах и первые запросы выполняются без задержки.
-
-Конечно, для достижения такого эффекта нужно чтобы каждое приложение работало через планировщик запросов.
+Transport вызывается перед `request` observer; после получения headers и их обработки `response` observer вызывается до resolve или requeue. Синхронный throw request/response observer отвергает action и отменяет его retry. Поздний результат уже завершённого action очищается, не выдаётся повторно. Throw fetch-error observer сохраняет исходную ошибку action; вторичная диагностируется фиксированным `FetchPlanner observer failed` через защищённый `process.emitWarning`. Async listeners и обработка их rejected Promise не входят в контракт; обработчики должны быть синхронными и не читать/менять тела через внешние ссылки.
 
 ## Исключения Knip
 
@@ -444,9 +185,9 @@ pnpm install --frozen-lockfile --strict-peer-dependencies
 pnpm check && pnpm coverage && pnpm test:package
 ```
 
-`pnpm check` последовательно запускает общий typecheck, type-aware oxlint, проверку формата, Knip и offline unit-тесты. После установки зависимостей `pnpm test`, `pnpm check` и `pnpm coverage` работают без сети, секретов и API МойСклад. Проверки не переписывают входные файлы; сгенерированные `build`, `__temp` и `coverage` допустимы. Сохраняются два известных предупреждения линтера в `samples/wait-for-request-slot-1.ts` и подсказки Knip об избыточных entry patterns.
+`pnpm check` последовательно запускает общий typecheck, type-aware oxlint, проверку формата, Knip и offline unit-тесты. После установки зависимостей `pnpm test`, `pnpm check` и `pnpm coverage` работают без сети, секретов и API МойСклад. Проверки не переписывают входные файлы; сгенерированные `build`, `__temp` и `coverage` допустимы. Линтер проходит без предупреждений; подсказки Knip об избыточных entry patterns описаны выше.
 
-`pnpm coverage` пересобирает тесты и измеряет реально исполняемый `__temp/test-build/src`; sourcemaps отображают результат на `src/index.ts`. Команда проверяет положительные счётчики строк, функций и `wrapFetch`, отсутствие test/samples в LCOV. `pnpm coverage:report` пересоздаёт отчёт из уже собранных данных.
+`pnpm coverage` пересобирает тесты и измеряет реально исполняемый `__temp/test-build/src`; sourcemaps отображают результат на исходные модули `src`. Gate требует исполненные строки и функции в index/planner/pacing/response-policy/runtime и исполнение `wrapFetch`, запрещает test/samples в LCOV. `src/fetch-types.ts` содержит только типы и не требует runtime counters. `pnpm coverage:report` пересоздаёт отчёт из уже собранных данных.
 
 `pnpm build` очищает `build` и собирает только библиотечный src в `build/src`, включая JavaScript, declarations и sourcemaps. `pnpm build:test` отдельно собирает src/test в `__temp/test-build`; `pnpm test` делает эту сборку и запускает явный unit entrypoint. Samples проверяются общим `pnpm typecheck`, но не входят в production build; существующий `@ts-nocheck` в demo ограничивает проверку его тела.
 
@@ -467,17 +208,17 @@ pnpm format
 
 ### Границы совместимости и долги
 
-Публичные типы используют прямую зависимость `undici-types@7.3.0`; consumers без установленного undici и с `undici@7.3.0` проверены на TS 5.7.3 и TS 7. Это устраняет ссылку деклараций на dev-only undici. Типовая несовместимость native fetch по Request.bytes/FormData/File остаётся блокером этапа 3 и выпуска.
+Публичные типы используют прямую зависимость `undici-types@7.3.0`; consumers без установленного undici и с `undici@7.3.0` проверены на TS 5.7.3 и TS 7. Это устраняет ссылку деклараций на dev-only undici. Типовые fixtures покрывают native Request/URL/FormData/File и bytes, локальный runtime — payload, metadata, Response и replay; точные границы сигнатуры описаны в [архитектуре](docs/architecture.md#типовой-контракт). Runtime-зависимость undici не добавлена; `undici-types` остаётся прямой зависимостью деклараций.
 
-Один oxlint сохраняет принятый синтаксический запрет `process.exit`; полного анализа aliases нет. Потеря остальных прежних статических Node/dependency guards принята отдельно. Зелёный check не означает исправления поведения scheduler: остаются D01–D10/D12 из исследования 001, незавершённая `errorLimits`, граничные проверки и документация лимитов API. Jitter-test уже давал нестабильное падение `delaysDiffAvg < 10`; повторный успех не устраняет этот долг этапа 3.
+Один oxlint сохраняет принятый синтаксический запрет `process.exit`; полного анализа aliases нет. Потеря остальных прежних статических Node/dependency guards принята отдельно. Регрессии D01–D08 проверяют lifecycle, общий deadline, параллелизм, числовые границы и cleanup; jitter проверяется детерминированно по формуле. Открыты D09 (planner cancellation), полная политика replay D10 и `errorLimits` D12. Их наличие не скрывается зелёными локальными проверками.
 
-Локально проверены unit на Node 26 и runtime smoke одного tarball на Node 24.0.0, 24.22.2 и 26.13.0. Настоящие GitHub Actions jobs, runner и передача artifact ещё не проверены; YAML и локальные проверки не заменяют зелёный Actions run.
+Ранее локально проверены unit на Node 26 и runtime smoke одного tarball на Node 24.0.0, 24.22.2 и 26.13.0. Настоящие GitHub Actions jobs, runner и передача artifact ещё не проверены; YAML и локальные проверки не заменяют зелёный Actions run.
 
 ## Будущий выпуск
 
 Сейчас выпуск запрещён. Перед ним необходимо:
 
-1. Завершить этапы 3–4: решить native fetch, судьбу `errorLimits`, нестабильность jitter-test, остальные дефекты и документацию лимитов API.
+1. Завершить сквозную приёмку этапа 3 и решения этапа 4: D09, политику replay D10, `errorLimits` D12, stop, классификацию 1073 без legacy-заголовка и поведение 429 без временных hints.
 2. Получить зелёные `pnpm check`, `pnpm coverage`, `pnpm test:package` и реальный Actions run со всей runtime matrix и передачей artifact.
 3. Получить отдельное разрешение владельца на major-выпуск с минимумом Node 24, изменением версии/changelog, tag, push и публикацией.
 4. Только после разрешения запускать закреплённый локальный инструмент `pnpm exec np` из установленного checkout. Глобальный np не требуется.
