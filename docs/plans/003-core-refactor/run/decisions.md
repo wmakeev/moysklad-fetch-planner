@@ -12,3 +12,4 @@
 - 2026-10-30: T30 разрешён package.json только test:unit для нового lifecycle suite; та же адаптация offline entrypoint, что T20.
 - 2026-10-30: T40 разрешены package.json только test:unit и расширение test/helpers/runtime.ts для независимых clocks, нужных критерию monotonic deadline. Публичный runtime adapter запрещён; критерии без изменений.
 - 2026-10-30: T40 разрешена минимальная адаптация трёх старых тестов test/index.test.ts, продвигавших только setTimeout, к согласованному управляемому monotonic clock. Это сопряжение harness при сохранении исходных assertions/сценариев, не смена поведения или критериев; новых задач не требует.
+- 2026-10-30: T50 разрешён package.json толькоtest:unit; при необходимости test/index.test.ts толькоминимальная адаптация часов без ослабленияassertions. Критерии не меняются, принятые runtime/helpers используются повторно [CONSIST].

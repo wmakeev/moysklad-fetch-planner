@@ -642,20 +642,10 @@ export class FetchPlanner {
   }
 
   private reduceParallelLimit() {
-    if (
-      // Есть возможность снизить кол-во параллельных запросов?
-      this.options.maxParallelLimit +
-        this.parallelLimitCorrection -
-        this.parallelLimitCorrectionStep >
-      0
-    ) {
-      // Да - Снижаем кол-во параллельных запросов с указанным шагом
-      this.parallelLimitCorrection -= this.parallelLimitCorrectionStep
-    } else {
-      // Нет - Устанавливаем минимальное кол-во параллельных запросов = 1
-      // (максимальная коррекция).
-      this.parallelLimitCorrection = this.options.maxParallelLimit - 1
-    }
+    this.parallelLimitCorrection = Math.max(
+      1 - this.options.maxParallelLimit,
+      this.parallelLimitCorrection - this.parallelLimitCorrectionStep
+    )
   }
 
   /**

@@ -31,7 +31,7 @@
 | T20 | чистая pacing/header policy и безопасные числовые границы | T10 | normal | 2 | ✓ принята |
 | T30 | единый lifecycle action и обработка исключений | T20 | high | 3 | ✓ принята |
 | T40 | общий serverNotBefore и единственный pump | T30 | high | 3 | ✓ принята |
-| T50 | ограниченная correction и восстановление | T40 | normal | 2 | ждёт |
+| T50 | ограниченная correction и восстановление | T40 | normal | 2 | ✓ принята |
 | T60 | владение и cleanup непереданных ответов | T50 | normal | 2 | ждёт |
 | T70 | выделить владельца scheduler и сохранить фасад | T60 | high | 3 | ждёт |
 | T80 | исследовать совместимый Fetch type contract | T70 | normal | 2 | ждёт |

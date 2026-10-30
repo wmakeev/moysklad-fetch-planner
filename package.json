@@ -31,7 +31,7 @@
     "build:dev": "pnpm run build:test",
     "build": "pnpm run compile",
     "test": "pnpm run build:test && pnpm run test:unit",
-    "test:unit": "node --test --enable-source-maps __temp/test-build/test/index.test.js __temp/test-build/test/pacing.test.js __temp/test-build/test/response-policy.test.js __temp/test-build/test/lifecycle.test.js __temp/test-build/test/scheduler.test.js",
+    "test:unit": "node --test --enable-source-maps __temp/test-build/test/index.test.js __temp/test-build/test/pacing.test.js __temp/test-build/test/response-policy.test.js __temp/test-build/test/lifecycle.test.js __temp/test-build/test/scheduler.test.js __temp/test-build/test/parallel.test.js",
     "test:live": "pnpm run build:test && node --enable-source-maps __temp/test-build/test/stress.test.js",
     "version": "auto-changelog -p && git add CHANGELOG.md",
     "release": "np",

@@ -16,6 +16,8 @@
 
 - T40 принята: единый pump и monotonic deadline, независимые часы и bounded timer chunks проверены; D05 red/green подтверждён. Correction/recovery остаются T50 → journal/T40.accept-1.md.
 
+- T50 принята: correction ограничена в переходе состояния, max1/2/4 и monotonic recovery проверены; D06 red/green подтверждён → journal/T50.accept-1.md.
+
 ## План и требования: расхождения
 
 - Нет.
