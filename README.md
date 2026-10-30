@@ -47,6 +47,8 @@
     - [`response` - получение ответа](#response---получение-ответа)
     - [`fetch-error` - ошибка при попытке выполнить запрос](#fetch-error---ошибка-при-попытке-выполнить-запрос)
 - [Пример: Разделение лимита между разными процессами](#пример-разделение-лимита-между-разными-процессами)
+- [Разработка и проверки](#разработка-и-проверки)
+- [Будущий выпуск](#будущий-выпуск)
 
 ## Быстрый старт
 
@@ -414,3 +416,68 @@ const fetchPlanner = new FetchPlanner(fetch, {
 `knip.json` сохраняет публичные экспорты входных файлов: библиотечный `src/index.ts`, unit/live, worker, исполняемые samples и служебные scripts перечислены явно. Новые служебные файлы входят в `project`, но становятся входами только при реальном подключении. Подсказки Knip о повторном объявлении некоторых входов ожидаемы: эти файлы также обнаруживаются через package scripts и встроенные плагины.
 
 Точные исключения: `dotenv` используется при ручном запуске sample через `node -r dotenv/config` (комментарий в `samples/demo.ts`), а не через импорт; обычный `check` его не загружает. `report` — подкоманда в `c8 report` из `coverage:report`, которую Knip 6.44.0 ошибочно считает отдельным бинарником. Удалить соответствующее исключение при отказе от ручной загрузки dotenv или после исправления распознавания подкоманды c8.
+
+## Разработка и проверки
+
+Для разработки используйте Node из `.node-version` и pnpm из `packageManager` в `package.json`: это единственные источники точных версий. Минимальный runtime библиотеки — Node 24; следующий выпуск с этим изменением будет major. Проверки ниже выполнялись на Linux; Windows и macOS пока не проверены. Команды используют POSIX shell и утилиты `rm` и `tar`.
+
+### Свежая установка
+
+Нужен доступный Node/npm для первоначальной установки инструментов. Из корня checkout можно установить закреплённые Node и pnpm в отдельный временный каталог без глобальной установки; npm входит в исходную установку Node и также нужен для проверки упаковки:
+
+```sh
+planner_tools="$(mktemp -d)"
+npm install --prefix "$planner_tools" --no-save --package-lock=false "node@$(cat .node-version)" "$(node -p 'require("./package.json").packageManager')"
+export PATH="$planner_tools/node_modules/node/bin:$planner_tools/node_modules/.bin:$PATH"
+node --version
+pnpm --version
+pnpm install --frozen-lockfile --strict-peer-dependencies
+```
+
+Сохраните этот PATH для следующих команд и запуска VS Code из того же терминала. Установка инструментов и зависимостей обращается к registry; `.env`, токены и глобальный `np` не нужны. Не копируйте `.env` для настройки разработки. При уже установленных точных Node/pnpm достаточно последней команды. Frozen lockfile запрещает незаметное обновление графа зависимостей; конфликт peer dependencies должен завершать установку ошибкой.
+
+### Обычные проверки
+
+Полная локальная проверка перед передачей изменений:
+
+```sh
+pnpm check && pnpm coverage && pnpm test:package
+```
+
+`pnpm check` последовательно запускает общий typecheck, type-aware oxlint, проверку формата, Knip и offline unit-тесты. После установки зависимостей `pnpm test`, `pnpm check` и `pnpm coverage` работают без сети, секретов и API МойСклад. Проверки не переписывают входные файлы; сгенерированные `build`, `__temp` и `coverage` допустимы. Сохраняются два известных предупреждения линтера в `samples/wait-for-request-slot-1.ts` и подсказки Knip об избыточных entry patterns.
+
+`pnpm coverage` пересобирает тесты и измеряет реально исполняемый `__temp/test-build/src`; sourcemaps отображают результат на `src/index.ts`. Команда проверяет положительные счётчики строк, функций и `wrapFetch`, отсутствие test/samples в LCOV. `pnpm coverage:report` пересоздаёт отчёт из уже собранных данных.
+
+`pnpm build` очищает `build` и собирает только библиотечный src в `build/src`, включая JavaScript, declarations и sourcemaps. `pnpm build:test` отдельно собирает src/test в `__temp/test-build`; `pnpm test` делает эту сборку и запускает явный unit entrypoint. Samples проверяются общим `pnpm typecheck`, но не входят в production build; существующий `@ts-nocheck` в demo ограничивает проверку его тела.
+
+`pnpm test:package` проверяет свежесть tarball при отсутствующей и устаревшей сборке через pnpm и npm, состав пакета, root/deep ESM imports, локальные GET/POST и строгие типовые consumers с TS 5.7.3 и TS 7. Он может обращаться к registry при установке tooling/consumer dependencies; runtime assertions используют локальный transport без API МойСклад. `pnpm pack` тоже собирает актуальный src через `prepack`. Пути `build/src/index.js`, `build/src/index.d.ts` и исходники `src` сохраняются; runtime import TypeScript не обещается.
+
+Исправления запускаются отдельно и меняют файлы:
+
+```sh
+pnpm lint:fix
+pnpm format
+```
+
+Для отдельных немутирующих проверок доступны `pnpm typecheck`, `pnpm lint`, `pnpm format:check` и `pnpm knip`. В VS Code конфигурации Build library и Offline unit tests запускают `pnpm build` и `pnpm test`; секреты автоматически не загружаются.
+
+### Живой stress
+
+`pnpm test:live` требует явного opt-in `MOYSKLAD_LIVE_STRESS=1` и credentials, переданных снаружи в окружение. Без точного значения `1` команда отказывает до создания Piscina/workers и сетевых запросов. Это отдельная нагрузка на настоящий API, её нет в test/check/coverage и CI. Не включайте её для обычной проверки checkout.
+
+### Границы совместимости и долги
+
+Публичные типы используют прямую зависимость `undici-types@7.3.0`; consumers без установленного undici и с `undici@7.3.0` проверены на TS 5.7.3 и TS 7. Это устраняет ссылку деклараций на dev-only undici. Типовая несовместимость native fetch по Request.bytes/FormData/File остаётся блокером этапа 3 и выпуска.
+
+Один oxlint сохраняет принятый синтаксический запрет `process.exit`; полного анализа aliases нет. Потеря остальных прежних статических Node/dependency guards принята отдельно. Зелёный check не означает исправления поведения scheduler: остаются D01–D10/D12 из исследования 001, незавершённая `errorLimits`, граничные проверки и документация лимитов API. Jitter-test уже давал нестабильное падение `delaysDiffAvg < 10`; повторный успех не устраняет этот долг этапа 3.
+
+Локально проверены unit на Node 26 и runtime smoke одного tarball на Node 24.0.0, 24.22.2 и 26.13.0. Настоящие GitHub Actions jobs, runner и передача artifact ещё не проверены; YAML и локальные проверки не заменяют зелёный Actions run.
+
+## Будущий выпуск
+
+Сейчас выпуск запрещён. Перед ним необходимо:
+
+1. Завершить этапы 3–4: решить native fetch, судьбу `errorLimits`, нестабильность jitter-test, остальные дефекты и документацию лимитов API.
+2. Получить зелёные `pnpm check`, `pnpm coverage`, `pnpm test:package` и реальный Actions run со всей runtime matrix и передачей artifact.
+3. Получить отдельное разрешение владельца на major-выпуск с минимумом Node 24, изменением версии/changelog, tag, push и публикацией.
+4. Только после разрешения запускать закреплённый локальный инструмент `pnpm exec np` из установленного checkout. Глобальный np не требуется.

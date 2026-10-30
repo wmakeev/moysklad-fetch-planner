@@ -1,98 +1,27 @@
 {
-  // Use IntelliSense to learn about possible attributes.
-  // Hover to view descriptions of existing attributes.
-  // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
   "version": "0.2.0",
   "configurations": [
     {
       "type": "node",
       "request": "launch",
-      "name": "Launch TS ${file}",
-      "skipFiles": [
-        "<node_internals>/**"
-      ],
-      "program": "${file}",
-      "envFile": "${workspaceFolder}/.env",
-      "runtimeArgs": [
-        "--enable-source-maps"
-      ],
-      "preLaunchTask": "npm: compile",
-      "outFiles": [
-        "${workspaceFolder}/build/**/*.js"
-      ],
-      "internalConsoleOptions": "openOnSessionStart",
-      "outputCapture": "std"
+      "name": "Build library",
+      "cwd": "${workspaceFolder}",
+      "runtimeExecutable": "pnpm",
+      "runtimeArgs": ["build"],
+      "console": "integratedTerminal",
+      "autoAttachChildProcesses": true,
+      "skipFiles": ["<node_internals>/**"]
     },
     {
       "type": "node",
       "request": "launch",
-      "name": "Launch TS Test ${file}",
-      "skipFiles": [
-        "<node_internals>/**"
-      ],
-      "program": "${file}",
-      "envFile": "${workspaceFolder}/.env",
-      "runtimeArgs": [
-        "--enable-source-maps",
-        "--test-reporter=spec"
-      ],
-      "preLaunchTask": "npm: compile",
-      "outFiles": [
-        "${workspaceFolder}/build/**/*.js"
-      ],
-      "internalConsoleOptions": "openOnSessionStart",
-      "outputCapture": "std"
-    },
-    {
-      "type": "node",
-      "request": "launch",
-      "name": "Launch TS Test ${file} (--test-only)",
-      "skipFiles": [
-        "<node_internals>/**"
-      ],
-      "program": "${file}",
-      "envFile": "${workspaceFolder}/.env",
-      "runtimeArgs": [
-        "--enable-source-maps",
-        "--test-only",
-        "--test-reporter=spec"
-      ],
-      "preLaunchTask": "npm: compile",
-      "outFiles": [
-        "${workspaceFolder}/build/**/*.js"
-      ],
-      "internalConsoleOptions": "openOnSessionStart",
-      "outputCapture": "std"
-    },
-    {
-      "type": "node",
-      "request": "launch",
-      "name": "Launch Demo",
-      "skipFiles": [
-        "<node_internals>/**"
-      ],
-      "program": "${file}",
-      "envFile": "${workspaceFolder}/.env",
-      "runtimeArgs": [
-        "--enable-source-maps",
-      ],
-      "args": ["-p", "99"],
-      "preLaunchTask": "npm: compile",
-      "outFiles": [
-        "${workspaceFolder}/build/**/*.js"
-      ],
-      "internalConsoleOptions": "openOnSessionStart"
-    },
-    {
-      "type": "node",
-      "request": "launch",
-      "name": "Launch JS",
-      "skipFiles": [
-        "<node_internals>/**"
-      ],
-      "program": "${file}",
-      "envFile": "${workspaceFolder}/.env",
-      "internalConsoleOptions": "openOnSessionStart"
+      "name": "Offline unit tests",
+      "cwd": "${workspaceFolder}",
+      "runtimeExecutable": "pnpm",
+      "runtimeArgs": ["test"],
+      "console": "integratedTerminal",
+      "autoAttachChildProcesses": true,
+      "skipFiles": ["<node_internals>/**"]
     }
   ]
 }

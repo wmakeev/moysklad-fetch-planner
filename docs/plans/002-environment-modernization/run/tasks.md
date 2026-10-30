@@ -107,5 +107,11 @@
 - Вид/source/deps: ../01-plan.md, T100.
 - Риск: normal · пишет в боевую систему: нет · приёмка: отдельно · объём: полный
 - Журнал: `journal/T100.md`
-- Исполнитель: ступень 3, gpt-6.1-sol (medium).
-- Верификатор: ступень 3, gpt-6.1-sol (medium); свежий контекст, ограничение независимости: та же модель.
+- Исполнитель T100/1: ступень 3 · gpt-6.1-sol (medium) · t3 `node:delegated-task:command%3Amcp%3Af122abfd-1a38-4fb8-813a-28b39ee88719%3Adelegate-task%3Afetch-planner-002-T100-1-implementation`.
+- Верификатор T100/1: ступень 3 · gpt-6.1-sol (medium) · t3 `node:delegated-task:command%3Amcp%3Af122abfd-1a38-4fb8-813a-28b39ee88719%3Adelegate-task%3Afetch-planner-002-T100-final-verifier` · V11 отдельно и сквозная приёмка плана · passed локально · отчёты journal/T100.accept-1.md и journal/plan.md; ограничение независимости: та же модель.
+
+## Сквозная приёмка плана
+
+- V11: gpt-6.1-sol (medium), свежий контекст, t3 тот же вызов приёмки T100; passed локально.
+- Отчёт: journal/plan.md, A1–A10 и Q1–Q9.
+- T15 последняя текстовая поправка и T90 D1 проверены в составе финала; оговорки закрыты. Реальный Actions-run остаётся перед выпуском вне локального объёма плана.

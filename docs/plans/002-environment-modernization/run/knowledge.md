@@ -36,3 +36,5 @@
 - T80 принят V9: настоящий npm/pnpm tarball absent/stale build, isolated bare/undici consumers TS5/TS7,TS2307 gate пройдены. Native Fetch дефект остаётся; API не менялся. → journal/T80.accept-1.md
 
 - T90: локальные shell и runtime24.0.0/24.22.2/26.13.0 прошли; реального Actions-run не было. После sed обязательны проверки specifiers, иначе namespace rename молча убирал deep import; D1 исправлен с отрицательной пробой, независимый recheck в финале. → journal/T90.accept-1.md
+
+- План002 локально завершён V11: A1–A10/Q1–Q9 подтверждены, D1 независимо перепроверен. ИнструкцияREADME — действующий процесс разработки/выпуска; технические доказательства остаются в run/journal. Процессные уроки для следующих планов отражены в передаче проекта, без дублирования реестра. → journal/plan.md

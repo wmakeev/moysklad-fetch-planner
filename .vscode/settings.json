@@ -5,9 +5,6 @@
   "typescript.tsdk": "node_modules/typescript/lib",
   "editor.formatOnSave": true,
   "cSpell.language": "en,ru",
-  "cSpell.words": [
-    "customerorder",
-    "customerorders",
-    "invoiceout"
-  ]
+  "cSpell.words": ["customerorder", "customerorders", "invoiceout"],
+  "npm.packageManager": "pnpm"
 }
