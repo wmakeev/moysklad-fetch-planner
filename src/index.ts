@@ -1,7 +1,7 @@
 /* oxlint-disable no-var */
 
 import assert from 'node:assert'
-import type { RequestInfo, RequestInit, Request, Response } from 'undici'
+import type { RequestInfo, RequestInit, Request, Response } from 'undici-types'
 
 //#region debug function
 var debug: ((scope: string, msg: string) => void) | null = null

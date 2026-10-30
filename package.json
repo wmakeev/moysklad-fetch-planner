@@ -38,10 +38,12 @@
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "build:test": "rm -rf __temp/test-build/ && tsc -p tsconfig.test.json",
     "lint:fix": "pnpm run lint --fix",
-    "format": "oxfmt --write \"src/**/*.ts\" \"test/**/*.ts\" \"samples/**/*.ts\" \"scripts/**/*.mjs\" package.json knip.json tsconfig.json tsconfig.prod.json tsconfig.test.json .oxlintrc.json .oxfmtrc.json pnpm-workspace.yaml README.md",
-    "format:check": "oxfmt --check \"src/**/*.ts\" \"test/**/*.ts\" \"samples/**/*.ts\" \"scripts/**/*.mjs\" package.json knip.json tsconfig.json tsconfig.prod.json tsconfig.test.json .oxlintrc.json .oxfmtrc.json pnpm-workspace.yaml README.md",
+    "format": "oxfmt --write \"src/**/*.ts\" \"test/**/*.ts\" \"test/**/*.mjs\" \"samples/**/*.ts\" \"scripts/**/*.mjs\" package.json knip.json tsconfig.json tsconfig.prod.json tsconfig.test.json .oxlintrc.json .oxfmtrc.json pnpm-workspace.yaml README.md",
+    "format:check": "oxfmt --check \"src/**/*.ts\" \"test/**/*.ts\" \"test/**/*.mjs\" \"samples/**/*.ts\" \"scripts/**/*.mjs\" package.json knip.json tsconfig.json tsconfig.prod.json tsconfig.test.json .oxlintrc.json .oxfmtrc.json pnpm-workspace.yaml README.md",
     "knip": "knip",
-    "check": "pnpm run typecheck && pnpm run lint && pnpm run format:check && pnpm run knip && pnpm run test"
+    "check": "pnpm run typecheck && pnpm run lint && pnpm run format:check && pnpm run knip && pnpm run test",
+    "prepack": "pnpm run build",
+    "test:package": "node scripts/check-package.mjs"
   },
   "engines": {
     "node": ">=24"
@@ -82,5 +84,8 @@
     "knip": "6.44.0",
     "np": "12.1.1"
   },
-  "packageManager": "pnpm@12.16.1"
+  "packageManager": "pnpm@12.16.1",
+  "dependencies": {
+    "undici-types": "7.3.0"
+  }
 }

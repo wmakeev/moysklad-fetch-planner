@@ -87,8 +87,8 @@
 - Вид/source/deps: ../01-plan.md, T80.
 - Риск: normal · пишет в боевую систему: нет · приёмка: отдельно · объём: полный
 - Журнал: `journal/T80.md`
-- Исполнитель: ступень 4, gpt-6.1-sol (high).
-- Верификатор: ступень 3, gpt-6.1-sol (medium); свежий контекст, ограничение независимости: та же модель.
+- Исполнитель T80/1: ступень 4 · gpt-6.1-sol (high) · t3 `node:delegated-task:command%3Amcp%3Aa507b654-c3da-4647-a87e-8cb1e9a713e5%3Adelegate-task%3Afetch-planner-002-T80-1-implementation`.
+- Верификатор T80/1: ступень 3 · gpt-6.1-sol (medium) · t3 `node:delegated-task:command%3Amcp%3Aa507b654-c3da-4647-a87e-8cb1e9a713e5%3Adelegate-task%3Afetch-planner-002-T80-1-verifier` · V9 отдельно · passed · отчёт journal/T80.accept-1.md; ограничение независимости: та же модель.
 
 ## T90 — обновить CI и матрицу совместимости
 

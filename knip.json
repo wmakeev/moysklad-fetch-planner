@@ -9,9 +9,17 @@
     "samples/demo.ts",
     "samples/wait-for-request-slot-1.ts",
     "samples/wait-for-request-slot-2.ts",
-    "scripts/check-coverage.mjs"
+    "scripts/check-coverage.mjs",
+    "scripts/check-package.mjs",
+    "test/package/fixtures/*.{ts,mjs}"
   ],
-  "project": ["src/**/*.ts", "test/**/*.ts", "samples/**/*.ts", "scripts/**/*.{js,mjs,cjs,ts}"],
+  "project": [
+    "src/**/*.ts",
+    "test/**/*.ts",
+    "samples/**/*.ts",
+    "scripts/**/*.{js,mjs,cjs,ts}",
+    "test/package/fixtures/*.mjs"
+  ],
   "includeEntryExports": false,
   "ignoreDependencies": ["dotenv"],
   "ignoreBinaries": ["report"]

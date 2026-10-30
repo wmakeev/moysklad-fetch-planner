@@ -165,6 +165,10 @@ settings:
 importers:
 
   .:
+    dependencies:
+      undici-types:
+        specifier: 7.3.0
+        version: 7.3.0
     devDependencies:
       '@types/highland':
         specifier: 2.13.0
@@ -2583,6 +2587,9 @@ packages:
   undici-types@6.21.0:
     resolution: {integrity: sha512-iwDZqg0QAGrg9Rav5H4n0M64c3mkR59cJ6wQp+7C4nI0gsmExaedaYLNO44eT4AtBBwjbTiGPMlt2Md0T9H9JQ==}
 
+  undici-types@7.3.0:
+    resolution: {integrity: sha512-z2pHpkN2BEJl3QlQo0GtfGCyuhuBbWX60vzGwyn7ex/seM2UkvyGEfEV0Qb9pXc5StNfcJpsstgaf2YTEJa63Q==}
+
   undici@7.3.0:
     resolution: {integrity: sha512-Qy96NND4Dou5jKoSJ2gm8ax8AJM/Ey9o9mz7KN1bb9GP+G0l20Zw8afxTnY2f4b7hmhn/z8aC2kfArVQlAhFBw==}
     engines: {node: '>=20.18.1'}
@@ -4711,6 +4718,8 @@ snapshots:
   unbash@6.0.1: {}
 
   undici-types@6.21.0: {}
+
+  undici-types@7.3.0: {}
 
   undici@7.3.0: {}
 
