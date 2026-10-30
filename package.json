@@ -37,17 +37,12 @@
     "release": "np",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "build:test": "rm -rf __temp/test-build/ && tsc -p tsconfig.test.json",
-    "lint:fix": "pnpm run lint --fix"
+    "lint:fix": "pnpm run lint --fix",
+    "format": "oxfmt --write \"src/**/*.ts\" \"test/**/*.ts\" \"samples/**/*.ts\" \"scripts/**/*.mjs\" package.json tsconfig.json tsconfig.prod.json tsconfig.test.json .oxlintrc.json .oxfmtrc.json pnpm-workspace.yaml README.md",
+    "format:check": "oxfmt --check \"src/**/*.ts\" \"test/**/*.ts\" \"samples/**/*.ts\" \"scripts/**/*.mjs\" package.json tsconfig.json tsconfig.prod.json tsconfig.test.json .oxlintrc.json .oxfmtrc.json pnpm-workspace.yaml README.md"
   },
   "engines": {
     "node": ">=24"
-  },
-  "prettier": {
-    "semi": false,
-    "singleQuote": true,
-    "quoteProps": "consistent",
-    "trailingComma": "none",
-    "arrowParens": "avoid"
   },
   "c8": {
     "include": [
@@ -79,7 +74,6 @@
     "moysklad": "0.20.0",
     "p-retry": "6.2.1",
     "piscina": "5.0.0-alpha.0",
-    "prettier": "3.4.2",
     "typescript": "7.0.2",
     "undici": "7.3.0",
     "oxlint": "1.90.0",

@@ -220,9 +220,6 @@ importers:
       piscina:
         specifier: 5.0.0-alpha.0
         version: 5.0.0-alpha.0
-      prettier:
-        specifier: 3.4.2
-        version: 3.4.2
       typescript:
         specifier: 7.0.2
         version: 7.0.2
@@ -2264,11 +2261,6 @@ packages:
   presentable-error@0.0.1:
     resolution: {integrity: sha512-E6rsNU1QNJgB3sjj7OANinGncFKuK+164sLXw1/CqBjj/EkXSoSdHCtWQGBNlREIGLnL7IEUEGa08YFVUbrhVg==}
     engines: {node: '>=16'}
-
-  prettier@3.4.2:
-    resolution: {integrity: sha512-e9MewbtFo+Fevyuxn/4rrcDAaq0IYxPGLvObpQjiZBMAzB9IGmzlnG9RZy3FFas+eBMu2vA0CszMeduow5dIuQ==}
-    engines: {node: '>=14'}
-    hasBin: true
 
   pretty-ms@9.3.1:
     resolution: {integrity: sha512-HzMy3Geq23nVALD/M2LliU+F+M+gVNsvkQWWqeBZ8HDiCgzo6YPJ/Omrmtq24EFrIsk0a3EkQGEd7bDOo+IhGA==}
@@ -4431,8 +4423,6 @@ snapshots:
   powershell-utils@0.2.1: {}
 
   presentable-error@0.0.1: {}
-
-  prettier@3.4.2: {}
 
   pretty-ms@9.3.1:
     dependencies:

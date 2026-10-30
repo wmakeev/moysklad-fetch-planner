@@ -1,9 +1,6 @@
 # moysklad-fetch-planner <!-- omit in toc -->
 
-[![npm](https://img.shields.io/npm/v/moysklad-fetch-planner.svg?cacheSeconds=1800&style=flat-square)](https://www.npmjs.com/package/moysklad-fetch-planner)
-[![GitHub Actions Workflow Status](https://img.shields.io/github/actions/workflow/status/wmakeev/moysklad-fetch-planner/main.yml?style=flat-square)](https://github.com/wmakeev/moysklad-fetch-planner/actions/workflows/main.yml)
-[![Codecov](https://img.shields.io/codecov/c/github/wmakeev/moysklad-fetch-planner?style=flat-square)](https://app.codecov.io/gh/wmakeev/moysklad-fetch-planner/tree/master/)
-![no dependencies](https://img.shields.io/badge/dependencies-no-green?style=flat-square)
+[![npm](https://img.shields.io/npm/v/moysklad-fetch-planner.svg?cacheSeconds=1800&style=flat-square)](https://www.npmjs.com/package/moysklad-fetch-planner) [![GitHub Actions Workflow Status](https://img.shields.io/github/actions/workflow/status/wmakeev/moysklad-fetch-planner/main.yml?style=flat-square)](https://github.com/wmakeev/moysklad-fetch-planner/actions/workflows/main.yml) [![Codecov](https://img.shields.io/codecov/c/github/wmakeev/moysklad-fetch-planner?style=flat-square)](https://app.codecov.io/gh/wmakeev/moysklad-fetch-planner/tree/master/) ![no dependencies](https://img.shields.io/badge/dependencies-no-green?style=flat-square)
 
 > Планировщик запросов для API МойСклад
 
@@ -149,8 +146,7 @@ interface EventHandler {
 }
 ```
 
-Можно использовать для логирования, сбора статистики и анализа нагрузки
-на API.
+Можно использовать для логирования, сбора статистики и анализа нагрузки на API.
 
 [Подробнее в разделе "События"](#события)
 
@@ -374,21 +370,21 @@ const fetchPlanner = new FetchPlanner(fetch, {
 
 Содержит поля:
 
-| Наименование | Тип                              | Описание                                                                                                          |
-| ------------ | -------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
-| `actionId`   | `number`                         | Id задачи в планировщике.                                                                                         |
-| `url`        | `string` или `URL` или `Request` | Url запроса.                                                                                                      |
-| `requestId`  | `number`                         | Id отдельного запроса. Одна задача может выполнятся несколько раз при повторе в случае ошибки.                    |
-| `startTime`  | `number`                         | [Время начала запроса](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Date/now) |
+| Наименование | Тип | Описание |
+| --- | --- | --- |
+| `actionId` | `number` | Id задачи в планировщике. |
+| `url` | `string` или `URL` или `Request` | Url запроса. |
+| `requestId` | `number` | Id отдельного запроса. Одна задача может выполнятся несколько раз при повторе в случае ошибки. |
+| `startTime` | `number` | [Время начала запроса](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Date/now) |
 
 #### `response` - получение ответа
 
 Содержит все поля из события `request` и дополнительно:
 
-| Наименование   | Тип      | Описание                                                                                                                                                            |
-| -------------- | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Наименование | Тип | Описание |
+| --- | --- | --- |
 | `responseType` | `string` | Тип запроса. `OK` - успешный запрос; `RATE_LIMIT_OVERFLOW` - ошибка 429 TooManyRequests; `PARALLEL_LIMIT_OVERFLOW` - ошибка превышения лимита параллельных запросов |
-| `endTime`      | `number` | Время получения ответа                                                                                                                                              |
+| `endTime` | `number` | Время получения ответа |
 
 #### `fetch-error` - ошибка при попытке выполнить запрос
 

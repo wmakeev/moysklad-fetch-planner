@@ -20,9 +20,7 @@ const records = report
     return { file, lines }
   })
 
-const index = records.find(
-  record => record.file === path.join('src', 'index.ts')
-)
+const index = records.find(record => record.file === path.join('src', 'index.ts'))
 assert.ok(index, 'LCOV must contain src/index.ts; an empty report is invalid')
 assert.ok(
   index.lines.some(line => /^DA:\d+,[1-9]\d*(?:,.*)?$/.test(line)),

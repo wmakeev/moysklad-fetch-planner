@@ -44,8 +44,7 @@ for (const size of batchSizes) {
 
   await asyncTimers.setTimeout(MEASURE_DELAY)
 
-  const measureAvg =
-    sampleMeasures.reduce((res, it) => res + it, 0) / sampleMeasures.length
+  const measureAvg = sampleMeasures.reduce((res, it) => res + it, 0) / sampleMeasures.length
 
   console.log(JSON.stringify({ batch: size, time: measureAvg }))
 }

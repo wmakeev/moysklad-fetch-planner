@@ -307,9 +307,8 @@ test('FetchPlanner (jitter)', async () => {
   delaysWithoutJitter.splice(0, 3)
 
   const delaysDiffAvg =
-    delaysWithoutJitter
-      .map(it => Math.abs(it - 500))
-      .reduce((res, it) => res + it, 0) / delaysWithoutJitter.length
+    delaysWithoutJitter.map(it => Math.abs(it - 500)).reduce((res, it) => res + it, 0) /
+    delaysWithoutJitter.length
 
   assert.ok(delaysDiffAvg < 10)
 
@@ -336,9 +335,8 @@ test('FetchPlanner (jitter)', async () => {
   delaysWithJitter.splice(0, 3)
 
   const jitterDiff =
-    delaysWithJitter
-      .map(it => Math.abs(it - 500))
-      .reduce((res, it) => res + it, 0) / delaysWithJitter.length
+    delaysWithJitter.map(it => Math.abs(it - 500)).reduce((res, it) => res + it, 0) /
+    delaysWithJitter.length
 
   assert.ok(jitterDiff > 30)
 })
@@ -409,23 +407,15 @@ test('FetchPlanner (waitForRequestSlot)', async () => {
   let order = 0
 
   for (const priority of [10, 81, 70, 11, 60, 80, 52, 30, 51]) {
-    const resultPromise = fetchPlanner
-      .waitForFreeRequestSlot(priority)
-      .then(async () => {
-        order++
+    const resultPromise = fetchPlanner.waitForFreeRequestSlot(priority).then(async () => {
+      order++
 
-        interceptHttpWithRateLimit(
-          'GET',
-          `foo/${order}`,
-          10,
-          10 - order,
-          `${order} / ${priority}`
-        )
+      interceptHttpWithRateLimit('GET', `foo/${order}`, 10, 10 - order, `${order} / ${priority}`)
 
-        const res = await wrappedFetch(`http://example.com/foo/${order}`)
+      const res = await wrappedFetch(`http://example.com/foo/${order}`)
 
-        return await res.json()
-      })
+      return await res.json()
+    })
 
     resultsPromises.push(resultPromise)
   }

@@ -184,9 +184,7 @@ async function sample1(items: DocumentRef[]) {
     // в очереди планировщика всегда был один доступный для выполнения запрос
     .through(orderlessParallel(PARALLEL_LIMIT + 1))
     .sequence()
-    .through(
-      throughputProbe('fetchedOrders$', 0, SAMPLE_BATCH_SIZE, throughputHandler)
-    )
+    .through(throughputProbe('fetchedOrders$', 0, SAMPLE_BATCH_SIZE, throughputHandler))
 
   const ids = await fetchedOrders$
     .map(it => it.id)
@@ -209,7 +207,4 @@ const STAT_FOLDER_PATH = path.join(
 
 await mkdir(STAT_FOLDER_PATH, { recursive: true })
 
-await writeFile(
-  path.join(STAT_FOLDER_PATH, 'fetched-docs.csv'),
-  csv.stringify(stat)
-)
+await writeFile(path.join(STAT_FOLDER_PATH, 'fetched-docs.csv'), csv.stringify(stat))

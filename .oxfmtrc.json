@@ -1,0 +1,22 @@
+{
+  "semi": false,
+  "singleQuote": true,
+  "quoteProps": "consistent",
+  "trailingComma": "none",
+  "arrowParens": "avoid",
+  "proseWrap": "never",
+  "embeddedLanguageFormatting": "off",
+  "sortImports": false,
+  "sortPackageJson": false,
+  "ignorePatterns": [
+    "**/.env",
+    "**/.env.*",
+    "docs/**",
+    "**/evidence/**",
+    "**/generated/**",
+    "**/*lock*",
+    "build/**",
+    "__temp/**",
+    "coverage/**"
+  ]
+}

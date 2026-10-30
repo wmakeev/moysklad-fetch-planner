@@ -25,14 +25,12 @@ const createEvent = (
 ) => ({
   process: processNumber,
   type,
-  response_type:
-    'responseType' in ev ? ev.responseType : 'error' in ev ? 'ERROR' : '',
+  response_type: 'responseType' in ev ? ev.responseType : 'error' in ev ? 'ERROR' : '',
   time: Date.now(),
   action_id: ev.actionId,
   request_id: ev.requestId,
   start_time: ev.startTime,
-  end_time:
-    'endTime' in ev ? ev.endTime : 'errorTime' in ev ? ev.errorTime : '',
+  end_time: 'endTime' in ev ? ev.endTime : 'errorTime' in ev ? ev.errorTime : '',
   queue_length: planner.getActionsQueueLength(),
   inflight: planner.getCurInflightRequestsCount(),
   last_delay: planner.getLastRequestDelay(),
@@ -43,18 +41,13 @@ const createEvent = (
   error_message:
     'error' in ev
       ? `${ev.error.name}: ${ev.error.message}` +
-        (ev.error.cause != null &&
-        typeof ev.error.cause === 'object' &&
-        'message' in ev.error.cause
+        (ev.error.cause != null && typeof ev.error.cause === 'object' && 'message' in ev.error.cause
           ? ` (${ev.error.cause.message})`
           : '')
       : ''
 })
 
-export async function stressTest(params: {
-  process: number
-  duration: number
-}) {
+export async function stressTest(params: { process: number; duration: number }) {
   const { process: processNumber, duration } = params
 
   const eventHandler = new EventEmitter<FetchPlannerEventMap>()
@@ -82,16 +75,11 @@ export async function stressTest(params: {
     eventsStream.write(createEvent('fetch-error', processNumber, ev, planner))
   })
 
-  const reportFolderPath = path.join(
-    process.cwd(),
-    `__temp/stress-test/${processNumber}/`
-  )
+  const reportFolderPath = path.join(process.cwd(), `__temp/stress-test/${processNumber}/`)
 
   await mkdir(reportFolderPath, { recursive: true })
 
-  const writeStream = createWriteStream(
-    path.join(reportFolderPath, 'report.csv')
-  )
+  const writeStream = createWriteStream(path.join(reportFolderPath, 'report.csv'))
 
   const pipelinePromise = pipeline(
     eventsStream,
@@ -167,11 +155,11 @@ export async function stressTest(params: {
 
     // Генерируем 503 ошибку
     else if (rndChoice > 0.95) {
-      ms.fetchUrl(
-        `https://online.moysklad.ru/api/remap/1.0/entity/foo${i}`
-      ).catch((err: unknown) => {
-        assert.ok(err instanceof Error)
-      })
+      ms.fetchUrl(`https://online.moysklad.ru/api/remap/1.0/entity/foo${i}`).catch(
+        (err: unknown) => {
+          assert.ok(err instanceof Error)
+        }
+      )
     }
 
     //

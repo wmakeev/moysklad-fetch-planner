@@ -28,11 +28,7 @@ async function stage(procNum: number, reqCount: number) {
       curEventObject = {
         ...curEventObject,
         ...fetchPlanner.getInternalState(),
-        ...(typeof data === 'object'
-          ? data
-          : data != null
-            ? { [eventName]: data }
-            : {}),
+        ...(typeof data === 'object' ? data : data != null ? { [eventName]: data } : {}),
         time: Date.now() - startTime
       }
 
