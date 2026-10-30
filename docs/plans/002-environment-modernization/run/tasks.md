@@ -22,13 +22,13 @@
 
 ## T20 — перейти на закреплённый pnpm и локальные инструменты
 
-- Критерий: в новой временной копии без node_modules `pnpm install --frozen-lockfile` проходит; повторная установка не меняет lock; CLI запускаются через pnpm exec; manifest содержит прежние name/version/main/types/engines; единственный lock — pnpm. Состав зависимостей сопоставлен с T10, случайных массовых upgrades нет.
+- Критерий: в новой временной копии без node_modules `pnpm install --frozen-lockfile` проходит; повторная установка не меняет lock; CLI запускаются через pnpm exec; manifest содержит прежние name/version/main/types и принятый engines >=24; единственный lock — pnpm. Состав зависимостей сопоставлен с T10, случайных массовых upgrades нет.
 - Файлы: package.json, pnpm-lock.yaml, package-lock.json (удаление), .node-version, .gitignore/.npmignore; pnpm-workspace.yaml только при нужных настройках.
 - Вид/source/deps: ../01-plan.md, T20.
 - Риск: normal · пишет в боевую систему: нет · приёмка: отдельно · объём: полный
 - Журнал: `journal/T20.md`
-- Исполнитель: ступень 3, gpt-6.1-sol (medium).
-- Верификатор: ступень 3, gpt-6.1-sol (medium); свежий контекст, ограничение независимости: та же модель.
+- Исполнитель T20/1: ступень 3 · gpt-6.1-sol (medium) · t3 `node:delegated-task:command%3Amcp%3Aa507b654-c3da-4647-a87e-8cb1e9a713e5%3Adelegate-task%3Afetch-planner-002-T20-1-implementation`.
+- Верификатор T20/1: ступень 3 · gpt-6.1-sol (medium) · t3 `node:delegated-task:command%3Amcp%3Aa507b654-c3da-4647-a87e-8cb1e9a713e5%3Adelegate-task%3Afetch-planner-002-T20-1-verifier` · V3 отдельно · passed · отчёт `journal/T20.accept-1.md`; ограничение независимости: та же модель.
 
 ## T30 — разделить проверку типов, production и test build
 
