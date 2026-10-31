@@ -7,7 +7,7 @@ import { FetchPlanner as DeepPlanner } from '../../src/planner.js'
 import { ConsumeReadFailure } from '../../src/operation-types.js'
 import type { ConsumeContext, Event, Handle, Snapshot } from '../../src/operation-types.js'
 import { OperationObservation } from '../../src/operation-observation.js'
-import { createRuntime, deferred } from './helpers.js'
+import { createRuntime, deferred, trackTimeouts } from './helpers.js'
 
 const canary = 'T70_PRIVATE_URL_HEADER_BODY_CAUSE_VALUE_KEY'
 const replay = { serverSafe: true, consumeSafe: true }
@@ -620,3 +620,625 @@ test('native and undici same-operation upload retry owns both cleanup barriers a
     )
   )
 })
+
+// Hold delivery of an actual coordinator wake, never a policy field or an entry.
+// The receipt/control is delivered in a later host microtask before this wake runs.
+function holdWake(t: import('node:test').TestContext) {
+  const enqueue = globalThis.queueMicrotask
+  let armed = false
+  let held: (() => void) | undefined
+  t.mock.method(globalThis, 'queueMicrotask', (callback: () => void) => {
+    if (armed && !held) {
+      armed = false
+      held = callback
+    } else enqueue(callback)
+  })
+  return {
+    arm() {
+      armed = true
+    },
+    get pending() {
+      return held !== undefined
+    },
+    release() {
+      const callback = held
+      held = undefined
+      if (callback) enqueue(callback)
+    },
+    change(callback: () => void) {
+      enqueue(callback)
+    }
+  }
+}
+
+for (const safety of [
+  'stop',
+  'abort',
+  'deadline',
+  'pause',
+  'pacing',
+  'effective',
+  'guard'
+] as const) {
+  test(`T72 real receipt admission rechecks ${safety} in a microtask after wake`, async t => {
+    const clock = createRuntime(t)
+    const timers = trackTimeouts(t)
+    t.after(() => {
+      assert.equal(timers.active.size, 0, 'COORDINATOR_TIMER_RETIRED')
+    })
+    const wake = holdWake(t)
+    const receipt = deferred<Response>()
+    const disposal = deferred<undefined>()
+    const prepare = deferred<undefined>()
+    const permanent = ['stop', 'abort', 'deadline', 'guard'].includes(safety)
+    const sends: {
+      at: number
+      guard: boolean
+      pause: number
+      active: number
+      effective: number
+    }[] = []
+    const planner = new FetchPlanner<typeof fetch>(
+      () => {
+        const snapshot = planner.snapshot()
+        sends.push({
+          at: performance.now(),
+          guard: snapshot.guardOpen,
+          pause: snapshot.serverNotBefore,
+          active: snapshot.sentActive,
+          effective: snapshot.effectiveParallelism
+        })
+        if (sends.length === 1) return receipt.promise
+        return Promise.resolve(
+          new Response(canary, {
+            headers: sends.length === 2 ? { 'x-lognex-reset': '100' } : {}
+          })
+        )
+      },
+      {
+        maxParallelLimit: safety === 'effective' ? 2 : 4,
+        jitter: 0,
+        ...(safety === 'guard' ? { errorPerMinuteLimit: 1 } : {})
+      }
+    )
+    const current = planner.submit({
+      method: 'POST',
+      replay: { serverSafe: false, consumeSafe: false },
+      prepare: ctx => {
+        if (safety === 'effective') ctx.onDispose(() => disposal.promise)
+        return { url: canary, init: { body: canary } }
+      },
+      consume: response => response.text()
+    })
+    const seed = planner.submit({
+      method: 'GET',
+      replay,
+      prepare: () => ({ url: canary, init: {} }),
+      consume: response => response.text()
+    })
+    const candidates: Handle<string>[] = []
+    const trace: unknown[] = []
+    const subscription = planner.observe(event => {
+      trace.push(event, planner.snapshot())
+    })
+    try {
+      await clock.flush()
+      await seed.resourcesDone
+      assert.equal(sends.length, 2)
+      for (let i = 0; i < 2; i++)
+        candidates.push(
+          planner.submit({
+            method: 'GET',
+            replay,
+            deadlineMs: safety === 'deadline' ? 101 : 20000,
+            prepare: async () => {
+              await prepare.promise
+              return { url: canary, init: {} }
+            },
+            consume: response => response.text()
+          })
+        )
+      await clock.flush()
+      assert.equal(candidates[0]?.snapshot().phase, 'preparing')
+      prepare.resolve(undefined)
+      await clock.flush()
+      assert.equal(candidates[0].snapshot().phase, 'ready')
+      if (safety !== 'effective') assert.equal(candidates[1]?.snapshot().phase, 'ready')
+      const origin = performance.now()
+      wake.arm()
+      clock.tick(100)
+      assert.equal(wake.pending, true, 'ACTUAL_TIMER_WAKE_HELD')
+      wake.change(() => {
+        if (safety === 'stop') planner.stop(canary)
+        else if (safety === 'abort') for (const handle of candidates) handle.abort(canary)
+        else if (safety === 'deadline') t.mock.method(performance, 'now', () => origin + 101)
+        else
+          receipt.resolve(
+            new Response(safety === 'effective' ? '{"errors":[{"code":1073}]}' : canary, {
+              status: safety === 'effective' ? 429 : safety === 'guard' ? 412 : 200,
+              headers:
+                safety === 'pause'
+                  ? { 'x-lognex-reset': '400' }
+                  : safety === 'pacing'
+                    ? {
+                        'x-ratelimit-limit': '10',
+                        'x-ratelimit-remaining': '0',
+                        'x-lognex-retry-timeinterval': '1000'
+                      }
+                    : safety === 'effective'
+                      ? { 'content-type': 'application/json' }
+                      : {}
+            })
+          )
+      })
+      await clock.flush()
+      assert.equal(sends.length, 2, 'NO_SEND_WHILE_WAKE_DELIVERY_HELD')
+      if (safety === 'pause') assert.equal(planner.snapshot().serverNotBefore, origin + 500)
+      if (safety === 'effective') {
+        assert.equal(planner.snapshot().effectiveParallelism, 1)
+        assert.equal(planner.snapshot().sentActive, 1, 'DISPOSER_STILL_OWNS_SENT_TOKEN')
+      }
+      if (safety === 'guard') assert.equal(planner.snapshot().guardOpen, true)
+      wake.release()
+      await clock.flush()
+      assert.equal(sends.length, 2, `FINAL_${safety.toUpperCase()}_MUST_BLOCK_ACTUAL_TRANSPORT`)
+      if (permanent) {
+        const code =
+          safety === 'stop'
+            ? 'STOPPED'
+            : safety === 'abort'
+              ? 'ABORTED'
+              : safety === 'deadline'
+                ? 'DEADLINE'
+                : 'GUARD_OPEN'
+        for (const handle of candidates)
+          await assert.rejects(handle.result, { code, dispatchEntered: false })
+      } else {
+        if (safety === 'pause') {
+          clock.jumpWall(-20000000)
+          await clock.advance(399)
+          assert.equal(sends.length, 2, 'RECEIPT_PAUSE_MINUS_ONE')
+          await clock.advance(1)
+        } else if (safety === 'pacing') {
+          // Preserved 003 formula at elapsed100: round(.9^5 * 3000)=1771.
+          await clock.advance(1770)
+          assert.equal(sends.length, 2, 'INVALIDATED_PACING_CACHE_MINUS_ONE')
+          await clock.advance(1)
+          assert.equal(sends.length, 3, 'ONE_READY_SEND_PER_PACING_INTERVAL')
+          await clock.advance(3000)
+        } else {
+          disposal.resolve(undefined)
+          await clock.flush()
+        }
+        assert.equal(sends.length, 4, 'RECOVERABLE_SAFETY_RESUMES_ALL_READY_WITHOUT_STARVATION')
+        for (const handle of candidates) assert.equal((await handle.result).value, canary)
+      }
+      for (const send of sends) {
+        assert.equal(send.guard, false, 'ACTUAL_TRANSPORT_AFTER_GUARD_OPEN')
+        assert.ok(send.at >= send.pause, 'ACTUAL_TRANSPORT_BEFORE_RECEIPT_DEADLINE')
+        assert.ok(send.active <= send.effective, 'ACTUAL_TRANSPORT_OVER_EFFECTIVE_LIMIT')
+      }
+      assert.equal(JSON.stringify(trace).includes(canary), false)
+    } finally {
+      wake.release()
+      prepare.resolve(undefined)
+      disposal.resolve(undefined)
+      receipt.resolve(new Response('cleanup'))
+      planner.stop()
+      for (const handle of [current, seed, ...candidates]) handle.abort()
+      await Promise.allSettled(
+        [current, seed, ...candidates].flatMap(handle => [handle.result, handle.resourcesDone])
+      )
+      subscription.unsubscribe()
+    }
+    assert.equal(planner.snapshot().leasedAttempts, 0)
+    assert.equal(planner.snapshot().sentActive, 0)
+    assert.equal(planner.snapshot().queued, 0)
+  })
+}
+
+for (const status of [412, 429]) {
+  for (const terminal of ['current', 'abort', 'deadline'] as const) {
+    test(`T72 late100th ${status}/${terminal} blocks wake before fanout with another classifier pending`, async t => {
+      const clock = createRuntime(t)
+      const timers = trackTimeouts(t)
+      t.after(() => {
+        assert.equal(timers.active.size, 0, 'COORDINATOR_TIMER_RETIRED')
+      })
+      const wake = holdWake(t)
+      const lateReceipt = deferred<Response>()
+      const parser = deferred<undefined>()
+      const preparing = deferred<undefined>()
+      const origin = performance.now()
+      let calls = 0
+      let classifierReads = 0
+      let lateConsumes = 0
+      const planner = new DeepPlanner<typeof fetch>(
+        () => {
+          calls++
+          if (calls === 98)
+            return Promise.resolve(
+              new Response(
+                new ReadableStream<Uint8Array>(
+                  {
+                    async pull(controller) {
+                      classifierReads++
+                      await parser.promise
+                      controller.enqueue(new TextEncoder().encode('{}'))
+                      controller.close()
+                    }
+                  },
+                  { highWaterMark: 0 }
+                ),
+                { status: 429, headers: { 'content-type': 'application/json' } }
+              )
+            )
+          if (calls === 99) return lateReceipt.promise
+          return Promise.resolve(
+            new Response(canary, {
+              status: status === 429 ? 429 : 412,
+              headers: calls === 100 ? { 'x-lognex-reset': '100' } : {}
+            })
+          )
+        },
+        { maxParallelLimit: 4, jitter: 0, ...(status === 429 ? { errorPerMinuteLimit: 1000 } : {}) }
+      )
+      const submit = () =>
+        planner.submit({
+          method: 'POST',
+          replay: { serverSafe: false, consumeSafe: false },
+          prepare: () => ({ url: canary, init: { body: canary } }),
+          consume: response => response.text()
+        })
+      const finish = async (handle: Handle<string>) => {
+        if (status === 429) await assert.rejects(handle.result, { code: 'HTTP_FAILED', status })
+        else assert.equal((await handle.result).status, status)
+        await handle.resourcesDone
+      }
+      const handles: Handle<string>[] = []
+      const fanout: { listener: number; guard: boolean; calls: number; pending: string }[] = []
+      const records: unknown[] = []
+      let nested: Handle<string> | undefined
+      let armed = false
+      const attachments = [1, 2].map(listener =>
+        planner.observe(event => {
+          records.push(event, planner.snapshot())
+          if (!armed || event.type !== 'headers-received') return
+          fanout.push({
+            listener,
+            guard: planner.snapshot().guardOpen,
+            calls,
+            pending: handles[0]?.snapshot().outcome ?? 'missing'
+          })
+          if (listener === 1) nested = submit()
+        })
+      )
+      try {
+        for (let i = 0; i < 97; i++) await finish(submit())
+        const classifying = submit()
+        handles.push(classifying)
+        await clock.flush()
+        assert.equal(classifierReads, 1)
+        assert.equal(classifying.snapshot().phase, 'classifying')
+        const late = planner.submit({
+          method: 'POST',
+          replay: { serverSafe: false, consumeSafe: false },
+          deadlineMs: terminal === 'deadline' ? 50 : 20000,
+          prepare: () => ({ url: canary, init: { body: canary } }),
+          consume: async response => {
+            lateConsumes++
+            return response.text()
+          }
+        })
+        handles.push(late)
+        await clock.flush()
+        await finish(submit())
+        assert.equal(calls, 100)
+        assert.equal(planner.snapshot().guardOpen, false, 'REAL_RECEIPT_99_BASELINE')
+        for (let i = 0; i < 2; i++)
+          handles.push(
+            planner.submit({
+              method: 'GET',
+              replay,
+              prepare: async () => {
+                await preparing.promise
+                return { url: canary, init: {} }
+              },
+              consume: response => response.text()
+            })
+          )
+        await clock.flush()
+        preparing.resolve(undefined)
+        await clock.flush()
+        assert.deepEqual(
+          handles.slice(2).map(handle => handle.snapshot().phase),
+          ['ready', 'ready']
+        )
+        let original: unknown
+        if (terminal !== 'current') {
+          if (terminal === 'abort') late.abort(canary)
+          else await clock.advance(50)
+          await assert.rejects(late.result, error => {
+            original = error
+            return (
+              error instanceof OperationError &&
+              error.code === (terminal === 'abort' ? 'ABORTED' : 'DEADLINE')
+            )
+          })
+          assert.equal(planner.snapshot().sentActive, 2, 'LATE_SENT_WORK_RETAINS_ACCOUNTING')
+        }
+        wake.arm()
+        clock.tick(terminal === 'deadline' ? 50 : 100)
+        assert.equal(wake.pending, true)
+        armed = true
+        wake.change(() => {
+          lateReceipt.resolve(
+            new Response('{', {
+              status,
+              headers: {
+                'content-type': 'application/json',
+                'x-lognex-reset': canary,
+                'retry-after': canary
+              }
+            })
+          )
+        })
+        await clock.flush()
+        assert.equal(planner.snapshot().guardOpen, true)
+        assert.equal(calls, 100, 'LATE100_RECEIPT_PREVENTS_NEXT_ACTUAL_SEND')
+        assert.deepEqual(
+          fanout,
+          [1, 2].map(listener => ({ listener, guard: true, calls: 100, pending: 'pending' }))
+        )
+        assert.ok(nested)
+        await assert.rejects(nested.result, { code: 'GUARD_OPEN', operationId: 0 })
+        wake.release()
+        await clock.flush()
+        assert.equal(calls, 100, 'NO_CACHED_WAKE_PERMIT_AFTER_GUARD_OPEN')
+        for (const ready of handles.slice(2))
+          await assert.rejects(ready.result, { code: 'GUARD_OPEN', dispatchEntered: false })
+        if (terminal === 'current') {
+          if (status === 429)
+            await assert.rejects(late.result, { code: 'HTTP_FAILED', status: 429 })
+          else assert.equal((await late.result).value, '{')
+        } else await assert.rejects(late.result, error => error === original)
+        assert.equal(
+          late.snapshot().status,
+          status,
+          'LATE_STATUS_RECORDED_WITHOUT_REPLACING_PRIMARY_RESULT'
+        )
+        assert.equal(lateConsumes, terminal === 'current' && status === 412 ? 1 : 0)
+        assert.equal(
+          classifying.snapshot().outcome,
+          'pending',
+          'GUARD_PRESERVES_CURRENT_SENT_CLASSIFIER'
+        )
+        assert.equal(planner.snapshot().sentActive, 1)
+        parser.resolve(undefined)
+        await assert.rejects(classifying.result, { code: 'HTTP_FAILED', status: 429 })
+        await Promise.all(handles.map(handle => handle.resourcesDone))
+        const observation: unknown = Reflect.get(planner, 'observation')
+        assert.ok(observation instanceof OperationObservation)
+        assert.equal(observation.diagnostics.snapshot().OBSERVER_FAILED, 0)
+        assert.equal(observation.diagnostics.snapshot().INVALID_HINT, 2)
+        assert.equal(JSON.stringify(records).includes(canary), false)
+        assert.equal(performance.now(), origin + 100)
+        assert.equal(planner.snapshot().leasedAttempts, 0)
+        assert.equal(planner.snapshot().sentActive, 0)
+      } finally {
+        armed = false
+        wake.release()
+        parser.resolve(undefined)
+        preparing.resolve(undefined)
+        lateReceipt.resolve(new Response('cleanup'))
+        planner.stop()
+        for (const handle of handles) handle.abort()
+        await Promise.allSettled(
+          [...handles, ...(nested ? [nested] : [])].flatMap(handle => [
+            handle.result,
+            handle.resourcesDone
+          ])
+        )
+        for (const attachment of attachments) attachment.unsubscribe()
+      }
+    })
+  }
+}
+
+test('T72 receipts during prepare clamp effective and retain maximum pause through stale success and recovery', async t => {
+  const clock = createRuntime(t)
+  const timers = trackTimeouts(t)
+  t.after(() => {
+    assert.equal(timers.active.size, 0, 'COORDINATOR_TIMER_RETIRED')
+  })
+  const origin = performance.now()
+  const replies = Array.from({ length: 4 }, () => deferred<Response>())
+  const prepare = deferred<undefined>()
+  const consume = deferred<undefined>()
+  const entered: { at: number; active: number; effective: number }[] = []
+  const planner = new FetchPlanner<typeof fetch>(
+    () => {
+      entered.push({
+        at: performance.now(),
+        active: planner.snapshot().sentActive,
+        effective: planner.snapshot().effectiveParallelism
+      })
+      const reply = replies[entered.length - 1]
+      return reply ? reply.promise : Promise.resolve(new Response(canary))
+    },
+    { maxParallelLimit: 4, jitter: 0 }
+  )
+  const seeds = Array.from({ length: 4 }, () =>
+    planner.submit({
+      method: 'GET',
+      replay: { serverSafe: false, consumeSafe: false },
+      prepare: () => ({ url: canary, init: {} }),
+      consume: response => response.text()
+    })
+  )
+  const candidates: Handle<string>[] = []
+  const overflow = (pause: number) =>
+    new Response('{"errors":[{"code":1073}]}', {
+      status: 429,
+      headers: { 'content-type': 'application/json', 'x-lognex-reset': String(pause) }
+    })
+  try {
+    await clock.flush()
+    assert.equal(entered.length, 4)
+    replies[0]?.resolve(overflow(1000))
+    await seeds[0]?.resourcesDone
+    for (let i = 0; i < 3; i++)
+      candidates.push(
+        planner.submit({
+          method: 'GET',
+          replay,
+          prepare: async () => {
+            await prepare.promise
+            return { url: canary, init: {} }
+          },
+          consume: async response => {
+            await consume.promise
+            return response.text()
+          }
+        })
+      )
+    await clock.flush()
+    assert.equal(candidates[0]?.snapshot().phase, 'preparing')
+    replies[1]?.resolve(overflow(500))
+    await seeds[1]?.resourcesDone
+    replies[2]?.resolve(overflow(2000))
+    await seeds[2]?.resourcesDone
+    assert.equal(planner.snapshot().effectiveParallelism, 1, 'REAL_1073_CLAMP')
+    assert.equal(planner.snapshot().serverNotBefore, origin + 2000)
+    clock.jumpWall(20000000)
+    replies[3]?.resolve(new Response('old-success', { headers: { 'x-lognex-reset': '10' } }))
+    assert.equal((await seeds[3]?.result)?.value, 'old-success')
+    await seeds[3]?.resourcesDone
+    assert.equal(
+      planner.snapshot().serverNotBefore,
+      origin + 2000,
+      'OUT_OF_ORDER_SUCCESS_CANNOT_SHORTEN_PAUSE'
+    )
+    prepare.resolve(undefined)
+    await clock.flush()
+    assert.deepEqual(
+      candidates.map(handle => handle.snapshot().phase),
+      ['ready', 'ready', 'ready']
+    )
+    clock.jumpWall(-40000000)
+    await clock.advance(1999)
+    assert.equal(entered.length, 4, 'PREPARE_CANNOT_CACHE_PRE_RECEIPT_PERMIT')
+    await clock.advance(1)
+    assert.equal(entered.length, 5, 'ONLY_ONE_READY_ENTERS_REDUCED_EFFECTIVE')
+    await clock.advance(8000)
+    assert.equal(planner.snapshot().effectiveParallelism, 1, 'RECOVERY_STRICT_PERIOD_EQUALITY')
+    assert.equal(entered.length, 5)
+    await clock.advance(1)
+    assert.equal(planner.snapshot().effectiveParallelism, 2)
+    assert.equal(entered.length, 6, 'RECOVERY_DISPATCHES_WITHOUT_NEW_RECEIPT')
+    assert.equal(planner.snapshot().serverNotBefore, origin + 2000)
+    consume.resolve(undefined)
+    await clock.flush()
+    assert.equal(entered.length, 7, 'ALL_READY_RESUME_WITHOUT_STARVATION')
+    for (const handle of candidates) assert.equal((await handle.result).value, canary)
+    assert.ok(entered.every(send => send.active <= send.effective))
+    assert.deepEqual(
+      entered.slice(4).map(send => send.at),
+      [origin + 2000, origin + 10001, origin + 10001]
+    )
+    for (const seed of seeds.slice(0, 3))
+      await assert.rejects(seed.result, { code: 'HTTP_FAILED', status: 429 })
+  } finally {
+    prepare.resolve(undefined)
+    consume.resolve(undefined)
+    for (const reply of replies) reply.resolve(new Response('cleanup'))
+    planner.stop()
+    for (const handle of [...seeds, ...candidates]) handle.abort()
+    await Promise.allSettled(
+      [...seeds, ...candidates].flatMap(handle => [handle.result, handle.resourcesDone])
+    )
+  }
+  assert.equal(planner.snapshot().leasedAttempts, 0)
+  assert.equal(planner.snapshot().sentActive, 0)
+})
+
+for (const seedCount of [58, 59]) {
+  test(`T72 PUT retry after ${seedCount} sends charges only actual admission at 60 and rejects 61`, async t => {
+    const clock = createRuntime(t)
+    const timers = trackTimeouts(t)
+    t.after(() => {
+      assert.equal(timers.active.size, 0, 'COORDINATOR_TIMER_RETIRED')
+    })
+    let sends = 0
+    const preparations: number[] = []
+    const planner = new FetchPlanner<typeof fetch>(
+      () => {
+        sends++
+        return Promise.resolve(
+          new Response(canary, {
+            status: sends === seedCount + 1 ? 429 : 200,
+            headers: sends === seedCount + 1 ? { 'x-lognex-reset': '500' } : {}
+          })
+        )
+      },
+      { jitter: 0 }
+    )
+    const spec = {
+      method: 'PUT' as const,
+      entityKey: canary,
+      replay,
+      prepare: () => ({ url: canary, init: { body: canary } }),
+      consume: (response: Response) => response.text()
+    }
+    const handles: Handle<string>[] = []
+    try {
+      for (let i = 0; i < seedCount; i++) {
+        const seed = planner.submit(spec)
+        await seed.result
+        await seed.resourcesDone
+      }
+      const retry = planner.submit({
+        ...spec,
+        prepare: ctx => {
+          preparations.push(ctx.attemptNumber)
+          return spec.prepare()
+        }
+      })
+      handles.push(retry)
+      await clock.flush()
+      assert.equal(retry.snapshot().phase, 'retry-wait')
+      const cancelled = planner.submit(spec)
+      handles.push(cancelled)
+      await clock.flush()
+      assert.equal(cancelled.snapshot().phase, 'ready')
+      assert.equal(sends, seedCount + 1, 'DEFERRED_PUT_DOES_NOT_ENTER_TRANSPORT')
+      cancelled.abort()
+      await assert.rejects(cancelled.result, { code: 'ABORTED', dispatchEntered: false })
+      await cancelled.resourcesDone
+      await clock.advance(2999)
+      assert.equal(sends, seedCount + 1)
+      await clock.advance(1)
+      assert.deepEqual(preparations, [1, 2], 'FRESH_RETRY_PREPARE_IS_NOT_A_PUT_CHARGE')
+      if (seedCount === 58) {
+        assert.equal((await retry.result).value, canary)
+        assert.equal(retry.snapshot().dispatchCalls, 2, 'ACTUAL_RETRY_IS_PUT60')
+      } else await assert.rejects(retry.result, { code: 'PUT_LIMIT', attemptNumber: 2 })
+      await retry.resourcesDone
+      assert.equal(sends, 60, 'ACTUAL_PUT61_MUST_NOT_ENTER')
+      const denied = planner.submit(spec)
+      handles.push(denied)
+      await assert.rejects(denied.result, { code: 'PUT_LIMIT', dispatchEntered: false })
+      const other = planner.submit({ ...spec, entityKey: `${canary}2` })
+      handles.push(other)
+      assert.equal((await other.result).value, canary)
+      assert.equal(sends, 61, 'ANOTHER_ENTITY_STILL_DISPATCHES')
+      assert.equal(planner.snapshot().guardOpen, false)
+    } finally {
+      planner.stop()
+      for (const handle of handles) handle.abort()
+      await Promise.allSettled(handles.flatMap(handle => [handle.result, handle.resourcesDone]))
+    }
+    assert.equal(planner.snapshot().leasedAttempts, 0)
+    assert.equal(planner.snapshot().sentActive, 0)
+  })
+}
