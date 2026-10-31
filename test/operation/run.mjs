@@ -14,6 +14,7 @@ const registry = new Map([
   ['ownership', 'ownership.test.ts'],
   ['commit', 'commit.test.ts'],
   ['cancellation', 'cancellation.test.ts'],
+  ['pacing', 'pacing.test.ts'],
   ['pacing-formula', 'pacing-formula.test.ts'],
   ['context', 'context.test.ts'],
   ['resources', 'resources.test.ts'],

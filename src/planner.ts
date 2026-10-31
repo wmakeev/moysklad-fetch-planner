@@ -3,6 +3,7 @@ import { CallbackContext } from './callback-context.js'
 import { OperationCapacity } from './operation-capacity.js'
 import { OperationResources } from './operation-resources.js'
 import { OperationState } from './operation-state.js'
+import { calculateRequestDelay, createAttenuationSteps, requestDeadline } from './pacing.js'
 import { absoluteDeadline, MAX_TIMEOUT_MS, monotonicNow } from './runtime.js'
 import type {
   Attachment,
@@ -127,6 +128,8 @@ interface Entry {
   cancel(code: 'ABORTED' | 'STOPPED', reason?: unknown): void
   nextWake(): number | undefined
   expire(now: number): void
+  admit(): number
+  releaseReady(): void
 }
 
 /** The sole coordinator. Ownership remains with an attempt until actual cleanup settles. */
@@ -144,6 +147,26 @@ export class FetchPlanner<F extends Transport> implements Planner<Init<F>, Respo
   readonly #active = new Set<Entry>()
   readonly #listeners = new Set<(event: Event) => void>()
   readonly #startedAt = monotonicNow()
+  readonly #ready = new Set<Entry>()
+  readonly #attenuationSteps: readonly number[]
+  // HTTP receipt inputs and correction updates are connected in stage III.
+  readonly #pacing: {
+    limit: number | null
+    remaining: number | null
+    retryTimeInterval: number
+    lastDispatchAt: number
+    serverNotBefore: number
+    guardOpen: boolean
+  } = {
+    limit: null,
+    remaining: null,
+    retryTimeInterval: 3000,
+    lastDispatchAt: 0,
+    serverNotBefore: 0,
+    guardOpen: false
+  }
+  #pacingPlan: { key: string; notBefore: number } | undefined
+  #readyWake = Infinity
   #sequence = 0
   #nextId = 1
   #stopped = false
@@ -159,6 +182,7 @@ export class FetchPlanner<F extends Transport> implements Planner<Init<F>, Respo
       if (cause instanceof OperationError) throw cause
       throw invalid(cause)
     }
+    this.#attenuationSteps = createAttenuationSteps(this.#options.throttlingCoefficient)
     this.#capacity = new OperationCapacity(
       this.#options.maxQueuedOperations,
       this.#options.maxParallelLimit
@@ -246,6 +270,7 @@ export class FetchPlanner<F extends Transport> implements Planner<Init<F>, Respo
             : undefined
       if (code && fail(code)) {
         controller.abort()
+        entry.releaseReady()
         if (!started) {
           reservation?.release()
           state.settleResources({ resources: 'released' }, this.#stamp())
@@ -254,6 +279,8 @@ export class FetchPlanner<F extends Transport> implements Planner<Init<F>, Respo
       }
     }
     const entry: Entry = {
+      admit: () => Infinity,
+      releaseReady: () => undefined,
       nextWake,
       expire,
       cancel: (code, reason) => {
@@ -265,6 +292,7 @@ export class FetchPlanner<F extends Transport> implements Planner<Init<F>, Respo
         }
         if (!fail(code, reason)) return
         controller.abort(reason)
+        entry.releaseReady()
         if (!started) {
           reservation?.release()
           state.settleResources({ resources: 'released' }, this.#stamp())
@@ -300,30 +328,64 @@ export class FetchPlanner<F extends Transport> implements Planner<Init<F>, Respo
           )
           if (state.snapshot().outcome !== 'pending') return
           state.transition('phase-changed', { phase: 'ready' }, this.#stamp())
-          if (this.#stopped) {
-            entry.cancel('STOPPED', this.#stopReason)
-            return
-          }
-          expire(monotonicNow())
-          if (state.snapshot().outcome !== 'pending') return
-          token = lease.trySend()
-          if (!token) throw new Error('DISPATCH_CAPACITY_UNAVAILABLE')
+          // All descriptor accessors were read under the prepare lifetime. Materialize
+          // the final transport arguments before admission, including the method/signal.
+          const url = descriptor.value.url
+          const init = { ...descriptor.value.init, method: spec.method, signal: controller.signal }
           code = 'TRANSPORT_FAILED'
-          const work = state.deferDelivery(() => {
-            state.transition(
-              'dispatch-started',
-              { phase: 'sending', dispatchCalls: 1, dispatchEntered: true },
-              this.#stamp()
-            )
-            // No observer/user callback between final admission and transport entry.
-            // Synchronous transport abort reads these same committed dispatch facts.
-            return this.#transport(descriptor.value.url, {
-              ...descriptor.value.init,
-              method: spec.method,
-              signal: controller.signal
-            })
+          const work = await new Promise<ResponseOf<F> | undefined>(resolve => {
+            entry.releaseReady = () => {
+              if (!this.#ready.delete(entry)) return
+              resolve(undefined)
+              this.#wake()
+            }
+            entry.admit = () => {
+              try {
+                // These sources can run user code; take them before the final checks.
+                const stamp = this.#stamp()
+                const random = Math.random()
+                const now = monotonicNow()
+                expire(now)
+                if (this.#stopped) entry.cancel('STOPPED', this.#stopReason)
+                if (this.#pacing.guardOpen) fail('GUARD_OPEN')
+                if (state.snapshot().outcome !== 'pending') {
+                  entry.releaseReady()
+                  return Infinity
+                }
+                const notBefore = this.#dispatchNotBefore(now, random)
+                if (now < notBefore) return notBefore
+                token = lease.trySend()
+                if (!token) return Infinity
+                // Final gate -> accounting -> committed state -> transport is synchronous.
+                // No observer, getter, random source, clock callback or await in this section.
+                this.#pacing.lastDispatchAt = now
+                this.#pacingPlan = undefined
+                this.#ready.delete(entry)
+                state.deferDelivery(() => {
+                  state.transition(
+                    'dispatch-started',
+                    { phase: 'sending', dispatchCalls: 1, dispatchEntered: true },
+                    stamp
+                  )
+                  try {
+                    resolve(this.#transport(url, init))
+                  } catch (cause) {
+                    fail('TRANSPORT_FAILED', cause)
+                    resolve(undefined)
+                  }
+                })
+                return Infinity
+              } catch (cause) {
+                fail('TRANSPORT_FAILED', cause)
+                entry.releaseReady()
+                return Infinity
+              }
+            }
+            this.#ready.add(entry)
+            this.#wake()
           })
-          response = await work
+          if (!work) return
+          response = work
           // Read the receipt's HTTP fact once; custom Response accessors can run user code.
           const status = response.status
           state.transition('headers-received', { phase: 'classifying', status }, this.#stamp())
@@ -425,9 +487,9 @@ export class FetchPlanner<F extends Transport> implements Planner<Init<F>, Respo
     return Object.freeze({
       sequence: this.#sequence,
       stopped: this.#stopped,
-      guardOpen: false,
+      guardOpen: this.#pacing.guardOpen,
       ...this.#capacity.snapshot(),
-      serverNotBefore: 0
+      serverNotBefore: this.#pacing.serverNotBefore
     })
   }
 
@@ -471,11 +533,29 @@ export class FetchPlanner<F extends Transport> implements Planner<Init<F>, Respo
     return { url: typeof raw.url === 'string' ? raw.url : raw.url.href, init }
   }
 
+  /** A wake is not a permit. Cache only the numeric wait for unchanged history/inputs.
+   * Recomputing a fresh delay on each wake would postpone admission indefinitely.
+   */
+  #dispatchNotBefore(now: number, random: number): number {
+    const p = this.#pacing
+    const key = `${p.limit}/${p.remaining}/${p.retryTimeInterval}/${p.lastDispatchAt}`
+    if (this.#pacingPlan?.key !== key) {
+      const delay = calculateRequestDelay(
+        { ...p, elapsed: now - p.lastDispatchAt },
+        this.#options,
+        this.#attenuationSteps,
+        random
+      )
+      this.#pacingPlan = { key, notBefore: requestDeadline(now, delay) }
+    }
+    return Math.max(this.#pacingPlan.notBefore, p.serverNotBefore)
+  }
+
   /** One timer belongs to this coordinator, including logical cleanup grace. */
   #armTimer(): void {
     clearTimeout(this.#timer)
     this.#timer = undefined
-    let next = Infinity
+    let next = this.#ready.size ? this.#readyWake : Infinity
     for (const entry of this.#active) next = Math.min(next, entry.nextWake() ?? Infinity)
     if (next === Infinity) return
     this.#timer = setTimeout(
@@ -483,6 +563,8 @@ export class FetchPlanner<F extends Transport> implements Planner<Init<F>, Respo
         this.#timer = undefined
         const now = monotonicNow()
         for (const entry of this.#active) entry.expire(now)
+        this.#readyWake = Infinity
+        this.#wake()
         this.#armTimer()
       },
       Math.min(MAX_TIMEOUT_MS, Math.max(0, next - monotonicNow()))
@@ -494,11 +576,16 @@ export class FetchPlanner<F extends Transport> implements Planner<Init<F>, Respo
     this.#pumpScheduled = true
     queueMicrotask(() => {
       this.#pumpScheduled = false
+      this.#readyWake = Infinity
+      for (const entry of this.#ready) {
+        this.#readyWake = Math.min(this.#readyWake, entry.admit())
+      }
       while (!this.#stopped) {
         const next = this.#capacity.take()
         if (!next) break
         void next.value.start(next.lease)
       }
+      this.#armTimer()
     })
   }
 }
