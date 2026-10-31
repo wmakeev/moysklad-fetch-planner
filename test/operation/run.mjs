@@ -11,6 +11,7 @@ const registry = new Map([
   ['types', 'types.test.ts'],
   ['public', 'public.test.ts'],
   ['admission', 'admission.test.ts'],
+  ['ownership', 'ownership.test.ts'],
   ['pacing-formula', 'pacing-formula.test.ts'],
   ['context', 'context.test.ts'],
   ['resources', 'resources.test.ts'],

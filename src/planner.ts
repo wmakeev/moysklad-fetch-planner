@@ -1,3 +1,4 @@
+import { isErrored, isReadable } from 'node:stream'
 import { CallbackContext } from './callback-context.js'
 import { OperationCapacity } from './operation-capacity.js'
 import { OperationResources } from './operation-resources.js'
@@ -14,6 +15,7 @@ import type {
   OneTransport,
   Planner,
   PlannerSnapshot,
+  ResourceSummary,
   ResponseOf,
   Spec,
   Transport
@@ -302,15 +304,32 @@ export class FetchPlanner<F extends Transport> implements Planner<Init<F>, Respo
           if (state.snapshot().outcome === 'pending')
             state.transition('phase-changed', { phase: 'cleanup' }, this.#stamp())
           const cleanup = await resources.cleanup(!state.snapshot().resultCommitted)
-          let responseCleanupFailed = false
+          let responseResources: ResourceSummary['resources'] = 'released'
           try {
-            if (response?.body && !response.bodyUsed && !response.body.locked)
-              await response.body.cancel()
+            const body = response?.body
+            if (body) {
+              // Await cancellation of an unlocked remainder as known work.
+              if (!body.locked) await body.cancel()
+              else {
+                // Node's public probes support Web Streams, but @types/node24
+                // omits that overload (its declaration has a TODO). Keep this
+                // compatibility cast internal; never use bodyUsed as EOF proof.
+                const stream = body as unknown as Parameters<typeof isReadable>[0]
+                // Helpers can retain a closed reader. Only a confirmed closed,
+                // non-errored stream proves completion; null is unconfirmed too.
+                if (isReadable(stream) !== false || isErrored(stream)) responseResources = 'unknown'
+              }
+            }
           } catch {
-            responseCleanupFailed = true
+            responseResources = 'failed'
           }
           const summary = {
-            resources: responseCleanupFailed ? 'failed' : cleanup.resources
+            resources:
+              responseResources === 'failed' || cleanup.resources === 'failed'
+                ? 'failed'
+                : responseResources === 'unknown'
+                  ? 'unknown'
+                  : cleanup.resources
           } as const
           if (state.snapshot().resultCommitted)
             state.succeed(summary.resources === 'released' ? 'released' : 'failed', this.#stamp())
