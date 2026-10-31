@@ -7,7 +7,10 @@ import { fileURLToPath } from 'node:url'
 const directory = path.dirname(fileURLToPath(import.meta.url))
 const root = path.resolve(directory, '../..')
 const scratch = path.join(root, '__temp/operation-types')
-const registry = new Map([['types', 'types.test.ts']])
+const registry = new Map([
+  ['types', 'types.test.ts'],
+  ['pacing-formula', 'pacing-formula.test.ts']
+])
 const compilers = [
   ['5.7.3', 'node_modules/.pnpm/typescript@5.7.3/node_modules/typescript/bin/tsc'],
   ['7.0.2', 'node_modules/typescript/bin/tsc']
