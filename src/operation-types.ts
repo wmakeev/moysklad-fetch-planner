@@ -115,6 +115,19 @@ export interface ConsumeContext extends PrepareContext {
   onDiscard(fn: () => void | Promise<void>): void
   retryableReadFailure(cause: unknown): Error
 }
+/** Readonly control input; runtime hooks will supply frozen, detached snapshots. */
+export interface HookContext {
+  readonly snapshot: Snapshot
+  readonly signal: AbortSignal
+  readonly attemptNumber: number
+  readonly dispatchCalls: number
+  readonly status?: number
+}
+export type Decision =
+  | { readonly type: 'allow' }
+  | { readonly type: 'deny'; readonly code: 'POLICY_DENIED' }
+  | { readonly type: 'defer'; readonly delayMs: number }
+export type Hook = (context: HookContext) => Decision | Promise<Decision>
 export type MethodSpec =
   | { method: 'PUT'; entityKey: string }
   | {
@@ -126,6 +139,8 @@ export type Spec<I, R, T> = MethodSpec & {
   consume: (response: R, ctx: ConsumeContext) => T | Promise<T>
   replay: { serverSafe: boolean; consumeSafe: boolean }
   deadlineMs?: number
+  beforeDispatch?: Hook
+  beforeRetry?: Hook
 }
 export interface Planner<I, R> {
   submit<T>(spec: Spec<I, R, T>): Handle<T>

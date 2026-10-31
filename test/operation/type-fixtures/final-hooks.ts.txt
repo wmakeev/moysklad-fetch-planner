@@ -1,6 +1,9 @@
-import type { FinalSpec, HookContext, Decision } from './contract.js'
-import type { Init } from '../../src/operation-types.js'
-export const spec: FinalSpec<Init<typeof globalThis.fetch>, Response, number> = {
+import { fetch } from 'undici'
+import { FetchPlanner as RootPlanner } from '../../src/index.js'
+import { FetchPlanner as DeepPlanner } from '../../src/planner.js'
+import type { Spec, HookContext, Decision, Init, Handle, Hook } from '../../src/index.js'
+import type { HookContext as DeepContext, Decision as DeepDecision, Hook as DeepHook } from '../../src/operation-types.js'
+export const spec: Spec<Init<typeof globalThis.fetch>, Response, number> = {
   method: 'GET',
   replay: { serverSafe: true, consumeSafe: true },
   prepare: () => ({ url: '', init: { method: undefined, signal: undefined } }),
@@ -23,4 +26,27 @@ export function deny(ctx: HookContext): Decision {
   const attempt: number = ctx.attemptNumber
   void attempt
   return { type: 'deny', code: 'POLICY_DENIED' }
+}
+
+const hook: Hook = deny
+const deepHook: DeepHook = hook
+const deepDecision: DeepDecision = { type: 'defer', delayMs: 1 }
+export function deepDeny(context: DeepContext): DeepDecision {
+  return deny(context)
+}
+void deepDecision
+for (const Planner of [RootPlanner, DeepPlanner]) {
+  const native = new Planner(globalThis.fetch)
+  const nativeResult: Handle<number> = native.submit(spec)
+  const undici = new Planner(fetch)
+  const undiciResult: Handle<number> = undici.submit({
+    method: 'POST',
+    replay: { serverSafe: false, consumeSafe: false },
+    prepare: () => ({ url: '', init: { body: 'payload' } }),
+    consume: async response => (await response.arrayBuffer()).byteLength,
+    beforeDispatch: deepHook,
+    beforeRetry: async context => ({ type: 'defer', delayMs: context.attemptNumber })
+  })
+  void nativeResult
+  void undiciResult
 }

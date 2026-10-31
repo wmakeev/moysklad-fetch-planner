@@ -9,6 +9,7 @@ const root = path.resolve(directory, '../..')
 const scratch = path.join(root, '__temp/operation-types')
 const registry = new Map([
   ['types', 'types.test.ts'],
+  ['hook-types', 'hook-types.test.ts'],
   ['public', 'public.test.ts'],
   ['admission', 'admission.test.ts'],
   ['ownership', 'ownership.test.ts'],

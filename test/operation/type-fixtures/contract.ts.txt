@@ -4,25 +4,12 @@ import type {
   Init,
   ResponseOf,
   Planner,
-  Spec,
-  Snapshot
+  Spec
 } from '../../src/operation-types.js'
 
 export declare const OperationPlanner: new <F extends Transport>(
   transport: F & OneTransport<F>
 ) => Planner<Init<F>, ResponseOf<F>>
 
-// Final C6 shape is preserved here; stage II Spec intentionally has no hooks.
-export type Decision =
-  | { readonly type: 'allow' }
-  | { readonly type: 'deny'; readonly code: 'POLICY_DENIED' }
-  | { readonly type: 'defer'; readonly delayMs: number }
-export interface HookContext {
-  readonly snapshot: Snapshot
-  readonly signal: AbortSignal
-  readonly attemptNumber: number
-  readonly dispatchCalls: number
-  readonly status?: number
-}
-export type Hook = (context: HookContext) => Decision | Promise<Decision>
-export type FinalSpec<I, R, T> = Spec<I, R, T> & { beforeDispatch?: Hook; beforeRetry?: Hook }
+export type { Decision, HookContext, Hook } from '../../src/operation-types.js'
+export type FinalSpec<I, R, T> = Spec<I, R, T>

@@ -23,7 +23,7 @@ undici.submit({ method: 'GET', replay, prepare: () => ({ url: '', init: {} }), c
 new OperationPlanner(() => Promise.resolve(42))
 declare const unknownFamily: typeof globalThis.fetch | typeof fetch
 new OperationPlanner(unknownFamily)
-export const hooks: Spec<Init<typeof globalThis.fetch>, Response, number> = { method: 'GET', replay, prepare: () => ({ url: '', init: {} }), consume: () => 1, beforeDispatch: () => ({ type: 'allow' }) }
+export const hooks: Spec<Init<typeof globalThis.fetch>, Response, number> = { method: 'GET', replay, prepare: () => ({ url: '', init: {} }), consume: () => 1, beforeUnknown: () => ({ type: 'allow' }) }
 export const invalidDecision: Decision = { type: 'override' }
 declare const context: HookContext
 context.attemptNumber = 2
