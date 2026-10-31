@@ -28,8 +28,8 @@ instrumented = replaceOnce(
 )
 instrumented = replaceOnce(
   instrumented,
-  '                started = true;',
-  '                this.t52Specs.delete(entry);\n                started = true;'
+  '                currentAttempt = attempt;',
+  '                this.t52Specs.delete(entry);\n                currentAttempt = attempt;'
 )
 instrumented = instrumented.replaceAll(
   'this.#active.delete(entry);',

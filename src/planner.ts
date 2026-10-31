@@ -285,7 +285,6 @@ export class FetchPlanner<F extends Transport> implements Planner<Init<F>, Respo
 
     const deadline = absoluteDeadline(monotonicNow(), spec.deadlineMs ?? this.#options.deadlineMs)
     if (deadline === undefined) return rejectReserved('INVALID_ARGUMENT')
-    const controller = new AbortController()
     let abortRequested = false
     const state = new OperationState<T>(
       this.nextId,
@@ -299,12 +298,21 @@ export class FetchPlanner<F extends Transport> implements Planner<Init<F>, Respo
       this.observation,
       this.#options.maxSubscribers
     )
-    const resources = new OperationResources(this.#context)
-    let started = false
-    let attemptDeadline: number | undefined
+    // Operation state and its admission deadline outlive this attempt's ownership.
+    // Never reset/reuse a closing resource registry for another preparation.
+    interface Attempt {
+      readonly number: number
+      readonly controller: AbortController
+      readonly resources: OperationResources
+      readonly lease: Lease
+      deadline: number | undefined
+      classifier: ResponseClassifier | undefined
+      classificationWake: number | undefined
+      token: ReturnType<Lease['trySend']>
+      response: ResponseOf<F> | undefined
+    }
+    let currentAttempt: Attempt | undefined
     let cleanupDeadline: number | undefined
-    let classifier: ResponseClassifier | undefined
-    let classificationWake: number | undefined
     const fail = (code: FailureCode, cause?: unknown) => {
       const snapshot = state.snapshot()
       return state.fail(
@@ -328,7 +336,11 @@ export class FetchPlanner<F extends Transport> implements Planner<Init<F>, Respo
       if (snapshot.outcome !== 'pending') return undefined
       return snapshot.resultCommitted
         ? cleanupDeadline
-        : Math.min(deadline, attemptDeadline ?? deadline, classificationWake ?? Infinity)
+        : Math.min(
+            deadline,
+            currentAttempt?.deadline ?? deadline,
+            currentAttempt?.classificationWake ?? Infinity
+          )
     }
     const expire = (now: number) => {
       if (state.snapshot().outcome !== 'pending') return
@@ -337,25 +349,26 @@ export class FetchPlanner<F extends Transport> implements Planner<Init<F>, Respo
           state.succeed('pending', this.#stamp())
         return
       }
+      const attempt = currentAttempt
       const code =
         now >= deadline
           ? 'DEADLINE'
-          : attemptDeadline !== undefined && now >= attemptDeadline
+          : attempt?.deadline !== undefined && now >= attempt.deadline
             ? 'ATTEMPT_TIMEOUT'
             : undefined
       if (code && fail(code)) {
-        controller.abort()
-        classifier?.cancel()
+        attempt?.controller.abort()
+        attempt?.classifier?.cancel()
         entry.releaseReady()
-        if (!started) {
+        if (!currentAttempt) {
           reservation.release()
           this.#active.delete(entry)
           state.settleResources({ resources: 'released' }, this.#stamp())
         }
       }
-      if (classificationWake !== undefined && now >= classificationWake) {
-        classificationWake = undefined
-        classifier?.expire(now)
+      if (attempt?.classificationWake !== undefined && now >= attempt.classificationWake) {
+        attempt.classificationWake = undefined
+        attempt.classifier?.expire(now)
       }
     }
     const materialized: Entry = {
@@ -364,18 +377,17 @@ export class FetchPlanner<F extends Transport> implements Planner<Init<F>, Respo
       nextWake,
       expire,
       cancel: (code, reason) => {
-        if ((code === 'STOPPED' || code === 'GUARD_OPEN') && state.snapshot().dispatchEntered)
-          return
+        if ((code === 'STOPPED' || code === 'GUARD_OPEN') && currentAttempt?.token) return
         if (code !== 'STOPPED' && code !== 'GUARD_OPEN' && state.snapshot().resultCommitted) {
           state.succeed('pending', this.#stamp())
           this.#armTimer()
           return
         }
         if (!fail(code, reason)) return
-        controller.abort(reason)
-        classifier?.cancel()
+        currentAttempt?.controller.abort(reason)
+        currentAttempt?.classifier?.cancel()
         entry.releaseReady()
-        if (!started) {
+        if (!currentAttempt) {
           reservation.release()
           this.#active.delete(entry)
           state.settleResources({ resources: 'released' }, this.#stamp())
@@ -383,27 +395,40 @@ export class FetchPlanner<F extends Transport> implements Planner<Init<F>, Respo
         this.#armTimer()
       },
       start: async lease => {
-        started = true
-        let token: ReturnType<Lease['trySend']>
-        let response: ResponseOf<F> | undefined
+        const attempt: Attempt = {
+          number: state.snapshot().attempts + 1,
+          controller: new AbortController(),
+          resources: new OperationResources(this.#context),
+          lease,
+          deadline: undefined,
+          classifier: undefined,
+          classificationWake: undefined,
+          token: undefined,
+          response: undefined
+        }
+        currentAttempt = attempt
         let code: FailureCode = 'PREPARE_FAILED'
         try {
           expire(monotonicNow())
           if (state.snapshot().outcome !== 'pending') return
-          attemptDeadline = absoluteDeadline(monotonicNow(), this.#options.attemptTimeoutMs)
-          if (attemptDeadline === undefined) {
+          attempt.deadline = absoluteDeadline(monotonicNow(), this.#options.attemptTimeoutMs)
+          if (attempt.deadline === undefined) {
             fail('INVALID_ARGUMENT')
             return
           }
           this.#armTimer()
-          state.transition('phase-changed', { phase: 'preparing', attempts: 1 }, this.#stamp())
-          const descriptor = await resources.runOwner(
+          state.transition(
+            'phase-changed',
+            { phase: 'preparing', attempts: attempt.number },
+            this.#stamp()
+          )
+          const descriptor = await attempt.resources.runOwner(
             'prepare',
             registrations =>
               spec.prepare({
-                signal: controller.signal,
+                signal: attempt.controller.signal,
                 operationId: state.handle.id,
-                attemptNumber: 1,
+                attemptNumber: attempt.number,
                 onDispose: registrations.onDispose
               }),
             raw => this.#descriptor(raw)
@@ -415,7 +440,7 @@ export class FetchPlanner<F extends Transport> implements Planner<Init<F>, Respo
           const url = descriptor.value.url
           const method = spec.method
           const putKey = method === 'PUT' ? spec.entityKey : undefined
-          const init = { ...descriptor.value.init, method, signal: controller.signal }
+          const init = { ...descriptor.value.init, method, signal: attempt.controller.signal }
           code = 'TRANSPORT_FAILED'
           const work = await new Promise<ResponseOf<F> | undefined>(resolve => {
             entry.releaseReady = () => {
@@ -448,8 +473,8 @@ export class FetchPlanner<F extends Transport> implements Planner<Init<F>, Respo
                     return Infinity
                   }
                 }
-                token = lease.trySend()
-                if (!token) return Infinity
+                attempt.token = lease.trySend()
+                if (!attempt.token) return Infinity
                 // Final gate -> accounting -> committed state -> transport is synchronous.
                 // No observer, getter, random source, clock callback or await in this section.
                 if (putKey !== undefined) this.#guard.recordPutDispatch(putKey, guardNow)
@@ -480,10 +505,10 @@ export class FetchPlanner<F extends Transport> implements Planner<Init<F>, Respo
             this.#wake()
           })
           if (!work) return
-          response = work
+          attempt.response = work
           // Read the receipt's HTTP fact once; custom Response accessors can run user code.
           const receipt = { monotonic: monotonicNow(), wall: Date.now() }
-          const status = response.status
+          const status = attempt.response.status
           if (!Number.isInteger(status) || status < 0 || status > 599) throw invalid()
           // Count every materialized HTTP receipt, even after logical termination, before
           // touching headers or delivering observations. Opening is a permanent local stop.
@@ -491,7 +516,7 @@ export class FetchPlanner<F extends Transport> implements Planner<Init<F>, Respo
             this.#pacing.guardOpen = true
             this.#requestStop('GUARD_OPEN')
           }
-          const headers = response.headers
+          const headers = attempt.response.headers
           const policy = parseResponsePolicy(status, headers, receipt)
           if (policy.limit !== null) this.#pacing.limit = policy.limit
           if (policy.remaining !== null) this.#pacing.remaining = policy.remaining
@@ -511,21 +536,21 @@ export class FetchPlanner<F extends Transport> implements Planner<Init<F>, Respo
           if (status === 429) {
             code = 'HTTP_FAILED'
             const classificationStartedAt = monotonicNow()
-            classifier = new ResponseClassifier(
-              { status, headers, body: response.body },
+            attempt.classifier = new ResponseClassifier(
+              { status, headers, body: attempt.response.body },
               classificationStartedAt,
               monotonicNow
             )
-            classificationWake = classifier.deadline
-            if (state.snapshot().outcome !== 'pending') classifier.cancel()
+            attempt.classificationWake = attempt.classifier.deadline
+            if (state.snapshot().outcome !== 'pending') attempt.classifier.cancel()
             this.#armTimer()
-            const classification = await classifier.result
+            const classification = await attempt.classifier.result
             if (
               classification === 'parallel1073' &&
               policy.responseType !== 'PARALLEL_LIMIT_OVERFLOW'
             )
               this.#reduceParallelism(receipt.monotonic)
-            classificationWake = undefined
+            attempt.classificationWake = undefined
             // Timer delivery is not required for an operation/attempt deadline to win.
             expire(monotonicNow())
             fail('HTTP_FAILED')
@@ -533,8 +558,8 @@ export class FetchPlanner<F extends Transport> implements Planner<Init<F>, Respo
           }
           code = 'CONSUME_FAILED'
           state.transition('phase-changed', { phase: 'consuming' }, this.#stamp())
-          const borrowed = response
-          const value = await resources.runOwner(
+          const borrowed = attempt.response
+          const value = await attempt.resources.runOwner(
             'consume',
             // The inner lifetime gives the read-failure capability its exact consume
             // identity; another active owner on this planner must not be able to use it.
@@ -543,9 +568,9 @@ export class FetchPlanner<F extends Transport> implements Planner<Init<F>, Respo
               this.#consumeScope.run(
                 lifetime =>
                   spec.consume(borrowed, {
-                    signal: controller.signal,
+                    signal: attempt.controller.signal,
                     operationId: state.handle.id,
-                    attemptNumber: 1,
+                    attemptNumber: attempt.number,
                     ...registrations,
                     retryableReadFailure: cause => {
                       if (!this.#context.isActive() || !this.#consumeScope.isCurrent(lifetime))
@@ -572,15 +597,15 @@ export class FetchPlanner<F extends Transport> implements Planner<Init<F>, Respo
         } finally {
           if (state.snapshot().outcome === 'pending')
             state.transition('phase-changed', { phase: 'cleanup' }, this.#stamp())
-          classifier?.cancel()
-          classificationWake = undefined
+          attempt.classifier?.cancel()
+          attempt.classificationWake = undefined
           this.#armTimer()
           // Start request disposal (including producer stop) before waiting for reader work.
           // Neither reader settlement nor request disposal alone proves attempt cleanup.
-          const cleanupWork = resources.cleanup(!state.snapshot().resultCommitted)
+          const cleanupWork = attempt.resources.cleanup(!state.snapshot().resultCommitted)
           let responseResources: ResourceSummary['resources'] = 'released'
-          if (classifier) {
-            const reader = await classifier.knownWork
+          if (attempt.classifier) {
+            const reader = await attempt.classifier.knownWork
             responseResources =
               reader.readFailed || reader.cancelFailed
                 ? 'failed'
@@ -590,7 +615,7 @@ export class FetchPlanner<F extends Transport> implements Planner<Init<F>, Respo
           }
           const cleanup = await cleanupWork
           try {
-            const body = classifier ? undefined : response?.body
+            const body = attempt.classifier ? undefined : attempt.response?.body
             if (body) {
               // Await cancellation of an unlocked remainder as known work.
               if (!body.locked) await body.cancel()
@@ -617,8 +642,9 @@ export class FetchPlanner<F extends Transport> implements Planner<Init<F>, Respo
           } as const
           if (state.snapshot().resultCommitted)
             state.succeed(summary.resources === 'released' ? 'released' : 'failed', this.#stamp())
-          token?.release()
-          lease.release()
+          attempt.token?.release()
+          attempt.lease.release()
+          currentAttempt = undefined
           this.#active.delete(entry)
           state.settleResources(summary, this.#stamp())
           this.#armTimer()

@@ -14,8 +14,8 @@ const instrumented = source
     '        Object.assign(entry, materialized);\n        this.t48Specs.set(entry, spec);'
   )
   .replace(
-    '                started = true;',
-    '                this.t48Specs.delete(entry);\n                started = true;'
+    '                currentAttempt = attempt;',
+    '                this.t48Specs.delete(entry);\n                currentAttempt = attempt;'
   )
   .replaceAll(
     'this.#active.delete(entry);',

@@ -1,5 +1,8 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
+import { setImmediate } from 'node:timers/promises'
+import { FetchPlanner, OperationError } from '../../src/index.js'
+import { deferred } from './helpers.js'
 import { CallbackContext } from '../../src/callback-context.js'
 import { ConsumeReadFailure, type FailureCode } from '../../src/operation-types.js'
 import { parseResponsePolicy } from '../../src/response-policy.js'
@@ -381,4 +384,120 @@ test('Transport and deferred decisions do not reset the supplied operation 429 o
     notBefore: 37_000,
     delayMs: 36_000
   })
+})
+
+test('Single attempt terminal 429 preserves HTTP facts without consume or replay', async () => {
+  let prepares = 0
+  let sends = 0
+  let consumes = 0
+  let disposals = 0
+  const planner = new FetchPlanner<typeof globalThis.fetch>(() => {
+    sends++
+    return Promise.resolve(
+      new Response('{}', {
+        status: 429,
+        headers: { 'content-type': 'application/json' }
+      })
+    )
+  })
+  const handle = planner.submit({
+    method: 'POST',
+    replay: { serverSafe: false, consumeSafe: false },
+    prepare: ctx => {
+      prepares++
+      assert.equal(ctx.attemptNumber, 1)
+      ctx.onDispose(() => {
+        disposals++
+      })
+      return { url: '', init: {} }
+    },
+    consume: () => {
+      consumes++
+    }
+  })
+  await assert.rejects(
+    handle.result,
+    error =>
+      error instanceof OperationError &&
+      error.code === 'HTTP_FAILED' &&
+      error.status === 429 &&
+      error.attemptNumber === 1 &&
+      error.serverOutcome === 'http-response'
+  )
+  assert.deepEqual(await handle.resourcesDone, { resources: 'released' })
+  assert.deepEqual([prepares, sends, consumes, disposals], [1, 1, 0, 1])
+  assert.equal(handle.snapshot().dispatchEntered, true)
+  assert.equal(planner.snapshot().leasedAttempts, 0)
+  assert.equal(planner.snapshot().sentActive, 0)
+})
+
+test('Single attempt keeps current send and guarded value through consume and cleanup barriers', async () => {
+  const consuming = deferred<undefined>()
+  const consumeGate = deferred<undefined>()
+  const disposing = deferred<undefined>()
+  const disposeGate = deferred<undefined>()
+  const value = { complete: true }
+  let settled = false
+  let discarded = 0
+  let prepareSignal: AbortSignal | undefined
+  const planner = new FetchPlanner<typeof globalThis.fetch>(
+    () => Promise.resolve(new Response('complete')),
+    { maxParallelLimit: 1 }
+  )
+  const handle = planner.submit({
+    method: 'GET',
+    replay,
+    prepare: ctx => {
+      prepareSignal = ctx.signal
+      ctx.onDispose(async () => {
+        disposing.resolve(undefined)
+        await disposeGate.promise
+      })
+      return { url: '', init: {} }
+    },
+    consume: async (response, ctx) => {
+      assert.equal(ctx.signal, prepareSignal)
+      assert.equal(ctx.attemptNumber, 1)
+      ctx.onDiscard(() => {
+        discarded++
+      })
+      await response.text()
+      consuming.resolve(undefined)
+      await consumeGate.promise
+      return value
+    }
+  })
+  void handle.result.then(() => {
+    settled = true
+  })
+  try {
+    await consuming.promise
+    planner.stop()
+    await setImmediate()
+    assert.equal(settled, false)
+    assert.equal(prepareSignal?.aborted, false)
+    assert.equal(planner.snapshot().leasedAttempts, 1)
+    assert.equal(planner.snapshot().sentActive, 1)
+    consumeGate.resolve(undefined)
+    await disposing.promise
+    assert.equal(handle.snapshot().resultCommitted, true)
+    handle.abort()
+    const completed = await handle.result
+    assert.equal(completed.value, value)
+    assert.equal(completed.cleanup, 'pending')
+    assert.equal(discarded, 0)
+    assert.equal(handle.snapshot().resources, 'pending')
+    assert.equal(planner.snapshot().leasedAttempts, 1)
+    assert.equal(planner.snapshot().sentActive, 1)
+    disposeGate.resolve(undefined)
+    assert.deepEqual(await handle.resourcesDone, { resources: 'released' })
+    assert.equal(handle.snapshot().attempts, 1)
+    assert.equal(handle.snapshot().dispatchCalls, 1)
+    assert.equal(planner.snapshot().leasedAttempts, 0)
+    assert.equal(planner.snapshot().sentActive, 0)
+  } finally {
+    consumeGate.resolve(undefined)
+    disposeGate.resolve(undefined)
+    await Promise.allSettled([handle.result, handle.resourcesDone])
+  }
 })
