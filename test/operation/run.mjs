@@ -28,7 +28,8 @@ const registry = new Map([
   ['integration', 'integration.test.ts'],
   ['classifier', 'classifier.test.ts'],
   ['hints', 'hints.test.ts'],
-  ['guard', 'guard.test.ts']
+  ['guard', 'guard.test.ts'],
+  ['retry', 'retry.test.ts']
 ])
 const compilers = [
   ['5.7.3', 'node_modules/.pnpm/typescript@5.7.3/node_modules/typescript/bin/tsc'],
