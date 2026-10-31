@@ -52,7 +52,10 @@ export class OperationObservation {
   constructor(
     private readonly maxSubscribers = 64,
     readonly diagnostics = new ObservationDiagnostics(),
-    private readonly onIdle?: () => void
+    private readonly onIdle?: () => void,
+    private readonly runDelivery: (delivery: () => void) => void = delivery => {
+      delivery()
+    }
   ) {}
 
   attach<S>(
@@ -129,7 +132,10 @@ export class OperationObservation {
     if (this.busy || this.deferred) return
     this.delivering = true
     try {
-      while (this.pendingDeliveries?.length) this.pendingDeliveries.shift()?.()
+      while (this.pendingDeliveries?.length) {
+        const delivery = this.pendingDeliveries.shift()
+        if (delivery) this.runDelivery(delivery)
+      }
     } finally {
       this.pendingDeliveries = undefined
       this.delivering = false

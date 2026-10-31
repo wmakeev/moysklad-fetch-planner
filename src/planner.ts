@@ -188,9 +188,16 @@ export class FetchPlanner<F extends Transport> implements Planner<Init<F>, Respo
       if (cause instanceof OperationError) throw cause
       throw invalid(cause)
     }
-    this.observation = new OperationObservation(this.#options.maxSubscribers, undefined, () => {
-      this.#drainCommands()
-    })
+    this.observation = new OperationObservation(
+      this.#options.maxSubscribers,
+      undefined,
+      () => {
+        this.#drainCommands()
+      },
+      delivery => {
+        this.#context.detached(delivery)
+      }
+    )
     this.#attenuationSteps = createAttenuationSteps(this.#options.throttlingCoefficient)
     this.#capacity = new OperationCapacity(
       this.#options.maxQueuedOperations,

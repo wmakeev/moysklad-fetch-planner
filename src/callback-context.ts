@@ -21,6 +21,11 @@ export class CallbackContext {
     return lifetime.active && this.storage.getStore() === lifetime
   }
 
+  /** Observer work and its descendants have no owner; the calling owner stays active. */
+  detached(work: () => void): void {
+    this.storage.exit(work)
+  }
+
   async run<T, R>(
     callback: (lifetime: CallbackLifetime) => T | PromiseLike<T>,
     materialize: (value: Awaited<T>) => R
