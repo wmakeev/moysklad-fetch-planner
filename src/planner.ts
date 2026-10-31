@@ -321,6 +321,7 @@ export class FetchPlanner<F extends Transport> implements Planner<Init<F>, Respo
       deadline: number | undefined
       classifier: ResponseClassifier | undefined
       classificationWake: number | undefined
+      hookNotBefore: number | undefined
       hookDeadline: number | undefined
       hookWork: ReturnType<typeof runHook> | undefined
       token: ReturnType<Lease['trySend']>
@@ -429,6 +430,7 @@ export class FetchPlanner<F extends Transport> implements Planner<Init<F>, Respo
           deadline: undefined,
           classifier: undefined,
           classificationWake: undefined,
+          hookNotBefore: undefined,
           hookDeadline: undefined,
           hookWork: undefined,
           token: undefined,
@@ -544,11 +546,7 @@ export class FetchPlanner<F extends Transport> implements Planner<Init<F>, Respo
                 fail('HOOK_DENIED', decision.value.code)
                 return
               }
-              // Defer admission is implemented by T83; never treat it as allow here.
-              if (decision.value.type === 'defer') {
-                fail('HOOK_FAILED')
-                return
-              }
+              if (decision.value.type === 'defer') attempt.hookNotBefore = decision.value.notBefore
             } finally {
               // Absolute expiry also wins on rejection or a synchronously blocking hook.
               expire(monotonicNow())
@@ -581,7 +579,10 @@ export class FetchPlanner<F extends Transport> implements Planner<Init<F>, Respo
                   return Infinity
                 }
                 this.#reviewParallelism(now, random)
-                const notBefore = this.#dispatchNotBefore(now, random)
+                const notBefore = Math.max(
+                  this.#dispatchNotBefore(now, random),
+                  attempt.hookNotBefore ?? 0
+                )
                 if (now < notBefore) return notBefore
                 if (putKey !== undefined) {
                   const decision = this.#guard.checkPut(putKey, guardNow)

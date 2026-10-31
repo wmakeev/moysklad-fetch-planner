@@ -2,12 +2,14 @@ import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
 import test from 'node:test'
 import { FetchPlanner } from '../../src/planner.js'
+import { FetchPlanner as RootPlanner } from '../../src/index.js'
+import { fetch as undiciFetch, Response as UndiciResponse } from 'undici'
 import { OperationError, type Decision, type HookContext } from '../../src/operation-types.js'
 import { createRuntime, deferred, trackTimeouts } from './helpers.js'
 
 const replay = { serverSafe: true, consumeSafe: true }
 
-for (const kind of ['allow', 'deny', 'throw', 'reject', 'invalid', 'defer'] as const) {
+for (const kind of ['allow', 'deny', 'throw', 'reject', 'invalid'] as const) {
   test(`Before dispatch ${kind} controls actual transport without replay`, async t => {
     createRuntime(t)
     let prepares = 0
@@ -37,7 +39,6 @@ for (const kind of ['allow', 'deny', 'throw', 'reject', 'invalid', 'defer'] as c
         if (kind === 'reject') return Promise.reject(cause)
         if (kind === 'invalid') return { type: 'allow', extra: true }
         if (kind === 'deny') return { type: 'deny', code: 'POLICY_DENIED' }
-        if (kind === 'defer') return { type: 'defer', delayMs: 1 }
         return { type: 'allow' }
       },
       consume: response => response.text()
@@ -397,3 +398,342 @@ test('Before dispatch synchronously blocking hook cannot outlive its absolute bu
   assert.equal(signal?.aborted, true)
   assert.equal(calls, 0)
 })
+
+for (const delayMs of [1, 1500]) {
+  test(`Before dispatch defer ${delayMs} waits once on the sole coordinator timer`, async t => {
+    const clock = createRuntime(t)
+    const timers = trackTimeouts(t)
+    const start = performance.now()
+    const sends: number[] = []
+    let hooks = 0
+    let disposals = 0
+    const planner = new FetchPlanner<typeof fetch>(() => {
+      sends.push(performance.now())
+      return Promise.resolve(new Response())
+    })
+    const handle = planner.submit({
+      method: 'POST',
+      replay,
+      prepare: ctx => {
+        ctx.onDispose(() => {
+          disposals++
+        })
+        return { url: '', init: {} }
+      },
+      beforeDispatch: () => {
+        hooks++
+        return { type: 'defer', delayMs }
+      },
+      consume: () => 1
+    })
+    try {
+      await clock.flush()
+      assert.deepEqual(sends, [], 'DEFER_FLOOR_PREVENTS_ACTUAL_TRANSPORT')
+      assert.equal(handle.snapshot().phase, 'ready')
+      assert.equal(planner.snapshot().leasedAttempts, 1)
+      assert.equal(planner.snapshot().sentActive, 0)
+      // Re-deliver stale wakes: they cannot restart the callback or move the floor.
+      for (let i = 0; i < 3; i++) {
+        timers.callbacks.at(-1)?.()
+        await clock.flush()
+      }
+      clock.jumpWall(-9000000)
+      await clock.advance(delayMs - 1)
+      assert.deepEqual(sends, [], 'DEFER_FLOOR_PREVENTS_ACTUAL_TRANSPORT')
+      assert.equal(hooks, 1)
+      await clock.advance(1)
+      assert.equal((await handle.result).value, 1)
+      await handle.resourcesDone
+      assert.deepEqual(sends, [start + delayMs], 'FLOOR_RELEASE_REACHES_ACTUAL_TRANSPORT')
+      assert.equal(handle.snapshot().attempts, 1)
+      assert.equal(hooks, 1)
+      assert.equal(disposals, 1)
+      assert.equal(timers.active.size, 0)
+      assert.ok(timers.maximum() <= 1)
+    } finally {
+      handle.abort()
+      await Promise.allSettled([handle.result, handle.resourcesDone])
+    }
+  })
+}
+
+for (const delayMs of [
+  NaN,
+  Infinity,
+  -1,
+  0,
+  0.5,
+  Number.MAX_SAFE_INTEGER + 1,
+  Number.MAX_SAFE_INTEGER
+]) {
+  test(`Before dispatch invalid defer ${delayMs} fails without transport`, async t => {
+    createRuntime(t)
+    let calls = 0
+    const planner = new FetchPlanner<typeof fetch>(() => {
+      calls++
+      return Promise.resolve(new Response())
+    })
+    const handle = planner.submit({
+      method: 'POST',
+      replay,
+      prepare: () => ({ url: '', init: {} }),
+      beforeDispatch: () => ({ type: 'defer', delayMs }),
+      consume: () => 1
+    })
+    await assert.rejects(handle.result, { code: 'HOOK_FAILED', dispatchEntered: false })
+    await handle.resourcesDone
+    assert.equal(calls, 0)
+    assert.equal(handle.snapshot().attempts, 1)
+  })
+}
+
+for (const budget of ['deadline', 'attempt'] as const) {
+  test(`Before dispatch defer preserves the original ${budget} budget`, async t => {
+    const clock = createRuntime(t)
+    const hook = deferred<Decision>()
+    let calls = 0
+    let hooks = 0
+    const planner = new FetchPlanner<typeof fetch>(
+      () => {
+        calls++
+        return Promise.resolve(new Response())
+      },
+      {
+        deadlineMs: budget === 'deadline' ? 800 : 10000,
+        attemptTimeoutMs: budget === 'attempt' ? 800 : 9000
+      }
+    )
+    const handle = planner.submit({
+      method: 'POST',
+      replay,
+      prepare: () => ({ url: '', init: {} }),
+      beforeDispatch: () => {
+        hooks++
+        return hook.promise
+      },
+      consume: () => 1
+    })
+    try {
+      await clock.flush()
+      await clock.advance(500)
+      hook.resolve({ type: 'defer', delayMs: 1500 })
+      await clock.flush()
+      await clock.advance(299)
+      assert.equal(handle.snapshot().outcome, 'pending')
+      await clock.advance(1)
+      await assert.rejects(handle.result, {
+        code: budget === 'deadline' ? 'DEADLINE' : 'ATTEMPT_TIMEOUT'
+      })
+      await handle.resourcesDone
+      await clock.advance(2000)
+      assert.equal(calls, 0)
+      assert.equal(hooks, 1)
+      assert.equal(handle.snapshot().attempts, 1)
+    } finally {
+      hook.resolve({ type: 'allow' })
+      handle.abort()
+      await Promise.allSettled([handle.result, handle.resourcesDone])
+    }
+  })
+}
+
+for (const phase of ['hook', 'floor'] as const) {
+  for (const safety of [
+    'stop',
+    'abort',
+    'deadline',
+    'pause',
+    'pacing',
+    'effective',
+    'guard'
+  ] as const) {
+    test(`Before dispatch ${phase} rechecks real ${safety} input`, async t => {
+      const clock = createRuntime(t)
+      const timers = trackTimeouts(t)
+      const receipt = deferred<Response>()
+      const hook = deferred<Decision>()
+      const disposal = deferred<undefined>()
+      let sends = 0
+      let hooks = 0
+      const planner = new FetchPlanner<typeof fetch>(
+        () => {
+          sends++
+          return sends === 1 ? receipt.promise : Promise.resolve(new Response())
+        },
+        {
+          maxParallelLimit: 2,
+          errorPerMinuteLimit: safety === 'guard' ? 1 : 100,
+          jitter: 0,
+          throttlingCoefficient: 1,
+          maxRequestDelayTimeMs: 200
+        }
+      )
+      const peer = planner.submit({
+        method: 'GET',
+        replay: { serverSafe: false, consumeSafe: false },
+        prepare: ctx => {
+          if (safety === 'effective') ctx.onDispose(() => disposal.promise)
+          return { url: '', init: {} }
+        },
+        consume: () => 1
+      })
+      const handle = planner.submit({
+        method: 'POST',
+        replay,
+        ...(safety === 'deadline' ? { deadlineMs: 40 } : {}),
+        prepare: () => ({ url: '', init: {} }),
+        beforeDispatch: () => {
+          hooks++
+          return phase === 'hook' ? hook.promise : { type: 'defer', delayMs: 50 }
+        },
+        consume: () => 2
+      })
+      try {
+        await clock.flush()
+        assert.equal(sends, 1)
+        assert.equal(hooks, 1)
+        if (safety === 'stop') planner.stop()
+        if (safety === 'abort') handle.abort()
+        if (safety === 'deadline') await clock.advance(40)
+        if (safety === 'pause')
+          receipt.resolve(new Response(null, { headers: { 'x-lognex-retry-after': '200' } }))
+        if (safety === 'pacing')
+          receipt.resolve(
+            new Response(null, {
+              headers: {
+                'x-ratelimit-limit': '10',
+                'x-ratelimit-remaining': '0',
+                'x-lognex-retry-timeinterval': '1000'
+              }
+            })
+          )
+        if (safety === 'effective')
+          receipt.resolve(
+            new Response('{"errors":[{"code":1073}]}', {
+              status: 429,
+              headers: { 'content-type': 'application/json' }
+            })
+          )
+        if (safety === 'guard') receipt.resolve(new Response(null, { status: 500 }))
+        await clock.flush()
+        if (safety === 'effective') assert.equal(planner.snapshot().effectiveParallelism, 1)
+        hook.resolve({ type: 'defer', delayMs: 50 })
+        await clock.flush()
+        await clock.advance(50)
+        assert.equal(sends, 1, 'CHANGED_SAFETY_PREVENTS_TARGET_TRANSPORT')
+        const terminal =
+          safety === 'stop' || safety === 'abort' || safety === 'deadline' || safety === 'guard'
+        if (terminal) {
+          await assert.rejects(handle.result, {
+            code:
+              safety === 'stop'
+                ? 'STOPPED'
+                : safety === 'abort'
+                  ? 'ABORTED'
+                  : safety === 'deadline'
+                    ? 'DEADLINE'
+                    : 'GUARD_OPEN'
+          })
+          await handle.resourcesDone
+          await clock.advance(500)
+          assert.equal(sends, 1, 'TERMINAL_DEFER_CANNOT_RESURRECT')
+        } else {
+          if (safety === 'effective') {
+            assert.equal(planner.snapshot().sentActive, 1, 'KNOWN_CLEANUP_RETAINS_SENT_TOKEN')
+            disposal.resolve(undefined)
+            await peer.resourcesDone
+            await clock.flush()
+          } else {
+            await clock.advance(149)
+            assert.equal(sends, 1)
+            await clock.advance(1)
+          }
+          assert.equal(sends, 2, 'SAFETY_RELEASE_REACHES_ACTUAL_TRANSPORT')
+          assert.equal((await handle.result).value, 2)
+          await handle.resourcesDone
+        }
+        assert.equal(hooks, 1)
+        assert.equal(handle.snapshot().attempts, 1)
+      } finally {
+        receipt.resolve(new Response())
+        hook.resolve({ type: 'allow' })
+        disposal.resolve(undefined)
+        handle.abort()
+        peer.abort()
+        await Promise.allSettled([
+          handle.result,
+          handle.resourcesDone,
+          peer.result,
+          peer.resourcesDone
+        ])
+        await clock.flush()
+        assert.equal(planner.snapshot().leasedAttempts, 0)
+        assert.equal(planner.snapshot().sentActive, 0)
+        assert.equal(timers.active.size, 0)
+        assert.ok(timers.maximum() <= 1)
+      }
+    })
+  }
+}
+
+for (const [entry, Constructor] of [
+  ['deep', FetchPlanner],
+  ['root', RootPlanner]
+] as const) {
+  for (const family of ['native', 'undici'] as const) {
+    test(`Before dispatch ${entry} ${family} per-attempt floor leaves eligible peers runnable`, async t => {
+      const clock = createRuntime(t)
+      let sends = 0
+      const transport = () => {
+        sends++
+        return Promise.resolve(new Response('native'))
+      }
+      const undiciTransport = () => {
+        sends++
+        return Promise.resolve(new UndiciResponse('undici'))
+      }
+      const planner =
+        family === 'native'
+          ? new Constructor<typeof fetch>(transport, { maxParallelLimit: 2 })
+          : new Constructor<typeof undiciFetch>(undiciTransport, { maxParallelLimit: 2 })
+      let hooks = 0
+      const handle = planner.submit({
+        method: 'POST',
+        replay,
+        prepare: () => ({ url: '', init: {} }),
+        beforeDispatch: () => {
+          hooks++
+          return { type: 'defer', delayMs: 20 }
+        },
+        consume: response => response.text()
+      })
+      const peer = planner.submit({
+        method: 'GET',
+        replay,
+        prepare: () => ({ url: '', init: {} }),
+        consume: response => response.text()
+      })
+      try {
+        assert.equal((await peer.result).value, family)
+        await peer.resourcesDone
+        assert.equal(sends, 1, 'PEER_DOES_NOT_INHERIT_HOOK_FLOOR')
+        await clock.advance(19)
+        assert.equal(sends, 1)
+        await clock.advance(1)
+        assert.equal((await handle.result).value, family)
+        await handle.resourcesDone
+        assert.equal(sends, 2)
+        assert.equal(hooks, 1)
+      } finally {
+        handle.abort()
+        peer.abort()
+        await Promise.allSettled([
+          handle.result,
+          handle.resourcesDone,
+          peer.result,
+          peer.resourcesDone
+        ])
+      }
+    })
+  }
+}
