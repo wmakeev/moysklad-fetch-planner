@@ -9,7 +9,9 @@ const root = path.resolve(directory, '../..')
 const scratch = path.join(root, '__temp/operation-types')
 const registry = new Map([
   ['types', 'types.test.ts'],
-  ['pacing-formula', 'pacing-formula.test.ts']
+  ['pacing-formula', 'pacing-formula.test.ts'],
+  ['context', 'context.test.ts'],
+  ['resources', 'resources.test.ts']
 ])
 const compilers = [
   ['5.7.3', 'node_modules/.pnpm/typescript@5.7.3/node_modules/typescript/bin/tsc'],
