@@ -9,6 +9,8 @@ const root = path.resolve(directory, '../..')
 const scratch = path.join(root, '__temp/operation-types')
 const registry = new Map([
   ['types', 'types.test.ts'],
+  ['public', 'public.test.ts'],
+  ['admission', 'admission.test.ts'],
   ['pacing-formula', 'pacing-formula.test.ts'],
   ['context', 'context.test.ts'],
   ['resources', 'resources.test.ts'],
@@ -154,6 +156,95 @@ function types() {
   for (const [version, compiler] of compilers) compile(version, compiler, 'negative', expected)
 }
 
+function publicTypes() {
+  mkdirSync(scratch, { recursive: true })
+  const compilerOptions = {
+    strict: true,
+    skipLibCheck: false,
+    noEmit: true,
+    target: 'ES2022',
+    module: 'NodeNext',
+    moduleResolution: 'NodeNext',
+    lib: ['ES2023'],
+    types: ['node'],
+    noUncheckedIndexedAccess: true,
+    exactOptionalPropertyTypes: false
+  }
+  const positives = []
+  for (const module of ['index', 'planner']) {
+    for (const family of ['native', 'undici']) {
+      const name = `public-${module}-${family}`
+      const source = readFileSync(
+        path.join(directory, 'type-fixtures', `${family}.ts.txt`),
+        'utf8'
+      ).replace(
+        "import { OperationPlanner } from './contract.js'",
+        `import { FetchPlanner as OperationPlanner } from '../../src/${module}.js'`
+      )
+      writeFileSync(path.join(scratch, `${name}.ts`), source)
+      positives.push(name)
+    }
+  }
+  writeFileSync(
+    path.join(scratch, 'public-removed.ts'),
+    [
+      "import * as root from '../../src/index.js'",
+      'const planner = new root.FetchPlanner(globalThis.fetch)',
+      "const handle = planner.submit({ method: 'GET', replay: { serverSafe: true, consumeSafe: true }, prepare: () => ({ url: '', init: {} }), consume: response => response.text() })",
+      'void handle.result',
+      'root.wrapFetch(globalThis.fetch)',
+      'planner.getFetch()',
+      "import type { Scheduled } from '../../src/fetch-types.js'",
+      'export type Removed = Scheduled<typeof globalThis.fetch>',
+      ''
+    ].join('\n')
+  )
+  /** @param {string} name @param {string} compiler */
+  function compile(name, compiler) {
+    const config = path.join(scratch, `${name}.json`)
+    writeFileSync(
+      config,
+      JSON.stringify({ compilerOptions, files: [`${name}.ts`] }, null, 2) + '\n'
+    )
+    const result = child([compiler, '-p', config, '--pretty', 'false'])
+    writeFileSync(
+      path.join(scratch, `${path.basename(path.dirname(path.dirname(compiler)))}-${name}.log`),
+      result.stdout + result.stderr
+    )
+    return result
+  }
+  // Real root/deep submit positives run on both compilers before removed-API negatives.
+  for (const [version, compiler] of compilers) {
+    for (const name of positives) {
+      const result = compile(name, compiler)
+      assert.equal(result.status, 0, result.stdout + result.stderr)
+      console.log(`PASS TS${version} ${name}`)
+    }
+  }
+  for (const [version, compiler] of compilers) {
+    const result = compile('public-removed', compiler)
+    const raw = result.stdout + result.stderr
+    assert.equal(result.status, version === '7.0.2' ? 1 : 2, raw)
+    const diagnostics = [...raw.matchAll(/\((\d+),(\d+)\): error TS(\d+):/g)].map(match => [
+      Number(match[1]),
+      Number(match[2]),
+      Number(match[3])
+    ])
+    assert.deepEqual(
+      diagnostics,
+      [
+        [5, 6, 2339],
+        [6, 9, 2339],
+        [7, 15, 2305]
+      ],
+      raw
+    )
+    assert.equal((raw.match(/error TS\d+:/g) ?? []).length, 3, raw)
+    console.log(`PASS TS${version} removed public API: 3 exact diagnostics`)
+  }
+}
+
+if (selected.includes('public')) publicTypes()
 if (selected.includes('types')) types()
 const runtime = child([
   '--unhandled-rejections=strict',

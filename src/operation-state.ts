@@ -40,6 +40,7 @@ export class OperationState<T> {
   private readonly result = settlement<Completed<T>>()
   private readonly resources = settlement<ResourceSummary>()
   private readonly listeners = new Set<(event: Event) => void>()
+  private pendingDeliveries: (() => void)[] | undefined
   private committed: CallbackValue<T> | undefined
   private abortRequest: ((reason?: unknown) => void) | undefined
   readonly handle: Handle<T>
@@ -135,6 +136,26 @@ export class OperationState<T> {
     )
   }
 
+  /** Commit facts immediately, but deliver records only after a synchronous critical section.
+   * Capturing subscriptions at commit keeps attachment snapshots free of past events.
+   * The coordinator uses this only around transport entry, never across an await.
+   */
+  deferDelivery<R>(work: () => R): R {
+    if (this.pendingDeliveries) return work()
+    const pending: (() => void)[] = []
+    this.pendingDeliveries = pending
+    try {
+      return work()
+    } finally {
+      try {
+        // Reentrant publications append after records already committed in this section.
+        for (const deliver of pending) deliver()
+      } finally {
+        this.pendingDeliveries = undefined
+      }
+    }
+  }
+
   /** Caller performs deadline/abort checks before handing over the guarded box. */
   commit(value: CallbackValue<T>, status: number, stamp: Stamp): boolean {
     if (this.current.outcome !== 'pending' || this.current.resultCommitted) return false
@@ -198,10 +219,15 @@ export class OperationState<T> {
       epochTime: stamp.epochTime,
       elapsedMs: stamp.elapsedMs
     })
-    try {
-      for (const listener of [...this.listeners]) listener(event)
-    } finally {
-      if (this.finished()) this.listeners.clear()
+    const listeners = [...this.listeners]
+    const deliver = () => {
+      try {
+        for (const listener of listeners) listener(event)
+      } finally {
+        if (this.finished()) this.listeners.clear()
+      }
     }
+    if (this.pendingDeliveries) this.pendingDeliveries.push(deliver)
+    else deliver()
   }
 }

@@ -374,3 +374,60 @@ test('State successful values survive failed cleanup and unknown resources', asy
   assert.deepEqual(await state.handle.resourcesDone, { resources: 'unknown' })
   assert.equal(state.handle.snapshot().outcome, 'succeeded')
 })
+
+test('State defers delivery while committing ordered facts and atomic attachment snapshots', async () => {
+  const state = new OperationState<number>(1)
+  const stamp = stamps()
+  const seen: Event[] = []
+  const attached: Event[] = []
+  state.handle.observe(event => {
+    seen.push(event)
+  })
+  const cause = new Error('synchronous abort')
+  assert.throws(
+    () =>
+      state.deferDelivery(() => {
+        state.transition(
+          'dispatch-started',
+          { phase: 'sending', dispatchEntered: true, dispatchCalls: 1 },
+          stamp()
+        )
+        assert.equal(state.snapshot().phase, 'sending')
+        assert.equal(state.snapshot().dispatchCalls, 1)
+        assert.deepEqual(seen, [])
+        const attachment = state.handle.observe(event => {
+          attached.push(event)
+        })
+        assert.equal(attachment.snapshot.sequence, 1)
+        assert.equal(attachment.snapshot.dispatchEntered, true)
+        state.fail('ABORTED', cause, stamp())
+        assert.equal(state.snapshot().outcome, 'failed')
+        assert.deepEqual(seen, [])
+        assert.deepEqual(attached, [])
+        throw cause
+      }),
+    error => error === cause
+  )
+  assert.deepEqual(
+    seen.map(event => [event.sequence, event.type]),
+    [
+      [1, 'dispatch-started'],
+      [2, 'operation-settled']
+    ]
+  )
+  assert.deepEqual(
+    attached.map(event => event.sequence),
+    [2]
+  )
+  state.settleResources({ resources: 'released' }, stamp())
+  await assert.rejects(state.handle.result, error => error === cause)
+  await state.handle.resourcesDone
+  assert.deepEqual(
+    seen.map(event => event.sequence),
+    [1, 2, 3]
+  )
+  assert.deepEqual(
+    attached.map(event => event.sequence),
+    [2, 3]
+  )
+})

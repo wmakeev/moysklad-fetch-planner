@@ -1,685 +1,406 @@
-/* oxlint-disable no-var */
+import { CallbackContext } from './callback-context.js'
+import { OperationCapacity } from './operation-capacity.js'
+import { OperationResources } from './operation-resources.js'
+import { OperationState } from './operation-state.js'
+import { monotonicNow } from './runtime.js'
+import type {
+  Attachment,
+  Descriptor,
+  Event,
+  FailureCode,
+  FetchPlannerOptions,
+  Handle,
+  Init,
+  OneTransport,
+  Planner,
+  PlannerSnapshot,
+  ResponseOf,
+  Spec,
+  Transport
+} from './operation-types.js'
+import { OperationError } from './operation-types.js'
 
-import assert from 'node:assert'
-import { MAX_TIMEOUT_MS, monotonicNow } from './runtime.js'
-import {
-  calculateRequestDelay,
-  createAttenuationSteps,
-  requestDeadline,
-  roundPositiveOption,
-  safeTime
-} from './pacing.js'
-import { parseResponsePolicy } from './response-policy.js'
-import type { Scheduled, Transport, UndiciFetch } from './fetch-types.js'
-
-//#region debug function
-var debug: ((scope: string, msg: string) => void) | null = null
-const DEBUG = process.env['DEBUG']
-
-const MODULE_NAME = 'moysklad-fetch-planner'
-
-/* c8 ignore start */
-if (typeof DEBUG === 'string' && DEBUG.includes(MODULE_NAME)) {
-  const items = DEBUG.split(',')
-    .map(it => it.trim())
-    .filter(it => it !== '' && it.startsWith(MODULE_NAME))
-
-  if (items[0] === `${MODULE_NAME}:noop`) {
-    // oxlint-disable-next-line no-empty-function
-    debug = () => {}
-  }
-  //
-  else if (items.length > 0) {
-    debug = (scope, msg) => {
-      console.debug(`[${MODULE_NAME}:${scope}] ${msg}`)
-    }
-  }
-}
-/* c8 ignore stop */
-//#endregion
-
-import type { FetchPlannerOptions } from './index.js'
-
-/**
- * Параметры http запроса (Action) для отправки в очередь планировщика
- */
-interface FetchAction<F extends Transport> {
-  state: 'queued' | 'running' | 'terminal'
-  actionId: number
-  url: Parameters<F>[0]
-  options?: Parameters<F>[1]
-  resolve: (val: unknown) => void
-  reject: (err: Error) => void
+const defaults: FetchPlannerOptions = {
+  maxParallelLimit: 4,
+  maxQueuedOperations: 1024,
+  maxSubscribers: 64,
+  deadlineMs: 120000,
+  attemptTimeoutMs: 30000,
+  cleanupGraceMs: 5000,
+  maxAttempts: 3,
+  hookTimeoutMs: 1000,
+  throttlingCoefficient: 5,
+  maxRequestDelayTimeMs: 3000,
+  jitter: 0.1,
+  parallelLimitCorrectionPeriodMs: 10000,
+  maxEntityKeys: 1024,
+  errorPerMinuteLimit: 100,
+  rateLimitPerMinuteLimit: 100,
+  entityPutPerMinuteLimit: 60
 }
 
-/**
- * Параметры триггера который должен вызывать функцию `resolve` в момент когда
- * появляются свободные слоты в очереди запросов `actionsQueue`.
- */
-interface RequestSlotHandler {
-  /** Приоритет триггера (меньше число - выше приоритет) */
-  priority: number
-
-  /** Разрешить promise на стороне ожидающей триггер */
-  resolve: (value: unknown) => void
-
-  /** Выбросить ошибку на стороне ожидающей триггер */
-  reject: (err: Error) => void
+function invalid(cause?: unknown): OperationError {
+  return new OperationError(
+    'INVALID_ARGUMENT',
+    { phase: 'queued', operationId: 0, attemptNumber: 0, dispatchEntered: false },
+    cause
+  )
 }
 
-export class FetchPlanner<F extends Transport = UndiciFetch> {
-  /**
-   * Предварительно рассчитанная функция затухания для расчета времени задержки
-   * в зависимости от текущего лимита.
-   */
-  private readonly attenuationFnSteps: number[]
+function record(input: unknown): Record<string, unknown> {
+  if (!input || typeof input !== 'object') throw invalid()
+  return input as Record<string, unknown>
+}
 
-  /**
-   * Опции планировщика запросов
-   */
-  private readonly options: FetchPlannerOptions<F>
-
-  /**
-   * Интервал бюджета в миллисекундах. `X-RateLimit-Limit` задаёт единицы
-   * бюджета; число запросов зависит от их веса.
-   *
-   * Значение приходит в заголовке `X-Lognex-Retry-TimeInterval`.
-   */
-  protected retryTimeInterval = 3000
-
-  /**
-   * Значение заголовка `X-RateLimit-Limit` из последнего
-   * полученного ответа сервера.
-   *
-   * Например: `45` единиц бюджета на интервал `retryTimeInterval`.
-   * */
-  protected rateLimit: number | null = null
-
-  /**
-   * Значение заголовка `X-RateLimit-Remaining` из последнего
-   * полученного ответа сервера.
-   * */
-  protected rateLimitRemaining: number | null = null
-
-  /**
-   * Текущее кол-во выполняемых запросов
-   */
-  private curInflightRequestsCount = 0
-
-  /**
-   * Текущая коррекция кол-ва допустимых параллельных запросов.
-   *
-   * Подобная коррекция может потребоваться если параллельно
-   * работает другое приложение которое использует часть лимита параллельных
-   * запросов.
-   *
-   * Принимает значение меньше либо равное нулю.
-   */
-  private parallelLimitCorrection = 0
-
-  /**
-   * Время когда было произведено изменение `parallelLimitCorrection`
-   */
-  private parallelLimitCorrectionTime = 0
-
-  /**
-   * Шаг с которым вводится корректировка для `parallelLimitCorrection`
-   */
-  private parallelLimitCorrectionStep = 1
-
-  /**
-   * Очередь запросов
-   */
-  private actionsQueue: FetchAction<F>[] = []
-
-  /**
-   * Время последней ошибки превышения лимита параллельных запросов
-   */
-  private lastParallelLimitOverflowTime: number | null = null
-
-  /**
-   * Триггеры ожидающие свободных запросов
-   */
-  private requestSlotHandlers: RequestSlotHandler[] = []
-
-  /**
-   * Время и таймер на которые внутри планировка запланирована очередная обработка
-   * очереди запросов
-   */
-  private processActionPlanedTimeout: {
-    time: number
-    timeout: NodeJS.Timeout
-  } | null = null
-
-  /**
-   * Порядковый номер последнего запроса отправленного планировщиком к серверу
-   */
-  private lastRequestNum = 0
-
-  /**
-   * Время начала последнего запроса
-   */
-  private lastRequestStartTime = 0
-
-  /**
-   * Порядковый номер последней запроса отправленного пользователем в
-   * планировщик
-   */
-  private lastActionNum = 0
-
-  /**
-   * Последняя рассчитанная задержка для запроса. Поле для статистики.
-   */
-  private lastRequestDelay = 0
-
-  /**
-   * Время на которое запланирован следующий запрос.
-   * Может изменяться в процессе обработки текущий запросов.
-   */
-  private serverNotBefore = 0
-
-  /**
-   * Конструктор планировщика запросов
-   *
-   * @param fetchApi Функция с интерфейсом Fetch API, которую будет использовать
-   * планировщик для выполнения запросов к серверу
-   * @param params Опциональные параметры планировщика
-   */
-  constructor(
-    private fetchApi: F,
-    params?: Partial<FetchPlannerOptions<F>>
-  ) {
-    const optionsDefault: FetchPlannerOptions<F> = {
-      eventHandler: undefined,
-      throttlingCoefficient: 5,
-      maxParallelLimit: 4,
-      maxRequestDelayTimeMs: 3000,
-      jitter: 0.1,
-      parallelLimitCorrectionPeriodMs: 10000,
-      errorLimits: {
-        sameEntityPutRequestsPerMinuteLimit: 100,
-        sameRequestsErrorPerMinuteLimit: 100,
-        tooManyRequestsErrorPerMinuteLimit: 100
-      }
-    }
-
-    if (params?.eventHandler != null) {
-      assert.ok(
-        typeof params.eventHandler === 'object' &&
-          'emit' in params.eventHandler &&
-          typeof params.eventHandler.emit === 'function',
-        'Опция "eventHandler" должна быть объектом с методом "emit"'
-      )
-      optionsDefault.eventHandler = params.eventHandler
-    }
-
-    if (params?.maxParallelLimit !== undefined) {
-      optionsDefault.maxParallelLimit = roundPositiveOption(
-        params.maxParallelLimit,
-        1,
-        'maxParallelLimit'
-      )
-    }
-
-    if (params?.maxRequestDelayTimeMs !== undefined) {
-      optionsDefault.maxRequestDelayTimeMs = roundPositiveOption(
-        params.maxRequestDelayTimeMs,
-        1,
-        'maxRequestDelayTimeMs'
-      )
-    }
-
-    if (params?.jitter !== undefined) {
-      assert.ok(
-        typeof params.jitter === 'number' &&
-          Number.isFinite(params.jitter) &&
-          params.jitter >= 0 &&
-          params.jitter <= 0.3,
-        'Опция "jitter" должна быть целым числом от 0 до 0.3'
-      )
-      optionsDefault.jitter = params.jitter
-    }
-
-    if (params?.parallelLimitCorrectionPeriodMs !== undefined) {
-      optionsDefault.parallelLimitCorrectionPeriodMs = roundPositiveOption(
-        params.parallelLimitCorrectionPeriodMs,
-        1000,
-        'parallelLimitCorrectionPeriodMs'
-      )
-    }
-
-    if (params?.throttlingCoefficient !== undefined) {
-      assert.ok(
-        typeof params.throttlingCoefficient === 'number' &&
-          Number.isFinite(params.throttlingCoefficient) &&
-          params.throttlingCoefficient >= 1 &&
-          params.throttlingCoefficient <= 20,
-        'Опция "throttlingCoefficient" должна быть числом от 1 до 20'
-      )
-      optionsDefault.throttlingCoefficient = params.throttlingCoefficient
-    }
-
-    this.options = optionsDefault
-
-    this.attenuationFnSteps = createAttenuationSteps(optionsDefault.throttlingCoefficient)
-  }
-
-  /**
-   * Создает идентификатор для очередного запроса пользователя (порядковый номер)
-   * @returns Идентификатор запроса
-   */
-  private getNewActionId() {
-    this.lastActionNum++
-    return this.lastActionNum
-  }
-
-  /**
-   * Создает идентификатор для очередного запроса планировщика (порядковый номер)
-   * @returns Идентификатор запроса
-   */
-  private getNewRequestId() {
-    this.lastRequestNum++
-    return this.lastRequestNum
-  }
-
-  /**
-   * Возвращает задержку которую необходимо выдержать перед отправкой
-   * очередного запроса на сервер
-   *
-   * @returns Интервал ожидания ms
-   */
-  private calculateRequestDelayTime() {
-    return calculateRequestDelay(
-      {
-        limit: this.rateLimit,
-        remaining: this.rateLimitRemaining,
-        retryTimeInterval: this.retryTimeInterval,
-        elapsed: monotonicNow() - this.lastRequestStartTime
-      },
-      this.options,
-      this.attenuationFnSteps,
-      Math.random()
+function validateSpec(input: unknown): void {
+  const spec = record(input)
+  const allowed = ['method', 'entityKey', 'prepare', 'consume', 'replay', 'deadlineMs']
+  if (Reflect.ownKeys(spec).some(key => typeof key !== 'string' || !allowed.includes(key)))
+    throw invalid()
+  if (
+    typeof spec['method'] !== 'string' ||
+    !['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS', 'TRACE', 'CONNECT'].includes(
+      spec['method']
     )
+  )
+    throw invalid()
+  if (
+    spec['method'] === 'PUT'
+      ? typeof spec['entityKey'] !== 'string' ||
+        spec['entityKey'].length < 1 ||
+        spec['entityKey'].length > 128
+      : spec['entityKey'] !== undefined
+  )
+    throw invalid()
+  const replay = record(spec['replay'])
+  if (
+    typeof spec['prepare'] !== 'function' ||
+    typeof spec['consume'] !== 'function' ||
+    typeof replay['serverSafe'] !== 'boolean' ||
+    typeof replay['consumeSafe'] !== 'boolean'
+  )
+    throw invalid()
+  if (
+    spec['deadlineMs'] !== undefined &&
+    (typeof spec['deadlineMs'] !== 'number' ||
+      !Number.isSafeInteger(spec['deadlineMs']) ||
+      spec['deadlineMs'] < 1)
+  )
+    throw invalid()
+}
+
+function optionsFrom(input: Partial<FetchPlannerOptions>): FetchPlannerOptions {
+  record(input)
+  const options = { ...defaults }
+  for (const key of Reflect.ownKeys(input)) {
+    if (typeof key !== 'string' || !Object.hasOwn(defaults, key)) throw invalid()
   }
-
-  /**
-   * Единственный вход перепланирования: общий серверный deadline и адаптивный темп.
-   */
-  private pump() {
-    if (this.processActionPlanedTimeout) {
-      clearTimeout(this.processActionPlanedTimeout.timeout)
-      this.processActionPlanedTimeout = null
-    }
-    if (!this.shouldProcessAction()) return
-
-    const now = monotonicNow()
-    const delayMs = Math.max(0, this.serverNotBefore - now, this.calculateRequestDelayTime())
-    const deadline = requestDeadline(now, delayMs)
-    this.scheduleWake(deadline, delayMs)
-  }
-
-  /** One owned wake, including bounded chunks of a longer absolute deadline. */
-  private scheduleWake(deadline: number, delayMs: number) {
-    const timeout = setTimeout(
-      () => {
-        // A canceled callback may already be queued: ownership must be checked first.
-        if (this.processActionPlanedTimeout?.timeout !== timeout) return
-        this.processActionPlanedTimeout = null
-        if (!this.shouldProcessAction()) return
-        const remaining = Math.max(deadline, this.serverNotBefore) - monotonicNow()
-        if (remaining > 0) {
-          this.scheduleWake(Math.max(deadline, this.serverNotBefore), delayMs)
-          return
-        }
-        this.lastRequestDelay = delayMs
-        this.processAction()
-      },
-      Math.min(MAX_TIMEOUT_MS, Math.max(0, deadline - monotonicNow()))
-    )
-    this.processActionPlanedTimeout = { time: deadline, timeout }
-  }
-
-  /**
-   * Вызывает триггеры ожидающие свободные слоты для выполнения запросов
-   */
-  protected checkFreeRequestSlotTrigger() {
-    if (this.requestSlotHandlers[0] == null) return
-
-    /** Общее кол-во выполняемых запросов и запросов ожидающих очереди */
-    const totalIncompleteRequests = this.actionsQueue.length + this.curInflightRequestsCount
-
-    // Есть место для нового запроса?
-    if (totalIncompleteRequests >= this.options.maxParallelLimit + this.parallelLimitCorrection) {
-      return
-    }
-
-    let handlerIndex = 0
-    let handlerPriority = this.requestSlotHandlers[0].priority
-
-    for (const [index, h] of this.requestSlotHandlers.entries()) {
-      if (h.priority < handlerPriority) {
-        handlerIndex = index
-        handlerPriority = h.priority
-      }
-    }
-
-    this.requestSlotHandlers.splice(handlerIndex, 1)[0]?.resolve(undefined)
-
-    if (this.requestSlotHandlers.length > 0) {
-      setImmediate(() => {
-        this.checkFreeRequestSlotTrigger()
-      })
-    }
-  }
-
-  /**
-   * Увеличивает лимит параллельных запросов, если он был ранее занижен по
-   * причине превышения лимита.
-   */
-  private reviewParallelLimitCorrection() {
-    const now = monotonicNow()
-
-    const periodStart = safeTime(
-      now -
-        safeTime(
-          this.options.parallelLimitCorrectionPeriodMs *
-            // Jitter для равномерного распределения времени коррекции между экземплярами
-            (1 + 2 * Math.random() * this.options.jitter)
-        )
-    )
-
-    /** Пора ли провести коррекцию? */
-    const shouldCorrect =
-      this.parallelLimitCorrection < 0 && this.parallelLimitCorrectionTime < periodStart
-
-    if (!shouldCorrect) return
-
-    this.parallelLimitCorrectionTime = now
-
-    // За прошлый период была ошибка. Отмена коррекции.
-    if (
-      this.lastParallelLimitOverflowTime != null &&
-      this.lastParallelLimitOverflowTime > periodStart
+  Object.assign(options, input)
+  for (const [key, value] of Object.entries(options)) {
+    if (typeof value !== 'number' || !Number.isFinite(value)) throw invalid()
+    if (key === 'jitter') {
+      if (value < 0 || value > 0.3) throw invalid()
+    } else if (key === 'throttlingCoefficient') {
+      if (value < 1 || value > 20) throw invalid()
+    } else if (
+      key === 'maxParallelLimit' ||
+      key === 'maxRequestDelayTimeMs' ||
+      key === 'parallelLimitCorrectionPeriodMs'
     ) {
-      return
+      const rounded = Math.round(value)
+      if (
+        !Number.isSafeInteger(rounded) ||
+        rounded < (key === 'parallelLimitCorrectionPeriodMs' ? 1000 : 1)
+      )
+        throw invalid()
+      Object.assign(options, { [key]: rounded })
+    } else if (!Number.isSafeInteger(value) || value < 1) throw invalid()
+  }
+  return Object.freeze(options)
+}
+
+type Lease = NonNullable<ReturnType<OperationCapacity<Entry>['take']>>['lease']
+interface Entry {
+  start(lease: Lease): Promise<void>
+  cancel(code: 'ABORTED' | 'STOPPED', reason?: unknown): void
+}
+
+/** The sole coordinator. Ownership remains with an attempt until actual cleanup settles. */
+export class FetchPlanner<F extends Transport> implements Planner<Init<F>, ResponseOf<F>> {
+  readonly #transport: (
+    url: string | URL,
+    init: Omit<NonNullable<Parameters<F>[1]>, 'method' | 'signal'> & {
+      method: string
+      signal: AbortSignal
     }
+  ) => Promise<ResponseOf<F>>
+  readonly #options: FetchPlannerOptions
+  readonly #context = new CallbackContext()
+  readonly #capacity: OperationCapacity<Entry>
+  readonly #active = new Set<Entry>()
+  readonly #listeners = new Set<(event: Event) => void>()
+  readonly #startedAt = monotonicNow()
+  #sequence = 0
+  #nextId = 1
+  #stopped = false
+  #stopReason: unknown
+  #pumpScheduled = false
 
-    // Увеличить кол-во параллельных запросов на 1
-    this.parallelLimitCorrection++
-  }
-
-  private reduceParallelLimit() {
-    this.parallelLimitCorrection = Math.max(
-      1 - this.options.maxParallelLimit,
-      this.parallelLimitCorrection - this.parallelLimitCorrectionStep
-    )
-  }
-
-  /**
-   * Нужно ли обработать очередной запрос из очереди
-   */
-  private shouldProcessAction() {
-    return (
-      this.curInflightRequestsCount <
-        this.options.maxParallelLimit + this.parallelLimitCorrection &&
-      this.actionsQueue.length > 0 &&
-      this.processActionPlanedTimeout === null
-    )
-  }
-
-  /** The sole terminal transition; a terminal action can never re-enter the queue. */
-  private settleAction(action: FetchAction<F>, result: Awaited<ReturnType<F>> | Error) {
-    if (action.state === 'terminal') return false
-    action.state = 'terminal'
-    if (result instanceof Error) action.reject(result)
-    else action.resolve(result)
-    return true
-  }
-
-  private warnObserverFailure() {
+  constructor(transport: F & OneTransport<F>, options: Partial<FetchPlannerOptions> = {}) {
+    if (typeof transport !== 'function') throw invalid()
     try {
-      process.emitWarning('FetchPlanner observer failed')
-    } catch {
-      // A diagnostic must never replace the original action error.
+      this.#options = optionsFrom(options)
+    } catch (cause) {
+      if (cause instanceof OperationError) throw cause
+      throw invalid(cause)
     }
-  }
-
-  /** Best-effort cleanup of an owned response; a pending cancel never holds a transport slot. */
-  private discardResponse(response: Awaited<ReturnType<F>>) {
-    try {
-      void response.body?.cancel().catch(() => {
-        // Rejected cleanup must not escape into the scheduler.
-      })
-    } catch {
-      // Cleanup is best effort, including synchronous body/cancel failures.
-    }
-  }
-
-  /** Starts one attempt; only its completion releases the transport slot. */
-  private processAction() {
-    this.reviewParallelLimitCorrection()
-    const action = this.actionsQueue.shift()
-    if (action?.state !== 'queued') {
-      throw new Error('Внутренняя ошибка FetchPlanner - очередь пуста или action завершён')
-    }
-    action.state = 'running'
-    this.curInflightRequestsCount++
-    const requestId = this.getNewRequestId()
-    const requestStartTime = Date.now()
-    const requestStartMonotonic = monotonicNow()
-    this.lastRequestStartTime = requestStartMonotonic
-    const metadata = {
-      actionId: action.actionId,
-      url: action.url,
-      method:
-        action.options?.method ??
-        (typeof action.url === 'object' && 'method' in action.url ? action.url.method : undefined),
-      requestId,
-      startTime: requestStartTime
-    }
-
-    const fail = (error: unknown) => {
-      const original = error instanceof Error ? error : new Error('Unknown error', { cause: error })
-      if (!this.settleAction(action, original)) return
-      try {
-        this.options.eventHandler?.emit(
-          'fetch-error',
-          { ...metadata, error: original, errorTime: Date.now() },
-          this
-        )
-      } catch {
-        this.warnObserverFailure()
+    this.#capacity = new OperationCapacity(
+      this.#options.maxQueuedOperations,
+      this.#options.maxParallelLimit
+    )
+    // TS cannot preserve the selected generic family's call signature through its union
+    // constraint. This internal invocation cast keeps init/response paired with the same F;
+    // public consumers retain OneTransport and never receive a union body/response API.
+    this.#transport = transport as unknown as (
+      url: string | URL,
+      init: Omit<NonNullable<Parameters<F>[1]>, 'method' | 'signal'> & {
+        method: string
+        signal: AbortSignal
       }
-    }
+    ) => Promise<ResponseOf<F>>
+  }
 
-    // The queue retains Parameters<F> and delivers the same transport response.
-    // TS cannot correlate a constrained generic callable with its extracted tuple.
-    const fetchApi = this.fetchApi as unknown as (
-      url: Parameters<F>[0],
-      init?: Parameters<F>[1]
-    ) => Promise<Awaited<ReturnType<F>>>
-    debug?.('processAction', `requestStartTime - ${requestStartTime}`)
-    const run = async () => {
-      let response: Awaited<ReturnType<F>> | undefined
-      try {
-        // Call transport before request observers, preserving successful event order.
-        const transport = fetchApi(action.url, action.options)
+  submit<T>(input: Spec<Init<F>, ResponseOf<F>, T>): Handle<T> {
+    const reject = (code: FailureCode, cause?: unknown) =>
+      OperationState.rejected<T>(
+        code,
+        new OperationError(
+          code,
+          { phase: 'queued', operationId: 0, attemptNumber: 0, dispatchEntered: false },
+          cause
+        )
+      )
+    if (this.#context.isActive()) return reject('REENTRANT_OPERATION')
+    if (this.#stopped) return reject('STOPPED', this.#stopReason)
+    let spec: Spec<Init<F>, ResponseOf<F>, T>
+    try {
+      spec = { ...input }
+      validateSpec(spec)
+    } catch (cause) {
+      return reject('INVALID_ARGUMENT', cause)
+    }
+    if (!Number.isSafeInteger(this.#nextId)) return reject('ID_EXHAUSTED')
+
+    const controller = new AbortController()
+    const state = new OperationState<T>(this.#nextId, reason => {
+      entry.cancel('ABORTED', reason)
+    })
+    const resources = new OperationResources(this.#context)
+    let started = false
+    const fail = (code: FailureCode, cause?: unknown) => {
+      const snapshot = state.snapshot()
+      return state.fail(
+        code,
+        new OperationError(
+          code,
+          {
+            phase: snapshot.phase,
+            operationId: snapshot.id,
+            attemptNumber: snapshot.attempts,
+            dispatchEntered: snapshot.dispatchEntered,
+            status: snapshot.status
+          },
+          cause
+        ),
+        this.#stamp()
+      )
+    }
+    const entry: Entry = {
+      cancel: (code, reason) => {
+        if (code === 'STOPPED' && state.snapshot().dispatchEntered) return
+        if (!fail(code, reason)) return
+        controller.abort(reason)
+        if (!started) {
+          reservation?.release()
+          state.settleResources({ resources: 'released' }, this.#stamp())
+          this.#active.delete(entry)
+        }
+      },
+      start: async lease => {
+        started = true
+        let token: ReturnType<Lease['trySend']>
+        let response: ResponseOf<F> | undefined
+        let code: FailureCode = 'PREPARE_FAILED'
         try {
-          this.options.eventHandler?.emit('request', metadata, this)
-        } catch (error) {
-          fail(error)
-        }
-        // Even a terminal action retains its inflight slot until transport settles.
-        response = await transport
-        if (action.state === 'terminal') return
-
-        const requestEndTime = Date.now()
-        const receiptTime = monotonicNow()
-        const policy = parseResponsePolicy(response.status, response.headers)
-        if (policy.retryTimeInterval !== null) this.retryTimeInterval = policy.retryTimeInterval
-        if (policy.limit !== null) this.rateLimit = policy.limit
-        if (policy.remaining !== null) this.rateLimitRemaining = policy.remaining
-
-        if (policy.retryAfterMs !== null) {
-          this.serverNotBefore = Math.max(
-            this.serverNotBefore,
-            requestDeadline(receiptTime, policy.retryAfterMs)
+          if (state.snapshot().outcome !== 'pending') return
+          state.transition('phase-changed', { phase: 'preparing', attempts: 1 }, this.#stamp())
+          const descriptor = await resources.runOwner(
+            'prepare',
+            registrations =>
+              spec.prepare({
+                signal: controller.signal,
+                operationId: state.handle.id,
+                attemptNumber: 1,
+                onDispose: registrations.onDispose
+              }),
+            raw => this.#descriptor(raw)
           )
-        }
-
-        // Observer failure is terminal, so emit before either delivery or retry.
-        this.options.eventHandler?.emit(
-          'response',
-          { ...metadata, endTime: requestEndTime, responseType: policy.responseType },
-          this
-        )
-        if (policy.responseType === 'OK') {
-          this.settleAction(action, response)
-          response = undefined // Ownership passes to the consumer unchanged.
-        } else {
-          if (policy.responseType === 'PARALLEL_LIMIT_OVERFLOW') {
-            this.reduceParallelLimit()
-            this.lastParallelLimitOverflowTime = requestStartMonotonic
-            this.parallelLimitCorrectionTime = receiptTime
+          if (state.snapshot().outcome !== 'pending') return
+          state.transition('phase-changed', { phase: 'ready' }, this.#stamp())
+          if (this.#stopped) {
+            entry.cancel('STOPPED', this.#stopReason)
+            return
           }
-          action.state = 'queued'
-          this.actionsQueue.unshift(action)
+          if (state.snapshot().outcome !== 'pending') return
+          token = lease.trySend()
+          if (!token) throw new Error('DISPATCH_CAPACITY_UNAVAILABLE')
+          code = 'TRANSPORT_FAILED'
+          const work = state.deferDelivery(() => {
+            state.transition(
+              'dispatch-started',
+              { phase: 'sending', dispatchCalls: 1, dispatchEntered: true },
+              this.#stamp()
+            )
+            // No observer/user callback between final admission and transport entry.
+            // Synchronous transport abort reads these same committed dispatch facts.
+            return this.#transport(descriptor.value.url, {
+              ...descriptor.value.init,
+              method: spec.method,
+              signal: controller.signal
+            })
+          })
+          response = await work
+          state.transition(
+            'headers-received',
+            { phase: 'classifying', status: response.status },
+            this.#stamp()
+          )
+          if (state.snapshot().outcome !== 'pending') return
+          if (response.status === 429) {
+            fail('HTTP_FAILED')
+            return
+          }
+          code = 'CONSUME_FAILED'
+          state.transition('phase-changed', { phase: 'consuming' }, this.#stamp())
+          const borrowed = response
+          const value = await resources.runOwner(
+            'consume',
+            registrations =>
+              spec.consume(borrowed, {
+                signal: controller.signal,
+                operationId: state.handle.id,
+                attemptNumber: 1,
+                ...registrations,
+                retryableReadFailure: cause => new Error('RETRYABLE_READ_FAILURE', { cause })
+              }),
+            raw => raw
+          )
+          state.commit(value, response.status, this.#stamp())
+        } catch (cause) {
+          fail(code, cause)
+        } finally {
+          if (state.snapshot().outcome === 'pending')
+            state.transition('phase-changed', { phase: 'cleanup' }, this.#stamp())
+          const cleanup = await resources.cleanup(!state.snapshot().resultCommitted)
+          let responseCleanupFailed = false
+          try {
+            if (response?.body && !response.bodyUsed && !response.body.locked)
+              await response.body.cancel()
+          } catch {
+            responseCleanupFailed = true
+          }
+          const summary = {
+            resources: responseCleanupFailed ? 'failed' : cleanup.resources
+          } as const
+          if (state.snapshot().resultCommitted)
+            state.succeed(summary.resources === 'released' ? 'released' : 'failed', this.#stamp())
+          token?.release()
+          lease.release()
+          state.settleResources(summary, this.#stamp())
+          this.#active.delete(entry)
+          this.#wake()
         }
-      } catch (error) {
-        fail(error)
-      } finally {
-        if (response !== undefined) this.discardResponse(response)
-        // Preserve the existing getter timing for the consumer settlement job.
-        await Promise.resolve()
-        this.curInflightRequestsCount--
-        this.checkFreeRequestSlotTrigger()
-        this.pump()
       }
     }
-
-    // Contain even failures in internal completion/diagnostic hooks.
-    void run().catch(() => {
-      this.warnObserverFailure()
+    const reservation = this.#capacity.reserve(entry)
+    if (!reservation) return reject('QUEUE_FULL')
+    this.#nextId++
+    this.#active.add(entry)
+    state.handle.observe(event => {
+      for (const listener of [...this.#listeners]) {
+        try {
+          listener(event)
+        } catch {
+          /* Full observer isolation follows in T47. */
+        }
+      }
     })
-    this.pump()
+    reservation.enqueue()
+    state.transition('created', {}, this.#stamp())
+    this.#wake()
+    return state.handle
   }
 
-  private fetch(url: Parameters<F>[0], init?: Parameters<F>[1]) {
-    const fetchPromise = new Promise((resolve, reject) => {
-      const actionId = this.getNewActionId()
-
-      this.actionsQueue.push({
-        state: 'queued',
-        actionId,
-        url,
-        options: init,
-        resolve,
-        reject
-      })
+  snapshot(): PlannerSnapshot {
+    return Object.freeze({
+      sequence: this.#sequence,
+      stopped: this.#stopped,
+      guardOpen: false,
+      ...this.#capacity.snapshot(),
+      serverNotBefore: 0
     })
-
-    this.pump()
-
-    return fetchPromise as Promise<Awaited<ReturnType<F>>>
   }
 
-  /**
-   * Возвращает обернутый fetch для выполнения запросов через планировщик.
-   * Исходный fetch передается в параметрах конструктора при создании экземпляра
-   * FetchPlanner.
-   */
-  getFetch(): Scheduled<F> {
-    return this.fetch.bind(this) as Scheduled<F>
-  }
-
-  /**
-   * Ожидание фактического наличия свободного слота для выполнения запроса.
-   *
-   * @param priority Приоритет. Чем меньше число, тем раньше будет выделен слот
-   * (по умолчанию - `0`)
-   */
-  waitForFreeRequestSlot(priority = 0) {
-    const triggerPromise = new Promise((resolve, reject) => {
-      this.requestSlotHandlers.push({
-        priority,
-        resolve,
-        reject
-      })
+  observe(listener: (event: Event) => void): Attachment<PlannerSnapshot> {
+    if (typeof listener !== 'function') throw invalid()
+    const subscription = (event: Event) => {
+      listener(event)
+    }
+    this.#listeners.add(subscription)
+    return Object.freeze({
+      snapshot: this.snapshot(),
+      unsubscribe: () => {
+        this.#listeners.delete(subscription)
+      }
     })
+  }
 
-    setImmediate(() => {
-      this.checkFreeRequestSlotTrigger()
+  stop(reason?: unknown): void {
+    if (this.#stopped) return
+    this.#stopped = true
+    this.#stopReason = reason
+    for (const entry of this.#active) entry.cancel('STOPPED', reason)
+  }
+
+  #stamp() {
+    return {
+      sequence: ++this.#sequence,
+      epochTime: Date.now(),
+      elapsedMs: monotonicNow() - this.#startedAt
+    }
+  }
+
+  #descriptor(raw: Descriptor<Init<F>>): Descriptor<Init<F>> {
+    const descriptor = record(raw)
+    if (!(typeof descriptor['url'] === 'string' || descriptor['url'] instanceof URL))
+      throw invalid()
+    record(descriptor['init'])
+    const init = { ...raw.init }
+    const fields = record(init)
+    if (fields['method'] !== undefined || fields['signal'] !== undefined) throw invalid()
+    return { url: typeof raw.url === 'string' ? raw.url : raw.url.href, init }
+  }
+
+  #wake(): void {
+    if (this.#pumpScheduled) return
+    this.#pumpScheduled = true
+    queueMicrotask(() => {
+      this.#pumpScheduled = false
+      while (!this.#stopped) {
+        const next = this.#capacity.take()
+        if (!next) break
+        void next.value.start(next.lease)
+      }
     })
-
-    return triggerPromise as Promise<void>
-  }
-
-  /**
-   * Возвращает параметры планировщика по умолчанию либо указанные при его создании.
-   * Объект остаётся изменяемым, но mutation не поддерживается как конфигурирование:
-   * предварительно рассчитанная таблица коэффициентов при этом не обновляется.
-   */
-  getOptions() {
-    return this.options
-  }
-
-  /**
-   * Возвращает текущее актуальное значение заголовка `X-RateLimit-Limit`
-   */
-  getRateLimit() {
-    return this.rateLimit
-  }
-
-  /**
-   * Возвращает текущее актуальное значение заголовка `X-RateLimit-Remaining`
-   */
-  getRateLimitRemaining() {
-    return this.rateLimitRemaining
-  }
-
-  /**
-   * Возвращает текущую длину очереди запросов
-   */
-  getActionsQueueLength() {
-    return this.actionsQueue.length
-  }
-
-  /**
-   * Возвращает количество обработчиков ожидающих свободного слота
-   */
-  getRequestSlotHandlersCount() {
-    return this.requestSlotHandlers.length
-  }
-
-  /**
-   * Возвращает текущую коррекцию кол-ва допустимых параллельных запросов
-   */
-  getParallelLimitCorrection() {
-    return this.parallelLimitCorrection
-  }
-
-  /**
-   * Возвращает текущее кол-во незавершенных запросов (ожидающих ответа сервера)
-   */
-  getCurInflightRequestsCount() {
-    return this.curInflightRequestsCount
-  }
-
-  /**
-   * Возвращает задержку последнего запроса (ms)
-   */
-  getLastRequestDelay() {
-    return this.lastRequestDelay
-  }
-
-  /**
-   * Возвращает время (Unix Timestamp ms) на которое запланирован следующий запрос
-   * или `0`, если нет запланированных запросов.
-   */
-  getNextRequestTime() {
-    const deadline = this.processActionPlanedTimeout?.time
-    return deadline === undefined
-      ? 0
-      : requestDeadline(Date.now(), Math.max(0, deadline - monotonicNow()))
   }
 }

@@ -130,3 +130,57 @@ export interface Planner<I, R> {
   observe(listener: (event: Event) => void): Attachment<PlannerSnapshot>
   stop(reason?: unknown): void
 }
+
+export interface FetchPlannerOptions {
+  maxParallelLimit: number
+  maxQueuedOperations: number
+  maxSubscribers: number
+  deadlineMs: number
+  attemptTimeoutMs: number
+  cleanupGraceMs: number
+  maxAttempts: number
+  hookTimeoutMs: number
+  throttlingCoefficient: number
+  maxRequestDelayTimeMs: number
+  jitter: number
+  parallelLimitCorrectionPeriodMs: number
+  maxEntityKeys: number
+  errorPerMinuteLimit: number
+  rateLimitPerMinuteLimit: number
+  entityPutPerMinuteLimit: number
+}
+
+interface FailureFacts {
+  phase: Phase
+  operationId: number
+  attemptNumber: number
+  dispatchEntered: boolean
+  status?: number
+}
+
+export class OperationError extends Error {
+  readonly code: FailureCode
+  readonly phase: Phase
+  readonly operationId: number
+  readonly attemptNumber: number
+  readonly dispatchEntered: boolean
+  readonly status?: number
+  readonly serverOutcome: 'not-dispatched' | 'unknown' | 'http-response'
+
+  constructor(code: FailureCode, facts: FailureFacts, cause?: unknown) {
+    super(code, { cause })
+    this.name = 'OperationError'
+    this.code = code
+    this.phase = facts.phase
+    this.operationId = facts.operationId
+    this.attemptNumber = facts.attemptNumber
+    this.dispatchEntered = facts.dispatchEntered
+    this.status = facts.status
+    this.serverOutcome =
+      facts.status !== undefined
+        ? 'http-response'
+        : facts.dispatchEntered
+          ? 'unknown'
+          : 'not-dispatched'
+  }
+}
