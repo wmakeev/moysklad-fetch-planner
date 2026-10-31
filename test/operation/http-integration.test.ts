@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
+import { spawn } from 'node:child_process'
 import { fetch as undiciFetch, Response as UndiciResponse } from 'undici'
 import { FetchPlanner, OperationError } from '../../src/index.js'
 import { FetchPlanner as DeepPlanner } from '../../src/planner.js'
@@ -568,3 +569,54 @@ for (const [entry, Constructor] of [
     }
   }
 }
+
+// Concurrent finite children keep real retry delays inside the existing runner budget.
+test('native and undici same-operation upload retry owns both cleanup barriers and exits naturally', async () => {
+  await Promise.all(
+    ['native', 'undici'].flatMap(family =>
+      ['producer-first', 'disposer-first', 'reject', 'fail', 'timeout'].map(async mode => {
+        const child = spawn(
+          process.execPath,
+          [
+            '--unhandled-rejections=strict',
+            new URL('./upload-source.js', import.meta.url).pathname,
+            family,
+            `retry-${mode}`
+          ],
+          { timeout: 15000 }
+        )
+        let stdout = ''
+        let stderr = ''
+        child.stdout.setEncoding('utf8').on('data', (chunk: string) => {
+          stdout += chunk
+        })
+        child.stderr.setEncoding('utf8').on('data', (chunk: string) => {
+          stderr += chunk
+        })
+        const result = await new Promise<{ code: number | null; signal: NodeJS.Signals | null }>(
+          (resolve, reject) => {
+            child.once('error', reject)
+            child.once('close', (code, signal) => {
+              resolve({ code, signal })
+            })
+          }
+        )
+        const raw = stdout + stderr
+        assert.equal(result.signal, null, raw)
+        assert.match(stdout, /"event":"retry-ready"/, raw)
+        assert.match(
+          stdout,
+          /"event":"retry-finally-clean".*"producerPending":0,"sockets":0,"serverListening":false,"agentsClosed":2/,
+          raw
+        )
+        assert.equal(result.code, mode === 'fail' || mode === 'timeout' ? 1 : 0, raw)
+        if (mode === 'fail') assert.match(stderr, /INJECTED_RETRY_AFTER_HEADERS/, raw)
+        else if (mode === 'timeout') assert.match(stderr, /WATCHDOG_RETRY_UPLOAD/, raw)
+        else {
+          assert.doesNotMatch(raw, /WATCHDOG|ERR_ASSERTION/)
+          assert.match(stdout, /"event":"retry-complete"/, raw)
+        }
+      })
+    )
+  )
+})
