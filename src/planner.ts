@@ -3,7 +3,7 @@ import { CallbackContext } from './callback-context.js'
 import { OperationCapacity } from './operation-capacity.js'
 import { OperationResources } from './operation-resources.js'
 import { OperationState } from './operation-state.js'
-import { monotonicNow } from './runtime.js'
+import { MAX_TIMEOUT_MS, monotonicNow } from './runtime.js'
 import type {
   Attachment,
   Descriptor,
@@ -125,6 +125,8 @@ type Lease = NonNullable<ReturnType<OperationCapacity<Entry>['take']>>['lease']
 interface Entry {
   start(lease: Lease): Promise<void>
   cancel(code: 'ABORTED' | 'STOPPED', reason?: unknown): void
+  nextWake(): number | undefined
+  expire(now: number): void
 }
 
 /** The sole coordinator. Ownership remains with an attempt until actual cleanup settles. */
@@ -147,6 +149,7 @@ export class FetchPlanner<F extends Transport> implements Planner<Init<F>, Respo
   #stopped = false
   #stopReason: unknown
   #pumpScheduled = false
+  #timer: ReturnType<typeof setTimeout> | undefined
 
   constructor(transport: F & OneTransport<F>, options: Partial<FetchPlannerOptions> = {}) {
     if (typeof transport !== 'function') throw invalid()
@@ -193,12 +196,16 @@ export class FetchPlanner<F extends Transport> implements Planner<Init<F>, Respo
     }
     if (!Number.isSafeInteger(this.#nextId)) return reject('ID_EXHAUSTED')
 
+    const deadline = monotonicNow() + (spec.deadlineMs ?? this.#options.deadlineMs)
+    if (!Number.isSafeInteger(deadline)) return reject('INVALID_ARGUMENT')
     const controller = new AbortController()
     const state = new OperationState<T>(this.#nextId, reason => {
       entry.cancel('ABORTED', reason)
     })
     const resources = new OperationResources(this.#context)
     let started = false
+    let attemptDeadline: number | undefined
+    let cleanupDeadline: number | undefined
     const fail = (code: FailureCode, cause?: unknown) => {
       const snapshot = state.snapshot()
       return state.fail(
@@ -217,9 +224,45 @@ export class FetchPlanner<F extends Transport> implements Planner<Init<F>, Respo
         this.#stamp()
       )
     }
+    const nextWake = () => {
+      const snapshot = state.snapshot()
+      if (snapshot.outcome !== 'pending') return undefined
+      return snapshot.resultCommitted
+        ? cleanupDeadline
+        : Math.min(deadline, attemptDeadline ?? deadline)
+    }
+    const expire = (now: number) => {
+      if (state.snapshot().outcome !== 'pending') return
+      if (state.snapshot().resultCommitted) {
+        if (cleanupDeadline !== undefined && now >= cleanupDeadline)
+          state.succeed('pending', this.#stamp())
+        return
+      }
+      const code =
+        now >= deadline
+          ? 'DEADLINE'
+          : attemptDeadline !== undefined && now >= attemptDeadline
+            ? 'ATTEMPT_TIMEOUT'
+            : undefined
+      if (code && fail(code)) {
+        controller.abort()
+        if (!started) {
+          reservation?.release()
+          state.settleResources({ resources: 'released' }, this.#stamp())
+          this.#active.delete(entry)
+        }
+      }
+    }
     const entry: Entry = {
+      nextWake,
+      expire,
       cancel: (code, reason) => {
         if (code === 'STOPPED' && state.snapshot().dispatchEntered) return
+        if (code === 'ABORTED' && state.snapshot().resultCommitted) {
+          state.succeed('pending', this.#stamp())
+          this.#armTimer()
+          return
+        }
         if (!fail(code, reason)) return
         controller.abort(reason)
         if (!started) {
@@ -227,6 +270,7 @@ export class FetchPlanner<F extends Transport> implements Planner<Init<F>, Respo
           state.settleResources({ resources: 'released' }, this.#stamp())
           this.#active.delete(entry)
         }
+        this.#armTimer()
       },
       start: async lease => {
         started = true
@@ -234,7 +278,10 @@ export class FetchPlanner<F extends Transport> implements Planner<Init<F>, Respo
         let response: ResponseOf<F> | undefined
         let code: FailureCode = 'PREPARE_FAILED'
         try {
+          expire(monotonicNow())
           if (state.snapshot().outcome !== 'pending') return
+          attemptDeadline = monotonicNow() + this.#options.attemptTimeoutMs
+          this.#armTimer()
           state.transition('phase-changed', { phase: 'preparing', attempts: 1 }, this.#stamp())
           const descriptor = await resources.runOwner(
             'prepare',
@@ -253,6 +300,7 @@ export class FetchPlanner<F extends Transport> implements Planner<Init<F>, Respo
             entry.cancel('STOPPED', this.#stopReason)
             return
           }
+          expire(monotonicNow())
           if (state.snapshot().outcome !== 'pending') return
           token = lease.trySend()
           if (!token) throw new Error('DISPATCH_CAPACITY_UNAVAILABLE')
@@ -272,13 +320,11 @@ export class FetchPlanner<F extends Transport> implements Planner<Init<F>, Respo
             })
           })
           response = await work
-          state.transition(
-            'headers-received',
-            { phase: 'classifying', status: response.status },
-            this.#stamp()
-          )
+          // Read the receipt's HTTP fact once; custom Response accessors can run user code.
+          const status = response.status
+          state.transition('headers-received', { phase: 'classifying', status }, this.#stamp())
           if (state.snapshot().outcome !== 'pending') return
-          if (response.status === 429) {
+          if (status === 429) {
             fail('HTTP_FAILED')
             return
           }
@@ -297,7 +343,16 @@ export class FetchPlanner<F extends Transport> implements Planner<Init<F>, Respo
               }),
             raw => raw
           )
-          state.commit(value, response.status, this.#stamp())
+          // Materialize clocks before the final safety decision: even Date.now may run
+          // user code. Only scalar facts and the guarded value box enter commit.
+          const stamp = this.#stamp()
+          const now = monotonicNow()
+          expire(now)
+          if (state.snapshot().outcome === 'pending') {
+            cleanupDeadline = Math.min(deadline, now + this.#options.cleanupGraceMs)
+            state.commit(value, status, stamp)
+            this.#armTimer()
+          }
         } catch (cause) {
           fail(code, cause)
         } finally {
@@ -337,6 +392,7 @@ export class FetchPlanner<F extends Transport> implements Planner<Init<F>, Respo
           lease.release()
           state.settleResources(summary, this.#stamp())
           this.#active.delete(entry)
+          this.#armTimer()
           this.#wake()
         }
       }
@@ -356,6 +412,7 @@ export class FetchPlanner<F extends Transport> implements Planner<Init<F>, Respo
     })
     reservation.enqueue()
     state.transition('created', {}, this.#stamp())
+    this.#armTimer()
     this.#wake()
     return state.handle
   }
@@ -408,6 +465,24 @@ export class FetchPlanner<F extends Transport> implements Planner<Init<F>, Respo
     const fields = record(init)
     if (fields['method'] !== undefined || fields['signal'] !== undefined) throw invalid()
     return { url: typeof raw.url === 'string' ? raw.url : raw.url.href, init }
+  }
+
+  /** One timer belongs to this coordinator, including logical cleanup grace. */
+  #armTimer(): void {
+    clearTimeout(this.#timer)
+    this.#timer = undefined
+    let next = Infinity
+    for (const entry of this.#active) next = Math.min(next, entry.nextWake() ?? Infinity)
+    if (next === Infinity) return
+    this.#timer = setTimeout(
+      () => {
+        this.#timer = undefined
+        const now = monotonicNow()
+        for (const entry of this.#active) entry.expire(now)
+        this.#armTimer()
+      },
+      Math.min(MAX_TIMEOUT_MS, Math.max(0, next - monotonicNow()))
+    )
   }
 
   #wake(): void {
