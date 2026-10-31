@@ -199,35 +199,48 @@ for (const { entry, Planner } of [
 
 for (const entry of ['index', 'planner']) {
   for (const interrupt of ['abort', 'attempt', 'deadline']) {
-    for (const committed of [false, true]) {
-      test(`Integration ${entry} ${interrupt} ${committed ? 'committed' : 'late'} consume burst stop and pending disposer`, () => {
+    const phases =
+      interrupt === 'abort' ? ['before', 'committed'] : ['before', 'committed', 'final-clock']
+    for (const phase of phases) {
+      const committed = phase === 'committed'
+      const finalClock = phase === 'final-clock'
+      test(`Integration ${entry} ${interrupt} ${phase} consume burst stop and pending disposer`, () => {
         const source = `
 import assert from 'node:assert/strict';
 import {setImmediate} from 'node:timers/promises';
 import {FetchPlanner} from ${JSON.stringify(`file://${folder}/${entry}.js`)};
 import {FetchPlanner as Deep} from ${JSON.stringify(`file://${folder}/planner.js`)};
 assert.equal(FetchPlanner,Deep);
-const interrupt=${JSON.stringify(interrupt)}, committed=${committed};
+const interrupt=${JSON.stringify(interrupt)}, committed=${committed},finalClock=${finalClock};
+// Only semantic phase time is controlled. Coordinator timer handles remain real.
+const actualNow=performance.now.bind(performance),nowDescriptor=Object.getOwnPropertyDescriptor(performance,'now');
+const originalSet=globalThis.setTimeout,originalClear=globalThis.clearTimeout;
+let controlledNow=1000000,resumedAt;
+const clockTrace=[];
+const mark=phase=>clockTrace.push({phase,controlledMono:Math.floor(performance.now()),realMono:actualNow(),epoch:Date.now()});
+const resume=()=>{assert.equal(resumedAt,undefined);resumedAt=actualNow();mark('real-time-resumed')};
+try {
+Object.defineProperty(performance,'now',{configurable:true,value:()=>controlledNow+(resumedAt===undefined?0:actualNow()-resumedAt)});
+mark('frozen-before-submit');
 const deferred=()=>{let resolve;const promise=new Promise(r=>{resolve=r});return {promise,resolve}};
 const entered=deferred(),consume=deferred(),disposing=deferred(),cleanup=deferred(),budget=deferred();
-const timers=new Set(); let maximumTimers=0;
-const originalSet=globalThis.setTimeout,originalClear=globalThis.clearTimeout;
-globalThis.setTimeout=(fn,ms,...args)=>{const timer=originalSet(()=>{timers.delete(timer);fn(...args)},ms);timers.add(timer);maximumTimers=Math.max(maximumTimers,timers.size);return timer};
+const timers=new Set(); let maximumTimers=0,timerFires=0;
+globalThis.setTimeout=(fn,ms,...args)=>{const timer=originalSet(()=>{timers.delete(timer);timerFires++;fn(...args)},ms);timers.add(timer);maximumTimers=Math.max(maximumTimers,timers.size);return timer};
 globalThis.clearTimeout=timer=>{timers.delete(timer);originalClear(timer)};
 let sends=0,prepares=0,discards=0,disposed=0,deliveries=0,rejections=0,resourcesSettled=false,burst=false;
 const value={canary:'PRIVATE_VALUE'},reason={canary:'PRIVATE_ABORT'},stopReason={canary:'PRIVATE_STOP'};
 const a=[],b=[],trace=[],measurements=[],handles=[],guarded=[];let burstMeasurement,bStopped;
 const p=new FetchPlanner(()=>{sends++;return Promise.resolve(new Response('ok'))},{maxParallelLimit:1,maxQueuedOperations:2,attemptTimeoutMs:interrupt==='attempt'?80:2000,deadlineMs:interrupt==='deadline'?80:3000,cleanupGraceMs:200});
 const spec=()=>({method:'GET',replay:{serverSafe:false,consumeSafe:false},prepare:()=>{prepares++;return {url:'',init:{}}},consume:r=>r.text()});
-const measure=label=>{measurements.push({label,...p.t52(),...p.snapshot()})};
+const measure=label=>{mark(label);measurements.push({label,...p.t52(),...p.snapshot()})};
 const attachA=p.observe(e=>{a.push(e);trace.push('A:'+e.sequence);measure('A');
  if(e.type==='phase-changed'&&e.phase==='consuming'&&!burst){burst=true;for(let i=0;i<100;i++)handles.push(p.submit(spec()));burstMeasurement={...p.t52(),...p.snapshot(),snapshots:handles.map(h=>h.snapshot())};for(let i=0;i<100;i++)p.stop(stopReason);measure('burst-stop')}
  if(e.type==='operation-settled'&&e.failureCode===(interrupt==='attempt'?'ATTEMPT_TIMEOUT':'DEADLINE'))budget.resolve();
 });
 const attachB=p.observe(e=>{b.push(e);trace.push('B:'+e.sequence);if(e.phase==='consuming')bStopped=p.snapshot().stopped;measure('B')});
 const root=p.submit({...spec(),method:'POST',consume:async(_r,ctx)=>{
- ctx.onDiscard(()=>{discards++});ctx.onDispose(async()=>{disposed++;disposing.resolve();await cleanup.promise;guarded.push(p.submit(spec()))});
- entered.resolve();await consume.promise;guarded.push(p.submit(spec()));return value;
+ ctx.onDiscard(()=>{discards++});ctx.onDispose(async()=>{disposed++;mark('disposer-enter');disposing.resolve();await cleanup.promise;guarded.push(p.submit(spec()))});
+ mark('consume-enter');entered.resolve();await consume.promise;mark('consume-return');guarded.push(p.submit(spec()));return value;
 }});
 root.observe(()=>undefined);
 const delivered=root.result.then(r=>{deliveries++;return r},e=>{rejections++;return e});
@@ -239,14 +252,30 @@ try {
  assert.equal(burstMeasurement.snapshots.filter(s=>s.id===0&&s.failureCode==='QUEUE_FULL').length,98);
  assert.equal(burstMeasurement.snapshots.filter(s=>s.id!==0&&s.sequence===0).length,2);
  assert.equal(sends,1);assert.equal(prepares,1);assert.equal(p.snapshot().stopped,true);
- if(committed){consume.resolve();await disposing.promise;assert.equal(root.snapshot().resultCommitted,true);measure('committed')}
+ assert.equal(root.snapshot().phase,'consuming');assert.equal(root.snapshot().resultCommitted,false);
+ assert.equal(performance.now(),1000000,'FROZEN_BEFORE_CUTOFF');
+ if(committed){
+  mark('consume-release-before-cutoff');consume.resolve();await disposing.promise;
+  assert.equal(root.snapshot().resultCommitted,true,'ACTUAL_COMMIT_BEFORE_CUTOFF');
+  assert.equal(root.snapshot().phase,'cleanup');assert.equal(performance.now(),1000000);
+  measure('committed');resume();
+ } else if(finalClock){
+  // No await/macrotask between exact cutoff and owner return: expire(now) must win.
+  const fires=timerFires;controlledNow+=80;mark('exact-cutoff-before-release');consume.resolve();await disposing.promise;
+  assert.equal(timerFires,fires,'FINAL_CLOCK_WITHOUT_TIMER_DELIVERY');
+  assert.equal(root.snapshot().resultCommitted,false,'FINAL_CLOCK_REFUSES_COMMIT');
+  resume();
+ } else {resume()}
  if(interrupt==='abort'){for(let i=0;i<100;i++)root.abort(reason)}
  else if(committed){await delivered} else await budget.promise;
  const result=await delivered;measure('logical-terminal');
+ if(interrupt!=='abort'&&!finalClock){assert.ok(timerFires>0,'REAL_COORDINATOR_TIMER_FIRED');assert.ok(performance.now()>=1000000+(committed&&interrupt==='attempt'?200:80),'REAL_TIME_REACHED_CUTOFF')}
  if(committed){assert.equal(result.value,value,'VALUE_IDENTITY');assert.equal(result.cleanup,'pending');assert.equal(deliveries,1)}
- else {assert.equal(result.code,interrupt==='abort'?'ABORTED':interrupt==='attempt'?'ATTEMPT_TIMEOUT':'DEADLINE');if(interrupt==='abort')assert.equal(result.cause,reason);assert.equal(rejections,1);assert.equal(disposed,0,'NO_CLEANUP_WHILE_CONSUME_ACTIVE');consume.resolve();await disposing.promise}
+ else {assert.equal(result.code,interrupt==='abort'?'ABORTED':interrupt==='attempt'?'ATTEMPT_TIMEOUT':'DEADLINE');assert.equal(result.phase,'consuming');assert.equal(result.status,200);assert.equal(root.snapshot().resultCommitted,false);if(interrupt==='abort')assert.equal(result.cause,reason);assert.equal(rejections,1);
+  if(!finalClock){assert.equal(disposed,0,'NO_CLEANUP_WHILE_CONSUME_ACTIVE');assert.equal(guarded.length,0);assert.equal(resourcesSettled,false);assert.equal(p.snapshot().leasedAttempts,1);assert.equal(p.snapshot().sentActive,1);mark('consume-release-after-settlement');consume.resolve();await disposing.promise}
+ }
  await setImmediate();measure('pending-disposer');
- assert.equal(resourcesSettled,false);assert.equal(p.snapshot().leasedAttempts,1);assert.equal(p.snapshot().sentActive,1);assert.equal(disposed,1);assert.equal(prepares,1);
+ assert.equal(resourcesSettled,false);assert.equal(p.snapshot().leasedAttempts,1);assert.equal(p.snapshot().sentActive,1);assert.equal(disposed,1);assert.equal(prepares,1);assert.equal(sends,1);assert.equal(root.snapshot().resources,'pending');
  assert.equal(guarded.length,1);assert.equal(guarded[0].snapshot().failureCode,'REENTRANT_OPERATION','LATE_CONSUME_GUARD');
  for(const h of handles.filter(h=>h.id!==0)){const error=await h.result.catch(e=>e);assert.equal(error.code,'STOPPED');assert.equal(error.cause,stopReason)}
  cleanup.resolve();assert.deepEqual(await root.resourcesDone,{resources:'released'});await setImmediate();measure('released');
@@ -263,11 +292,15 @@ try {
  assert.equal(final.timer,false);assert.equal(final.pump,false);assert.equal(timers.size,0);assert.equal(maximumTimers,1);
  assert.deepEqual([p.snapshot().queued,p.snapshot().leasedAttempts,p.snapshot().sentActive],[0,0,0]);
  assert.deepEqual([final.diagnostics.OBSERVER_FAILED,final.diagnostics.INVALID_HINT,final.diagnostics.LATE_COMPLETION],[0,0,0]);
- console.log(JSON.stringify({entry:${JSON.stringify(entry)},interrupt,committed,sends,deliveries,discards,disposed,events:a.length,measurements,final,timers:timers.size}));
+ console.log(JSON.stringify({entry:${JSON.stringify(entry)},interrupt,committed,finalClock,clockTrace,timerFires,maximumTimers,sends,deliveries,discards,disposed,events:a.length,measurements,final,timers:timers.size}));
 } finally {
  consume.resolve();cleanup.resolve();p.stop();root.abort();attachA.unsubscribe();attachB.unsubscribe();
  await Promise.allSettled([root.result,root.resourcesDone,...handles.concat(guarded).flatMap(h=>[h.result,h.resourcesDone])]);
+}
+} finally {
  globalThis.setTimeout=originalSet;globalThis.clearTimeout=originalClear;
+ if(nowDescriptor)Object.defineProperty(performance,'now',nowDescriptor);else delete performance.now;
+ assert.deepEqual(Object.getOwnPropertyDescriptor(performance,'now'),nowDescriptor,'CLOCK_DESCRIPTOR_RESTORED');
 }
 `
         const child = spawnSync(
