@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { spawn } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
+import { readFileSync, writeFileSync, unlinkSync } from 'node:fs'
 import { fetch as undiciFetch, Response as UndiciResponse } from 'undici'
 import { FetchPlanner, OperationError } from '../../src/index.js'
 import { FetchPlanner as DeepPlanner } from '../../src/planner.js'
@@ -1242,3 +1243,380 @@ for (const seedCount of [58, 59]) {
     assert.equal(planner.snapshot().sentActive, 0)
   })
 }
+
+// Several owners share one coordinator: terminal stop and successful replay belong
+// to different operations, so no single operation is asked to do both.
+for (const [entry, Constructor] of [
+  ['root', FetchPlanner],
+  ['deep', DeepPlanner]
+] as const) {
+  test(`T73 actual ${entry} classifier timeout late receipt retry reservation and value conservation`, async t => {
+    const clock = createRuntime(t)
+    const timers = trackTimeouts(t)
+    const retryCleanup = deferred<undefined>()
+    const committedCleanup = deferred<undefined>()
+    const cancel = deferred<undefined>()
+    const lateReceipt = deferred<Response>()
+    const lateConsume = deferred<undefined>()
+    const queuedPrepare = deferred<undefined>()
+    const handles: Handle<unknown>[] = []
+    const events: Event[] = []
+    const fanout: Event[] = []
+    const bounds: { queued: number; leasedAttempts: number; sentActive: number; active: number }[] =
+      []
+    const burst: Handle<string>[] = []
+    const reason = { private: canary }
+    const value = { private: canary }
+    const attempts: number[] = []
+    const signals: AbortSignal[] = []
+    const inits: unknown[] = []
+    let sends = 0
+    let disposed = 0
+    let discarded = 0
+    let delivered = 0
+    let cancelCalls = 0
+    let forbiddenConsumes = 0
+    let burstOnce = false
+    const planner = new Constructor<typeof fetch>(
+      (url, init) => {
+        sends++
+        if (url === 'late') return lateReceipt.promise
+        if (url === 'classifier')
+          return Promise.resolve(
+            new Response(
+              new ReadableStream<Uint8Array>({
+                cancel() {
+                  cancelCalls++
+                  return cancel.promise
+                }
+              }),
+              { status: 429, headers: { 'content-type': 'application/json' } }
+            )
+          )
+        if (url === 'retry') {
+          inits.push(init)
+          return Promise.resolve(new Response(canary, { status: inits.length === 1 ? 429 : 200 }))
+        }
+        return Promise.resolve(new Response(canary))
+      },
+      { maxParallelLimit: 5, maxQueuedOperations: 2, errorPerMinuteLimit: 3, jitter: 0 }
+    )
+    const measure = () => {
+      const snapshot = planner.snapshot()
+      const active = handles.filter(
+        handle => handle.id !== 0 && handle.snapshot().resources === 'pending'
+      ).length
+      bounds.push({ ...snapshot, active })
+    }
+    const first = planner.observe(event => {
+      events.push(event)
+      if (event.type === 'retry-scheduled' && !burstOnce) {
+        burstOnce = true
+        for (let i = 0; i < 5; i++) {
+          const handle = planner.submit({
+            method: 'GET',
+            replay,
+            prepare: async () => {
+              await queuedPrepare.promise
+              return { url: canary, init: {} }
+            },
+            consume: response => response.text()
+          })
+          burst.push(handle)
+          handles.push(handle)
+        }
+        measure()
+      }
+    })
+    const second = planner.observe(event => {
+      fanout.push(event)
+    })
+    const retry = planner.submit({
+      method: 'POST',
+      replay,
+      prepare: ctx => {
+        attempts.push(ctx.attemptNumber)
+        signals.push(ctx.signal)
+        ctx.onDispose(async () => {
+          disposed++
+          await (ctx.attemptNumber === 1 ? retryCleanup.promise : committedCleanup.promise)
+        })
+        return { url: 'retry', init: { body: canary } }
+      },
+      consume: async (response, ctx) => {
+        ctx.onDiscard(() => {
+          discarded++
+        })
+        assert.equal(await response.text(), canary)
+        return value
+      }
+    })
+    handles.push(retry)
+    const retryDelivery = retry.result.then(result => {
+      delivered++
+      return result
+    })
+    await clock.flush()
+    const classifier = planner.submit({
+      method: 'GET',
+      replay: { serverSafe: false, consumeSafe: false },
+      prepare: () => ({ url: 'classifier', init: {} }),
+      consume: () => {
+        forbiddenConsumes++
+        return canary
+      }
+    })
+    handles.push(classifier)
+    await clock.flush()
+    const late = planner.submit({
+      method: 'POST',
+      replay,
+      prepare: () => ({ url: 'late', init: { body: canary } }),
+      consume: () => {
+        forbiddenConsumes++
+        return canary
+      }
+    })
+    handles.push(late)
+    await clock.flush()
+    const committed = planner.submit({
+      method: 'POST',
+      replay,
+      prepare: ctx => {
+        ctx.onDispose(async () => {
+          disposed++
+          await committedCleanup.promise
+        })
+        return { url: 'committed', init: { body: canary } }
+      },
+      consume: (_response, ctx) => {
+        ctx.onDiscard(() => {
+          discarded++
+        })
+        return value
+      }
+    })
+    handles.push(committed)
+    const committedDelivery = committed.result.then(result => {
+      delivered++
+      return result
+    })
+    await clock.flush()
+    const uncommitted = planner.submit({
+      method: 'POST',
+      replay,
+      prepare: () => ({ url: 'uncommitted', init: { body: canary } }),
+      consume: async (_response, ctx) => {
+        ctx.onDiscard(() => {
+          discarded++
+        })
+        await lateConsume.promise
+        return value
+      }
+    })
+    handles.push(uncommitted)
+    for (const handle of handles) handle.observe(() => undefined)
+    try {
+      await clock.flush()
+      measure()
+      assert.equal(sends, 5)
+      assert.equal(planner.snapshot().leasedAttempts, 5, 'PENDING_REQUEST_CLEANUP_RETAINS_LEASE')
+      assert.equal(committed.snapshot().resultCommitted, true)
+      await clock.advance(249)
+      assert.equal(cancelCalls, 0, 'CLASSIFIER_249_STILL_READING')
+      await clock.advance(1)
+      assert.equal(cancelCalls, 1, 'CLASSIFIER_250_CANCELS_ONCE')
+      await assert.rejects(classifier.result, { code: 'HTTP_FAILED', status: 429 })
+      assert.equal(classifier.snapshot().resources, 'pending')
+      assert.equal(planner.snapshot().sentActive, 5, 'LOGICAL_CLASSIFIER_TIMEOUT_IS_NOT_RELEASE')
+      assert.deepEqual(attempts, [1], 'NO_RETRY_BEFORE_REQUEST_CLEANUP')
+      retryCleanup.resolve(undefined)
+      await clock.flush()
+      assert.equal(retry.snapshot().phase, 'retry-wait')
+      assert.equal(planner.snapshot().queued, 1, 'RETRY_SLEEP_OWNS_RESERVATION')
+      assert.equal(planner.snapshot().leasedAttempts, 5, 'SIBLING_PREPARE_USES_RELEASED_LEASE')
+      assert.equal(burst.filter(handle => handle.id !== 0).length, 1)
+      assert.equal(burst.filter(handle => handle.snapshot().failureCode === 'QUEUE_FULL').length, 4)
+      assert.equal(bounds.at(-1)?.queued, 2, 'RETRY_PLUS_PENDING_COMMAND_EQUALS_Q')
+      await clock.advance(2999)
+      assert.deepEqual(attempts, [1], 'NO_FRESH_PREPARE_BEFORE_RETRY_ELIGIBILITY')
+      cancel.resolve(undefined)
+      await classifier.resourcesDone
+      await clock.advance(1)
+      assert.deepEqual(attempts, [1, 2])
+      assert.notEqual(signals[0], signals[1], 'FRESH_ATTEMPT_SIGNAL')
+      assert.notEqual(inits[0], inits[1], 'FRESH_TRANSPORT_INIT')
+      assert.equal(retry.snapshot().resultCommitted, true)
+      assert.equal(sends, 6)
+      late.abort(reason)
+      uncommitted.abort(reason)
+      for (const handle of [late, uncommitted])
+        await assert.rejects(
+          handle.result,
+          error =>
+            error instanceof OperationError && error.code === 'ABORTED' && error.cause === reason
+        )
+      planner.stop(reason)
+      queuedPrepare.resolve(undefined)
+      retry.abort(reason)
+      committed.abort(reason)
+      for (const completed of await Promise.all([retryDelivery, committedDelivery])) {
+        assert.equal(completed.value, value, 'COMMITTED_VALUE_IDENTITY_AFTER_STOP_ABORT')
+        assert.equal(completed.status, 200)
+        assert.equal(completed.cleanup, 'pending')
+      }
+      assert.equal(discarded, 0, 'ACTIVE_CONSUME_MUST_RETURN_BEFORE_DISCARD')
+      lateReceipt.resolve(new Response(canary, { status: 412, headers: { 'retry-after': canary } }))
+      await clock.flush()
+      assert.equal(
+        planner.snapshot().guardOpen,
+        true,
+        'LATE_THIRD_ERROR_COUNTS_AFTER_ABORT_AND_STOP'
+      )
+      assert.equal(late.snapshot().status, 412)
+      await assert.rejects(
+        late.result,
+        error =>
+          error instanceof OperationError && error.cause === reason && error.status === undefined
+      )
+      assert.equal(forbiddenConsumes, 0)
+      assert.equal(sends, 6, 'STOP_FORBIDS_PREPARED_AND_RETRY_SENDS')
+      assert.equal(
+        planner.snapshot().leasedAttempts,
+        3,
+        'COMMITTED_AND_ACTIVE_CONSUME_RETAIN_LEASES'
+      )
+      lateConsume.resolve(undefined)
+      await uncommitted.resourcesDone
+      assert.deepEqual([delivered, discarded], [2, 1], 'TWO_DELIVERIES_ONE_DISCARD_NO_LOST_VALUE')
+      assert.equal(planner.snapshot().sentActive, 2, 'COMMITTED_CLEANUP_STILL_OWNS_SENT_TOKENS')
+      committedCleanup.resolve(undefined)
+      await Promise.allSettled(handles.flatMap(handle => [handle.result, handle.resourcesDone]))
+      await clock.flush()
+      measure()
+      assert.equal(disposed, 3, 'EACH_ATTEMPT_DISPOSED_ONCE')
+      assert.deepEqual(events, fanout, 'FULL_FANOUT_BEFORE_COMMAND_DRAIN')
+      for (const handle of handles.filter(handle => handle.id !== 0)) {
+        assert.equal(
+          events.filter(event => event.id === handle.id && event.type === 'operation-settled')
+            .length,
+          1
+        )
+        assert.equal(
+          events.filter(event => event.id === handle.id && event.type === 'resources-settled')
+            .length,
+          1
+        )
+      }
+      for (const point of bounds) {
+        assert.ok(
+          point.queued <= 2 && point.sentActive <= point.leasedAttempts && point.leasedAttempts <= 5
+        )
+        assert.ok(point.active <= point.queued + point.leasedAttempts, 'N_LE_Q_PLUS_L')
+      }
+      assert.equal(JSON.stringify(events).includes(canary), false)
+      assert.deepEqual(
+        [
+          planner.snapshot().queued,
+          planner.snapshot().leasedAttempts,
+          planner.snapshot().sentActive,
+          timers.active.size
+        ],
+        [0, 0, 0, 0]
+      )
+      assert.equal(timers.maximum(), 1)
+      const observation: unknown = Reflect.get(planner, 'observation')
+      assert.ok(observation instanceof OperationObservation)
+      assert.equal(observation.diagnostics.snapshot().OBSERVER_FAILED, 0)
+      assert.equal(observation.diagnostics.snapshot().INVALID_HINT, 1)
+    } finally {
+      retryCleanup.resolve(undefined)
+      committedCleanup.resolve(undefined)
+      cancel.resolve(undefined)
+      lateReceipt.resolve(new Response())
+      lateConsume.resolve(undefined)
+      queuedPrepare.resolve(undefined)
+      planner.stop()
+      for (const handle of handles) handle.abort()
+      await Promise.allSettled([
+        retryDelivery,
+        committedDelivery,
+        ...handles.flatMap(handle => [handle.result, handle.resourcesDone])
+      ])
+      first.unsubscribe()
+      second.unsubscribe()
+    }
+  })
+}
+
+// An observation-only emitted sibling exposes private inventory, as in T52/T69.
+// Actual public root/deep behavior is exercised above without this instrumentation.
+test('T73 finite retry collector retires specs commands callbacks subscribers and real timer', () => {
+  let source = readFileSync(new URL('../../src/planner.js', import.meta.url), 'utf8')
+  const fixture = new URL('../../src/planner-t73-collector.js', import.meta.url)
+  function replace(before: string, after: string) {
+    assert.equal(source.split(before).length, 2, `EXACT_T73_COLLECTOR_ANCHOR ${before}`)
+    source = source.replace(before, after)
+  }
+  replace(
+    '    commands = [];',
+    '    t73States = [];\n    t73Specs = new Set();\n    commands = [];'
+  )
+  replace(
+    '        Object.assign(entry, materialized);',
+    '        Object.assign(entry, materialized); this.t73States.push(state); this.t73Specs.add(entry);'
+  )
+  replace(
+    '                currentAttempt = attempt;',
+    '                currentAttempt = attempt; this.t73Specs.delete(entry);'
+  )
+  source = source.replaceAll(
+    'this.#active.delete(entry);',
+    'this.t73Specs.delete(entry); this.#active.delete(entry);'
+  )
+  replace(
+    '    snapshot() {',
+    `    t73() { return {active:this.#active.size,specs:this.t73Specs.size,commands:this.commands.length,ready:this.#ready.size,timer:this.#timer!==undefined,pump:this.#pumpScheduled,subscribers:this.observation.listeners.size,operationSubscribers:this.t73States.reduce((n,s)=>n+s.observation.listeners.size,0),deliveries:this.observation.pendingDeliveries?.length??0,...this.#capacity.snapshot(),diagnostics:this.observation.diagnostics.snapshot()}; }\n    snapshot() {`
+  )
+  try {
+    writeFileSync(fixture, source)
+    const script = `
+import assert from 'node:assert/strict';
+import {setImmediate} from 'node:timers/promises';
+import {FetchPlanner} from ${JSON.stringify(fixture.href)};
+const timers=new Set(),set=globalThis.setTimeout,clear=globalThis.clearTimeout;
+globalThis.setTimeout=(fn,ms,...args)=>{const timer=set(()=>{timers.delete(timer);fn(...args)},ms);timers.add(timer);return timer};
+globalThis.clearTimeout=timer=>{timers.delete(timer);clear(timer)};
+const handles=[],samples=[],events=[],second=[];let once=false,copies=0,prepares=0,disposed=0;
+const p=new FetchPlanner(()=>Promise.resolve(new Response(null,{status:429})),{maxParallelLimit:1,maxQueuedOperations:2});
+const spec=()=>({get method(){copies++;return 'POST'},replay:{serverSafe:true,consumeSafe:true},prepare:ctx=>{prepares++;ctx.onDispose(()=>{disposed++});return {url:'PRIVATE_T73',init:{}}},consume:()=>{throw Error('INTERCEPTED_429_MUST_NOT_CONSUME')}});
+const a=p.observe(e=>{events.push(e);if(e.type==='retry-scheduled'&&!once){once=true;samples.push(p.t73());
+ for(let i=0;i<50;i++){const h=p.submit(spec());handles.push(h);h.observe(()=>undefined)}
+ samples.push(p.t73());for(let i=0;i<50;i++){p.stop('PRIVATE_T73');root.abort('PRIVATE_T73')}samples.push(p.t73())}});
+const b=p.observe(e=>second.push(e));
+const root=p.submit(spec());root.observe(()=>undefined);
+try{
+ await setImmediate();await Promise.allSettled([root,...handles].flatMap(h=>[h.result,h.resourcesDone]));await setImmediate();
+ assert.equal(once,true);assert.equal(copies,2,'REJECTED_SPECS_NEVER_MATERIALIZED');assert.equal(prepares,1);assert.equal(disposed,1);
+ assert.deepEqual(samples.map(s=>[s.active,s.specs,s.queued,s.leasedAttempts,s.sentActive,s.commands]),[[1,0,1,0,0,0],[2,1,2,0,0,1],[2,1,2,0,0,3]],'RETRY_N_Q_L_AND_COALESCED_COMMANDS');
+ assert.deepEqual(events,second);assert.equal(JSON.stringify(events).includes('PRIVATE_T73'),false);
+ for(const h of [root,...handles].filter(h=>h.id!==0))for(const type of ['operation-settled','resources-settled'])assert.equal(events.filter(e=>e.id===h.id&&e.type===type).length,1);
+ a.unsubscribe();b.unsubscribe();await setImmediate();const final=p.t73();
+ assert.deepEqual([final.active,final.specs,final.commands,final.ready,final.queued,final.leasedAttempts,final.sentActive,final.subscribers,final.operationSubscribers,final.deliveries],[0,0,0,0,0,0,0,0,0,0],'ALL_RETRY_REGISTRIES_RETIRED');
+ assert.equal(final.timer,false);assert.equal(final.pump,false);assert.equal(timers.size,0,'REAL_TIMER_HANDLES_RETIRED');assert.equal(final.diagnostics.OBSERVER_FAILED,0);
+ console.log(JSON.stringify({samples,final,prepares,disposed,copies,timers:timers.size}));
+}finally{p.stop();root.abort();for(const h of handles)h.abort();a.unsubscribe();b.unsubscribe();await Promise.allSettled([root,...handles].flatMap(h=>[h.result,h.resourcesDone]));globalThis.setTimeout=set;globalThis.clearTimeout=clear}
+`
+    const child = spawnSync(
+      process.execPath,
+      ['--unhandled-rejections=strict', '--input-type=module', '-e', script],
+      { encoding: 'utf8', timeout: 5000 }
+    )
+    assert.ifError(child.error)
+    assert.equal(child.signal, null, child.stdout + child.stderr)
+    assert.equal(child.status, 0, child.stdout + child.stderr)
+    console.log('T73_RETIREMENT', child.stdout.trim())
+  } finally {
+    unlinkSync(fixture)
+  }
+})
