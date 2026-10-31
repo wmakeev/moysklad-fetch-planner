@@ -831,6 +831,8 @@ export class FetchPlanner<F extends Transport> implements Planner<Init<F>, Respo
               state.snapshot().outcome === 'pending' &&
               !this.#stopRequested
             ) {
+              const policyNotBefore = decision.notBefore
+              let hookNotBefore = 0
               // HTTP and its registry are physically closed. The hook has its own
               // cancellation signal and owning barrier, never a reopened registry.
               attempt.hookController = new AbortController()
@@ -867,8 +869,7 @@ export class FetchPlanner<F extends Transport> implements Planner<Init<F>, Respo
                     expire(monotonicNow())
                     if (state.snapshot().outcome === 'pending') {
                       if (hook.value.type === 'deny') fail('HOOK_DENIED', hook.value.code)
-                      // Retry defer is enabled with its floor/FIFO proof in T87.
-                      else if (hook.value.type !== 'allow') fail('HOOK_FAILED')
+                      else if (hook.value.type === 'defer') hookNotBefore = hook.value.notBefore
                     }
                   }
                 }
@@ -884,7 +885,8 @@ export class FetchPlanner<F extends Transport> implements Planner<Init<F>, Respo
               // Reuse the original fallback sample/time: waiting for a hook does not
               // restart backoff. New receipts can only increase the policy floor.
               const adaptiveNotBefore = Math.max(
-                retryFacts.adaptiveNotBefore,
+                policyNotBefore,
+                hookNotBefore,
                 this.#dispatchNotBefore(monotonicNow(), Math.random())
               )
               expire(monotonicNow())

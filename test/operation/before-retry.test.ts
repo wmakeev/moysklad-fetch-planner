@@ -151,7 +151,7 @@ for (const [name, Planner] of [
   })
 }
 
-for (const kind of ['deny', 'throw', 'reject', 'invalid', 'defer'] as const) {
+for (const kind of ['deny', 'throw', 'reject', 'invalid'] as const) {
   test(`Before retry ${kind} terminates without replay`, async t => {
     createRuntime(t)
     let hooks = 0
@@ -173,7 +173,6 @@ for (const kind of ['deny', 'throw', 'reject', 'invalid', 'defer'] as const) {
         if (kind === 'throw') throw new Error('private')
         if (kind === 'reject') return Promise.reject(new Error('private'))
         if (kind === 'invalid') return { type: 'allow', extra: true }
-        if (kind === 'defer') return { type: 'defer', delayMs: 5 }
         return { type: 'deny', code: 'POLICY_DENIED' }
       },
       consume: () => 1
@@ -1238,3 +1237,485 @@ for (const [entry, Planner] of [
     }
   }
 }
+
+for (const [entry, Planner] of [
+  ['root', RootPlanner],
+  ['deep', FetchPlanner]
+] as const) {
+  for (const delay of [0, 5, 30]) {
+    for (const spent of [0, 7]) {
+      test(`Before retry ${entry} frozen policy20 and defer${delay} after hook wait${spent}`, async t => {
+        const clock = createRuntime(t)
+        const timers = trackTimeouts(t)
+        const gate = deferred<Decision>()
+        let calls = 0
+        let prepares = 0
+        let hooks = 0
+        let dispatchHooks = 0
+        let resources = 0
+        const inits: object[] = []
+        const signals: AbortSignal[] = []
+        const planner = new Planner<typeof fetch>(() => {
+          calls++
+          return Promise.resolve(
+            new Response(null, {
+              headers: calls === 1 ? { 'x-lognex-retry-after': '20' } : {}
+            })
+          )
+        })
+        const handle = planner.submit({
+          method: 'POST',
+          replay,
+          prepare: ctx => {
+            prepares++
+            const init = { body: 'same logical payload' }
+            inits.push(init)
+            signals.push(ctx.signal)
+            return { url: '', init }
+          },
+          beforeDispatch: () => {
+            dispatchHooks++
+            return { type: 'allow' }
+          },
+          beforeRetry: async () => {
+            hooks++
+            return await gate.promise
+          },
+          consume: (_response, ctx) => {
+            if (ctx.attemptNumber === 1) throw ctx.retryableReadFailure(new Error('read'))
+            return 42
+          }
+        })
+        void handle.resourcesDone.then(() => {
+          resources++
+        })
+        try {
+          await clock.flush()
+          assert.equal(hooks, 1)
+          assert.deepEqual([calls, prepares, planner.snapshot().leasedAttempts], [1, 1, 1])
+          await clock.advance(spent)
+          gate.resolve(delay === 0 ? { type: 'allow' } : { type: 'defer', delayMs: delay })
+          await clock.flush()
+          assert.deepEqual(
+            [planner.snapshot().leasedAttempts, planner.snapshot().sentActive, resources],
+            [0, 0, 0]
+          )
+          const floor = Math.max(20, spent + delay)
+          await clock.advance(floor - spent - 1)
+          assert.equal(calls, 1, 'FROZEN_POLICY_AND_HOOK_FLOORS_PREVENT_EARLY_TRANSPORT')
+          assert.equal(prepares, 1, 'NO_PREPARE_BEFORE_RETRY_FLOOR')
+          await clock.advance(1)
+          assert.equal((await handle.result).value, 42)
+          assert.deepEqual(await handle.resourcesDone, { resources: 'released' })
+          assert.deepEqual([calls, prepares, hooks, dispatchHooks, resources], [2, 2, 1, 2, 1])
+          assert.notEqual(inits[0], inits[1])
+          assert.notEqual(signals[0], signals[1])
+          assert.equal(timers.active.size, 0)
+          assert.ok(timers.maximum() <= 1)
+        } finally {
+          gate.resolve({ type: 'allow' })
+          handle.abort()
+          await Promise.allSettled([handle.result, handle.resourcesDone])
+        }
+      })
+    }
+  }
+}
+
+for (const delay of [5, 4000]) {
+  test(`Before retry actual429 keeps default fallback3000 with defer${delay}`, async t => {
+    const clock = createRuntime(t)
+    const gate = deferred<Decision>()
+    let calls = 0
+    let prepares = 0
+    let hooks = 0
+    const planner = new FetchPlanner<typeof fetch>(() => {
+      calls++
+      return Promise.resolve(new Response(null, { status: calls === 1 ? 429 : 200 }))
+    })
+    const handle = planner.submit({
+      method: 'POST',
+      replay,
+      prepare: () => {
+        prepares++
+        return { url: '', init: {} }
+      },
+      beforeRetry: async () => {
+        hooks++
+        return await gate.promise
+      },
+      consume: () => 42
+    })
+    try {
+      await clock.flush()
+      await clock.advance(100)
+      // A new fallback sample must not shorten the frozen 3000ms floor.
+      clock.setRandom(0)
+      gate.resolve({ type: 'defer', delayMs: delay })
+      await clock.flush()
+      assert.equal(planner.snapshot().leasedAttempts, 0)
+      const floor = Math.max(3000, 100 + delay)
+      await clock.advance(floor - 101)
+      assert.deepEqual([calls, prepares, hooks], [1, 1, 1], 'DEFAULT_429_FLOOR_STILL_ACTIVE')
+      await clock.advance(1)
+      assert.equal((await handle.result).value, 42)
+      await handle.resourcesDone
+      assert.deepEqual([calls, prepares, hooks], [2, 2, 1])
+    } finally {
+      gate.resolve({ type: 'allow' })
+      handle.abort()
+      await Promise.allSettled([handle.result, handle.resourcesDone])
+    }
+  })
+}
+
+for (const delayMs of [
+  0,
+  -1,
+  0.5,
+  NaN,
+  Infinity,
+  Number.MAX_SAFE_INTEGER,
+  Number.MAX_SAFE_INTEGER + 1
+]) {
+  test(`Before retry invalid defer ${String(delayMs)} remains terminal`, async t => {
+    createRuntime(t)
+    let calls = 0
+    const planner = new FetchPlanner<typeof fetch>(() => {
+      calls++
+      return Promise.resolve(new Response(null, { status: 429 }))
+    })
+    const handle = planner.submit({
+      method: 'POST',
+      replay,
+      prepare: () => ({ url: '', init: {} }),
+      beforeRetry: () => ({ type: 'defer', delayMs }),
+      consume: () => 0
+    })
+    try {
+      await assert.rejects(handle.result, { code: 'HOOK_FAILED', status: 429 })
+      await handle.resourcesDone
+      assert.equal(calls, 1)
+      assert.equal(planner.snapshot().leasedAttempts, 0)
+    } finally {
+      handle.abort()
+      await Promise.allSettled([handle.result, handle.resourcesDone])
+    }
+  })
+}
+
+test('Before retry defer with extra keys remains terminal', async t => {
+  createRuntime(t)
+  let calls = 0
+  const planner = new FetchPlanner<typeof fetch>(() => {
+    calls++
+    return Promise.resolve(new Response(null, { status: 429 }))
+  })
+  const handle = planner.submit({
+    method: 'POST',
+    replay,
+    prepare: () => ({ url: '', init: {} }),
+    beforeRetry: () => ({ type: 'defer', delayMs: 5, extra: true }),
+    consume: () => 0
+  })
+  await assert.rejects(handle.result, { code: 'HOOK_FAILED' })
+  await handle.resourcesDone
+  assert.equal(calls, 1)
+})
+
+for (const mode of ['abort', 'stop', 'deadline'] as const) {
+  test(`Before retry defer sleep ${mode} cancels without another prepare`, async t => {
+    const clock = createRuntime(t)
+    let calls = 0
+    let prepares = 0
+    let resources = 0
+    const planner = new FetchPlanner<typeof fetch>(() => {
+      calls++
+      return Promise.resolve(new Response(null, { status: calls === 1 ? 429 : 200 }))
+    })
+    const handle = planner.submit({
+      method: 'POST',
+      replay,
+      ...(mode === 'deadline' ? { deadlineMs: 5000 } : {}),
+      prepare: () => {
+        prepares++
+        return { url: '', init: {} }
+      },
+      beforeRetry: () => ({ type: 'defer', delayMs: 4000 }),
+      consume: () => 42
+    })
+    void handle.result.catch(() => undefined)
+    void handle.resourcesDone.then(() => {
+      resources++
+    })
+    try {
+      await clock.flush()
+      assert.equal(handle.snapshot().phase, 'retry-wait')
+      assert.deepEqual(
+        [planner.snapshot().leasedAttempts, planner.snapshot().sentActive, resources],
+        [0, 0, 0]
+      )
+      if (mode === 'abort') handle.abort()
+      else if (mode === 'stop') planner.stop()
+      else clock.tick(5000)
+      await assert.rejects(handle.result, {
+        code: mode === 'abort' ? 'ABORTED' : mode === 'stop' ? 'STOPPED' : 'DEADLINE'
+      })
+      await handle.resourcesDone
+      await clock.advance(5000)
+      assert.deepEqual([calls, prepares, resources], [1, 1, 1])
+    } finally {
+      handle.abort()
+      await Promise.allSettled([handle.result, handle.resourcesDone])
+    }
+  })
+}
+
+for (const queuedLimit of [1, 2]) {
+  test(`Before retry defer reserves bounded FIFO with Q${queuedLimit} observer burst`, async t => {
+    const clock = createRuntime(t)
+    const gate = deferred<Decision>()
+    const order: string[] = []
+    let calls = 0
+    let hooks = 0
+    let rejectedPrepares = 0
+    let burst = 0
+    const rejected: Promise<unknown>[] = []
+    const planner = new FetchPlanner<typeof fetch>(
+      () => {
+        calls++
+        return Promise.resolve(new Response(null, { status: calls === 1 ? 429 : 200 }))
+      },
+      { maxParallelLimit: 1, maxQueuedOperations: queuedLimit }
+    )
+    const handle = planner.submit({
+      method: 'POST',
+      replay,
+      prepare: ctx => {
+        order.push(`retry${ctx.attemptNumber}`)
+        return { url: '', init: {} }
+      },
+      beforeRetry: async () => {
+        hooks++
+        return await gate.promise
+      },
+      consume: () => 42
+    })
+    await clock.flush()
+    const sibling = planner.submit({
+      method: 'GET',
+      replay,
+      prepare: () => {
+        order.push('sibling')
+        return { url: '', init: {} }
+      },
+      consume: () => 7
+    })
+    handle.observe(event => {
+      if (event.type !== 'retry-scheduled') return
+      for (let i = 0; i < 100; i++) {
+        burst++
+        const excess = planner.submit({
+          method: 'GET',
+          replay,
+          prepare: () => {
+            rejectedPrepares++
+            return { url: '', init: {} }
+          },
+          consume: () => 0
+        })
+        rejected.push(assert.rejects(excess.result, { code: 'QUEUE_FULL' }), excess.resourcesDone)
+      }
+    })
+    void handle.result.catch(() => undefined)
+    try {
+      assert.equal(hooks, 1)
+      assert.equal(planner.snapshot().leasedAttempts, 1)
+      assert.deepEqual(order, ['retry1'])
+      gate.resolve({ type: 'defer', delayMs: 4000 })
+      await clock.flush()
+      if (queuedLimit === 1) {
+        await assert.rejects(handle.result, { code: 'QUEUE_FULL' })
+        await handle.resourcesDone
+        assert.equal(burst, 0)
+      } else {
+        assert.equal(handle.snapshot().phase, 'retry-wait')
+        assert.equal(burst, 100)
+        await Promise.all(rejected)
+      }
+      await clock.advance(3000)
+      assert.equal((await sibling.result).value, 7)
+      await sibling.resourcesDone
+      assert.equal(planner.snapshot().leasedAttempts, 0)
+      assert.deepEqual(order, ['retry1', 'sibling'])
+      await clock.advance(1000)
+      if (queuedLimit === 2) {
+        assert.equal((await handle.result).value, 42)
+        await handle.resourcesDone
+        assert.deepEqual(order, ['retry1', 'sibling', 'retry2'])
+      }
+      assert.equal(rejectedPrepares, 0)
+      assert.equal(hooks, 1)
+      assert.equal(planner.snapshot().queued, 0)
+      assert.equal(planner.snapshot().leasedAttempts, 0)
+    } finally {
+      gate.resolve({ type: 'allow' })
+      handle.abort()
+      sibling.abort()
+      await Promise.allSettled([
+        handle.result,
+        handle.resourcesDone,
+        sibling.result,
+        sibling.resourcesDone,
+        ...rejected
+      ])
+    }
+  })
+}
+
+for (const phase of ['hook', 'sleep'] as const) {
+  test(`Before retry defer preserves increasing out of order receipt floors during ${phase}`, async t => {
+    const clock = createRuntime(t)
+    const hook = deferred<Decision>()
+    const early = deferred<Response>()
+    const late = deferred<Response>()
+    let calls = 0
+    let retryCalls = 0
+    let prepares = 0
+    let hooks = 0
+    const planner = new FetchPlanner<typeof fetch>(url => {
+      calls++
+      if (url === 'early') return early.promise
+      if (url === 'late') return late.promise
+      retryCalls++
+      return Promise.resolve(
+        new Response(null, {
+          headers: retryCalls === 1 ? { 'x-lognex-retry-after': '20' } : {}
+        })
+      )
+    })
+    const sibling = (url: string) =>
+      planner.submit({
+        method: 'GET',
+        replay,
+        prepare: () => ({ url, init: {} }),
+        consume: () => 1
+      })
+    const first = sibling('early')
+    const last = sibling('late')
+    const handle = planner.submit({
+      method: 'POST',
+      replay,
+      prepare: () => {
+        prepares++
+        return { url: 'retry', init: {} }
+      },
+      beforeRetry: async () => {
+        hooks++
+        return await hook.promise
+      },
+      consume: (_response, ctx) => {
+        if (ctx.attemptNumber === 1) throw ctx.retryableReadFailure(new Error('read'))
+        return 42
+      }
+    })
+    try {
+      await clock.flush()
+      assert.equal(calls, 3)
+      assert.equal(hooks, 1)
+      if (phase === 'sleep') {
+        hook.resolve({ type: 'defer', delayMs: 30 })
+        await clock.flush()
+      }
+      await clock.advance(5)
+      early.resolve(new Response(null, { headers: { 'x-lognex-retry-after': '50' } }))
+      await first.result
+      await first.resourcesDone
+      await clock.advance(5)
+      late.resolve(new Response(null, { headers: { 'x-lognex-retry-after': '1' } }))
+      await last.result
+      await last.resourcesDone
+      if (phase === 'hook') {
+        hook.resolve({ type: 'defer', delayMs: 30 })
+        await clock.flush()
+      }
+      await clock.advance(44)
+      assert.equal(retryCalls, 1, 'UPDATED_RECEIPT_FLOOR_CANNOT_DECREASE')
+      await clock.advance(1)
+      assert.equal((await handle.result).value, 42)
+      await handle.resourcesDone
+      assert.deepEqual([retryCalls, prepares, hooks], [2, 2, 1])
+    } finally {
+      early.resolve(new Response())
+      late.resolve(new Response())
+      hook.resolve({ type: 'allow' })
+      for (const item of [handle, first, last]) item.abort()
+      await Promise.allSettled([
+        handle.result,
+        handle.resourcesDone,
+        first.result,
+        first.resourcesDone,
+        last.result,
+        last.resourcesDone
+      ])
+    }
+  })
+}
+
+test('Before retry Q1 sleep reservation rejects observer burst without hidden backlog', async t => {
+  const clock = createRuntime(t)
+  let calls = 0
+  let rejectedPrepares = 0
+  let burst = 0
+  const rejected: Promise<unknown>[] = []
+  const planner = new FetchPlanner<typeof fetch>(
+    () => {
+      calls++
+      return Promise.resolve(new Response(null, { status: calls === 1 ? 429 : 200 }))
+    },
+    { maxParallelLimit: 1, maxQueuedOperations: 1 }
+  )
+  const handle = planner.submit({
+    method: 'POST',
+    replay,
+    prepare: () => ({ url: '', init: {} }),
+    beforeRetry: () => ({ type: 'defer', delayMs: 4000 }),
+    consume: () => 42
+  })
+  handle.observe(event => {
+    if (event.type !== 'retry-scheduled') return
+    for (let i = 0; i < 100; i++) {
+      burst++
+      const excess = planner.submit({
+        method: 'GET',
+        replay,
+        prepare: () => {
+          rejectedPrepares++
+          return { url: '', init: {} }
+        },
+        consume: () => 0
+      })
+      rejected.push(assert.rejects(excess.result, { code: 'QUEUE_FULL' }), excess.resourcesDone)
+    }
+  })
+  try {
+    await clock.flush()
+    await Promise.all(rejected)
+    assert.equal(burst, 100)
+    assert.equal(planner.snapshot().queued, 1)
+    assert.equal(planner.snapshot().leasedAttempts, 0)
+    assert.equal(rejectedPrepares, 0)
+    await clock.advance(3999)
+    assert.equal(calls, 1)
+    await clock.advance(1)
+    assert.equal((await handle.result).value, 42)
+    await handle.resourcesDone
+    assert.equal(calls, 2)
+    assert.equal(rejectedPrepares, 0)
+    assert.equal(planner.snapshot().queued, 0)
+    assert.equal(planner.snapshot().leasedAttempts, 0)
+  } finally {
+    handle.abort()
+    await Promise.allSettled([handle.result, handle.resourcesDone, ...rejected])
+  }
+})
