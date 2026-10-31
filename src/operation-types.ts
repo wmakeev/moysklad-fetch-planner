@@ -28,6 +28,27 @@ export type Phase =
   | 'cleanup'
   | 'retry-wait'
   | 'terminal'
+export type FailureCode =
+  | 'INVALID_ARGUMENT'
+  | 'QUEUE_FULL'
+  | 'STOPPED'
+  | 'ABORTED'
+  | 'DEADLINE'
+  | 'ATTEMPT_TIMEOUT'
+  | 'REENTRANT_OPERATION'
+  | 'PREPARE_FAILED'
+  | 'TRANSPORT_FAILED'
+  | 'HTTP_FAILED'
+  | 'CONSUME_FAILED'
+  | 'CLEANUP_FAILED'
+  | 'GUARD_OPEN'
+  | 'GUARD_CAPACITY'
+  | 'PUT_LIMIT'
+  | 'HOOK_FAILED'
+  | 'HOOK_DENIED'
+  | 'ID_EXHAUSTED'
+  | 'SEQUENCE_EXHAUSTED'
+  | 'SUBSCRIBER_LIMIT'
 export interface Snapshot {
   readonly id: number
   readonly sequence: number
@@ -35,7 +56,7 @@ export interface Snapshot {
   readonly outcome: 'pending' | 'succeeded' | 'failed'
   readonly resultCommitted: boolean
   readonly resources: 'pending' | 'released' | 'failed' | 'unknown'
-  readonly failureCode?: string
+  readonly failureCode?: FailureCode
   readonly attempts: number
   readonly dispatchCalls: number
   readonly dispatchEntered: boolean
