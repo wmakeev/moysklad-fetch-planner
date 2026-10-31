@@ -4,6 +4,7 @@ import { CallbackContext } from './callback-context.js'
 import { OperationCapacity } from './operation-capacity.js'
 import { OperationResources } from './operation-resources.js'
 import { OperationState } from './operation-state.js'
+import { ResponseClassifier } from './response-classifier.js'
 import { calculateRequestDelay, createAttenuationSteps, requestDeadline } from './pacing.js'
 import { absoluteDeadline, MAX_TIMEOUT_MS, monotonicNow } from './runtime.js'
 import type {
@@ -281,6 +282,8 @@ export class FetchPlanner<F extends Transport> implements Planner<Init<F>, Respo
     let started = false
     let attemptDeadline: number | undefined
     let cleanupDeadline: number | undefined
+    let classifier: ResponseClassifier | undefined
+    let classificationWake: number | undefined
     const fail = (code: FailureCode, cause?: unknown) => {
       const snapshot = state.snapshot()
       return state.fail(
@@ -304,7 +307,7 @@ export class FetchPlanner<F extends Transport> implements Planner<Init<F>, Respo
       if (snapshot.outcome !== 'pending') return undefined
       return snapshot.resultCommitted
         ? cleanupDeadline
-        : Math.min(deadline, attemptDeadline ?? deadline)
+        : Math.min(deadline, attemptDeadline ?? deadline, classificationWake ?? Infinity)
     }
     const expire = (now: number) => {
       if (state.snapshot().outcome !== 'pending') return
@@ -321,12 +324,17 @@ export class FetchPlanner<F extends Transport> implements Planner<Init<F>, Respo
             : undefined
       if (code && fail(code)) {
         controller.abort()
+        classifier?.cancel()
         entry.releaseReady()
         if (!started) {
           reservation.release()
           this.#active.delete(entry)
           state.settleResources({ resources: 'released' }, this.#stamp())
         }
+      }
+      if (classificationWake !== undefined && now >= classificationWake) {
+        classificationWake = undefined
+        classifier?.expire(now)
       }
     }
     const materialized: Entry = {
@@ -343,6 +351,7 @@ export class FetchPlanner<F extends Transport> implements Planner<Init<F>, Respo
         }
         if (!fail(code, reason)) return
         controller.abort(reason)
+        classifier?.cancel()
         entry.releaseReady()
         if (!started) {
           reservation.release()
@@ -443,6 +452,20 @@ export class FetchPlanner<F extends Transport> implements Planner<Init<F>, Respo
           state.transition('headers-received', { phase: 'classifying', status }, this.#stamp())
           if (state.snapshot().outcome !== 'pending') return
           if (status === 429) {
+            code = 'HTTP_FAILED'
+            const classificationStartedAt = monotonicNow()
+            classifier = new ResponseClassifier(
+              { status, headers: response.headers, body: response.body },
+              classificationStartedAt,
+              monotonicNow
+            )
+            classificationWake = classifier.deadline
+            if (state.snapshot().outcome !== 'pending') classifier.cancel()
+            this.#armTimer()
+            await classifier.result
+            classificationWake = undefined
+            // Timer delivery is not required for an operation/attempt deadline to win.
+            expire(monotonicNow())
             fail('HTTP_FAILED')
             return
           }
@@ -487,10 +510,25 @@ export class FetchPlanner<F extends Transport> implements Planner<Init<F>, Respo
         } finally {
           if (state.snapshot().outcome === 'pending')
             state.transition('phase-changed', { phase: 'cleanup' }, this.#stamp())
-          const cleanup = await resources.cleanup(!state.snapshot().resultCommitted)
+          classifier?.cancel()
+          classificationWake = undefined
+          this.#armTimer()
+          // Start request disposal (including producer stop) before waiting for reader work.
+          // Neither reader settlement nor request disposal alone proves attempt cleanup.
+          const cleanupWork = resources.cleanup(!state.snapshot().resultCommitted)
           let responseResources: ResourceSummary['resources'] = 'released'
+          if (classifier) {
+            const reader = await classifier.knownWork
+            responseResources =
+              reader.readFailed || reader.cancelFailed
+                ? 'failed'
+                : reader.readerReleased
+                  ? 'released'
+                  : 'unknown'
+          }
+          const cleanup = await cleanupWork
           try {
-            const body = response?.body
+            const body = classifier ? undefined : response?.body
             if (body) {
               // Await cancellation of an unlocked remainder as known work.
               if (!body.locked) await body.cancel()
