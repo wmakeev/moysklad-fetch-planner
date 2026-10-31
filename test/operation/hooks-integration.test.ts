@@ -2,7 +2,13 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { FetchPlanner } from '../../src/planner.js'
 import { FetchPlanner as RootPlanner } from '../../src/index.js'
-import { OperationError, type Decision, type Hook, type Event } from '../../src/operation-types.js'
+import {
+  OperationError,
+  type Decision,
+  type Hook,
+  type HookContext,
+  type Event
+} from '../../src/operation-types.js'
 import { createRuntime, deferred, trackTimeouts } from './helpers.js'
 
 const replay = { serverSafe: true, consumeSafe: true }
@@ -416,4 +422,547 @@ for (const site of sites) {
       ])
     }
   })
+}
+
+// These are runtime unknown-boundary inputs, built without widening the public Hook type.
+const extractionCases = [
+  'allow',
+  'deny',
+  'defer',
+  'throw-type',
+  'throw-code',
+  'throw-delayMs',
+  'stateful-type',
+  'stateful-code',
+  'stateful-delayMs',
+  'extra',
+  'hidden',
+  'symbol',
+  'invalid-type',
+  'invalid-code',
+  'delay-zero',
+  'delay-negative',
+  'delay-fraction',
+  'delay-nan',
+  'delay-infinity',
+  'delay-unsafe',
+  'delay-overflow',
+  'delay-string',
+  'ownKeys',
+  'has'
+] as const
+
+for (const site of sites) {
+  for (const scenario of extractionCases) {
+    // Full result-chain coverage is concentrated on the arbitrary final-field readers.
+    const forms =
+      scenario.startsWith('stateful') || scenario.startsWith('throw')
+        ? (['chain', 'promise-subclass'] as const)
+        : (['chain'] as const)
+    for (const form of forms) {
+      test(`Hooks T91 ${site} guarded extraction ${scenario} ${form}`, async t => {
+        const clock = createRuntime(t)
+        const timers = trackTimeouts(t)
+        const gate = deferred<undefined>()
+        const entered = deferred<undefined>()
+        const jobs: Promise<void>[] = []
+        const records: unknown[] = []
+        const contexts: HookContext[] = []
+        const frozenSnapshots: string[] = []
+        const canary = 'T91-private-decision-error-payload'
+        const rawError = new Error(canary)
+        const reads = new Map<string, number>()
+        const boundaries: { stage: string; lease: number; sent: number; cleanup: number[] }[] = []
+        let dispatches = 0
+        let prepares = 0
+        let discards = 0
+        let disposals = 0
+        let uploads = 0
+        let siblingPrepares = 0
+        let childPrepares = 0
+        let hooks = 0
+        let resources = 0
+        const planner = new FetchPlanner<typeof fetch>(
+          () => {
+            dispatches++
+            return Promise.resolve(new Response(canary))
+          },
+          { maxParallelLimit: 1, maxQueuedOperations: 2 }
+        )
+        const children: ReturnType<typeof planner.submit>[] = []
+        const probes: { stage: string; id: number; outcome: Promise<string> }[] = []
+        function inspect(stage: string) {
+          const child = planner.submit({
+            method: 'GET',
+            replay,
+            prepare: () => {
+              childPrepares++
+              return { url: canary, init: {} }
+            },
+            consume: () => canary
+          })
+          children.push(child)
+          probes.push({
+            stage,
+            id: child.id,
+            outcome: child.result.then(
+              () => 'accepted',
+              (error: unknown) => (error instanceof OperationError ? error.code : 'unexpected')
+            )
+          })
+          const snapshot = planner.snapshot()
+          boundaries.push({
+            stage,
+            lease: snapshot.leasedAttempts,
+            sent: snapshot.sentActive,
+            cleanup: [disposals, discards, uploads]
+          })
+        }
+        function read(field: string, value: unknown): unknown {
+          const count = (reads.get(field) ?? 0) + 1
+          reads.set(field, count)
+          inspect(`field ${field} read ${count}`)
+          if (scenario === `throw-${field}` || count > 1) throw rawError
+          return value
+        }
+        const denial =
+          scenario.endsWith('code') || scenario === 'deny' || scenario === 'invalid-code'
+        const delay = scenario.includes('delay') || scenario === 'defer'
+        const raw: Decision = denial
+          ? { type: 'deny', code: 'POLICY_DENIED' }
+          : delay
+            ? { type: 'defer', delayMs: 7 }
+            : { type: 'allow' }
+        let type: unknown = denial ? 'deny' : delay ? 'defer' : 'allow'
+        if (scenario === 'invalid-type') type = canary
+        Object.defineProperty(raw, 'type', {
+          enumerable: true,
+          configurable: true,
+          get: () => read('type', type)
+        })
+        if (denial)
+          Object.defineProperty(raw, 'code', {
+            enumerable: true,
+            get: () => read('code', scenario === 'invalid-code' ? canary : 'POLICY_DENIED')
+          })
+        if (delay) {
+          const invalidDelays: Record<string, unknown> = {
+            'delay-zero': 0,
+            'delay-negative': -1,
+            'delay-fraction': 0.5,
+            'delay-nan': NaN,
+            'delay-infinity': Infinity,
+            'delay-unsafe': Number.MAX_SAFE_INTEGER + 1,
+            'delay-overflow': Number.MAX_SAFE_INTEGER,
+            'delay-string': canary
+          }
+          Object.defineProperty(raw, 'delayMs', {
+            enumerable: true,
+            get: () => read('delayMs', scenario in invalidDelays ? invalidDelays[scenario] : 7)
+          })
+        }
+        if (scenario === 'extra')
+          Object.defineProperty(raw, 'extra', { value: canary, enumerable: true })
+        if (scenario === 'hidden') Object.defineProperty(raw, 'hidden', { value: canary })
+        if (scenario === 'symbol') Object.defineProperty(raw, Symbol(canary), { value: canary })
+        Object.setPrototypeOf(raw, {
+          get then() {
+            inspect('final inherited then')
+            return undefined
+          }
+        })
+        const decision =
+          scenario === 'ownKeys' || scenario === 'has'
+            ? new Proxy(raw, {
+                ownKeys(target) {
+                  inspect('proxy ownKeys')
+                  if (scenario === 'ownKeys') throw rawError
+                  return Reflect.ownKeys(target)
+                },
+                has(target, key) {
+                  inspect('proxy has')
+                  if (scenario === 'has') throw rawError
+                  return Reflect.has(target, key)
+                }
+              })
+            : raw
+        // Each returned thenable is created only after the preceding resolution job.
+        function chain(depth: number): Decision {
+          if (depth === 0) return decision
+          const step: Decision = { type: 'allow' }
+          Object.setPrototypeOf(step, {
+            get then() {
+              inspect(`chain getter ${depth}`)
+              return (resolve: (value: Decision) => void) => {
+                inspect(`chain resolve ${depth}`)
+                resolve(chain(depth - 1))
+              }
+            }
+          })
+          return step
+        }
+        const hook: Hook = context => {
+          hooks++
+          contexts.push(context)
+          frozenSnapshots.push(JSON.stringify(context.snapshot))
+          inspect('hook body')
+          const wrapper: Decision = { type: 'allow' }
+          Object.setPrototypeOf(wrapper, {
+            get then() {
+              inspect('outer getter')
+              return (resolve: (value: Decision) => void) => {
+                inspect('outer resolve')
+                entered.resolve(undefined)
+                jobs.push(
+                  gate.promise.then(() => {
+                    resolve(chain(12))
+                  })
+                )
+              }
+            }
+          })
+          if (form === 'promise-subclass') {
+            class DecisionPromise extends Promise<Decision> {}
+            return new DecisionPromise(resolve => {
+              resolve(wrapper)
+            })
+          }
+          return wrapper
+        }
+        const target = planner.submit({
+          method: 'POST',
+          replay,
+          [site]: hook,
+          prepare: ctx => {
+            prepares++
+            const body = new ReadableStream<Uint8Array>({
+              start(controller) {
+                controller.enqueue(new TextEncoder().encode(canary))
+                controller.close()
+              }
+            })
+            ctx.onDispose(async () => {
+              await new Response(body).text()
+              uploads++
+            })
+            ctx.onDispose(() => {
+              disposals++
+            })
+            return { url: canary, init: { body, duplex: 'half' } }
+          },
+          consume: async (response, ctx) => {
+            const value = await response.text()
+            if (site === 'beforeRetry' && ctx.attemptNumber === 1) {
+              ctx.onDiscard(() => {
+                discards++
+              })
+              throw ctx.retryableReadFailure(rawError)
+            }
+            return value
+          }
+        })
+        const result = target.result.then(
+          value => value,
+          (error: unknown) => error
+        )
+        void target.resourcesDone.then(() => {
+          resources++
+        })
+        target.observe(event => {
+          records.push(event)
+        })
+        planner.observe(event => {
+          records.push(event)
+        })
+        const sibling = planner.submit({
+          method: 'GET',
+          replay,
+          prepare: () => {
+            siblingPrepares++
+            return { url: 'sibling', init: {} }
+          },
+          consume: () => 'sibling'
+        })
+        void sibling.result.catch(() => undefined)
+        try {
+          await entered.promise
+          await clock.flush()
+          const prior = site === 'beforeRetry' ? 1 : 0
+          assert.equal(hooks, 1)
+          assert.deepEqual(
+            [prepares, dispatches, disposals, discards, uploads],
+            [1, prior, prior, prior, prior]
+          )
+          assert.deepEqual([resources, siblingPrepares], [0, 0])
+          assert.deepEqual(
+            [planner.snapshot().leasedAttempts, planner.snapshot().sentActive],
+            [1, 0]
+          )
+          gate.resolve(undefined)
+          await clock.flush()
+          // Causal oracle comes before queue/accounting checks and before awaiting child results.
+          assert.ok(
+            reads.size > 0 || scenario === 'ownKeys' || scenario === 'has',
+            'T91_GETTER_ENTERED'
+          )
+          for (const probe of probes) {
+            assert.equal(probe.id, 0, `T91_NESTED_SUBMIT_REJECTED ${site} ${probe.stage}`)
+            assert.equal(await probe.outcome, 'REENTRANT_OPERATION', probe.stage)
+          }
+          assert.equal(childPrepares, 0)
+          for (const boundary of boundaries) {
+            assert.deepEqual([boundary.lease, boundary.sent], [1, 0], boundary.stage)
+            assert.deepEqual(boundary.cleanup, [prior, prior, prior], boundary.stage)
+          }
+          for (const count of reads.values()) assert.equal(count, 1, 'SAFE_SCALAR_READ_ONCE')
+          const allowed = ['allow', 'defer', 'stateful-type', 'stateful-delayMs'].includes(scenario)
+          const denied = ['deny', 'stateful-code'].includes(scenario)
+          await clock.advance(100)
+          const outcome = await result
+          if (allowed) {
+            assert.ok(!(outcome instanceof Error))
+            assert.ok(typeof outcome === 'object')
+            assert.ok(outcome !== null && 'value' in outcome)
+            assert.equal(outcome.value, canary)
+          } else {
+            assert.ok(outcome instanceof OperationError)
+            assert.equal(outcome.code, denied ? 'HOOK_DENIED' : 'HOOK_FAILED')
+            if (denied) assert.equal(outcome.cause, 'POLICY_DENIED')
+          }
+          await target.resourcesDone
+          await sibling.result
+          await sibling.resourcesDone
+          assert.equal(hooks, 1)
+          assert.equal(target.snapshot().dispatchCalls, prior + (allowed ? 1 : 0))
+          assert.equal(dispatches, prior + (allowed ? 1 : 0) + 1)
+          assert.equal(prepares, site === 'beforeRetry' && allowed ? 2 : 1)
+          assert.deepEqual([disposals, uploads, discards], [prepares, prepares, prior])
+          assert.deepEqual([resources, siblingPrepares], [1, 1])
+          for (const [index, context] of contexts.entries()) {
+            assert.deepEqual(
+              Reflect.ownKeys(context).sort(),
+              [
+                ...['snapshot', 'signal', 'attemptNumber', 'dispatchCalls'],
+                ...(prior ? ['status'] : [])
+              ].sort()
+            )
+            assert.deepEqual(
+              Reflect.ownKeys(context.snapshot).sort(),
+              [
+                ...[
+                  'id',
+                  'sequence',
+                  'phase',
+                  'outcome',
+                  'resultCommitted',
+                  'resources',
+                  'attempts',
+                  'dispatchCalls',
+                  'dispatchEntered'
+                ],
+                ...(prior ? ['status'] : [])
+              ].sort()
+            )
+            assert.equal(Object.isFrozen(context), true)
+            assert.equal(Object.isFrozen(context.snapshot), true)
+            assert.equal(Reflect.set(context, 'attemptNumber', 999), false)
+            assert.equal(Reflect.set(context.snapshot, 'phase', 'terminal'), false)
+            assert.equal(
+              JSON.stringify(context.snapshot),
+              frozenSnapshots[index],
+              'DETACHED_SNAPSHOT'
+            )
+            assert.ok(context.signal instanceof AbortSignal)
+            assert.deepEqual(
+              [context.attemptNumber, context.dispatchCalls, context.status],
+              [1, prior, prior ? 200 : undefined]
+            )
+          }
+          records.push(target.snapshot(), planner.snapshot())
+          const publicJson = JSON.stringify(records)
+          assert.equal(publicJson.includes(canary), false, 'T91_PRIVATE_TEXT_ABSENT')
+          const recordKeys = new Set([
+            'id',
+            'sequence',
+            'phase',
+            'outcome',
+            'resultCommitted',
+            'resources',
+            'attempts',
+            'dispatchCalls',
+            'dispatchEntered',
+            'failureCode',
+            'status',
+            'type',
+            'epochTime',
+            'elapsedMs',
+            'stopped',
+            'guardOpen',
+            'queued',
+            'leasedAttempts',
+            'sentActive',
+            'effectiveParallelism',
+            'serverNotBefore'
+          ])
+          for (const record of records) {
+            assert.ok(typeof record === 'object' && record !== null)
+            for (const [key, value] of Object.entries(record)) {
+              assert.equal(recordKeys.has(key), true, key)
+              assert.ok(
+                value === null ||
+                  ['string', 'number', 'boolean', 'undefined'].includes(typeof value),
+                key
+              )
+              assert.ok(
+                !['cause', 'stack', 'message', 'decision', 'body', 'url', 'headers'].includes(key),
+                key
+              )
+            }
+          }
+          assert.equal(planner.snapshot().leasedAttempts, 0)
+          assert.equal(planner.snapshot().sentActive, 0)
+          assert.equal(timers.active.size, 0)
+        } finally {
+          gate.resolve(undefined)
+          target.abort()
+          sibling.abort()
+          for (const child of children) child.abort()
+          await Promise.allSettled([
+            result,
+            target.resourcesDone,
+            sibling.result,
+            sibling.resourcesDone,
+            ...jobs,
+            ...children.flatMap(child => [child.result, child.resourcesDone])
+          ])
+        }
+      })
+    }
+  }
+}
+
+for (const site of sites) {
+  for (const mode of ['timeout', 'abort', 'stop', 'deadline'] as const) {
+    for (const field of ['type', 'code', 'delayMs'] as const) {
+      test(`Hooks T91 ${site} late throwing ${field} preserves ${mode}`, async t => {
+        const clock = createRuntime(t)
+        const gate = deferred<Decision>()
+        const records: Event[] = []
+        const canary = 'T91-private-late-getter-error'
+        const lateError = new Error(canary)
+        let entered = 0
+        let reads = 0
+        let sends = 0
+        let disposals = 0
+        let resources = 0
+        const planner = new FetchPlanner<typeof fetch>(
+          () => {
+            sends++
+            return Promise.resolve(new Response('complete body'))
+          },
+          { maxParallelLimit: 1 }
+        )
+        const children: ReturnType<typeof planner.submit>[] = []
+        const outcomes: Promise<unknown>[] = []
+        const ids: number[] = []
+        const late: Decision =
+          field === 'code'
+            ? { type: 'deny', code: 'POLICY_DENIED' }
+            : field === 'delayMs'
+              ? { type: 'defer', delayMs: 1 }
+              : { type: 'allow' }
+        Object.defineProperty(late, field, {
+          get() {
+            reads++
+            const child = planner.submit({
+              method: 'GET',
+              replay,
+              prepare: () => ({ url: 'nested', init: {} }),
+              consume: () => 0
+            })
+            children.push(child)
+            ids.push(child.id)
+            outcomes.push(child.result.catch((error: unknown) => error))
+            throw lateError
+          }
+        })
+        const target = planner.submit({
+          method: 'POST',
+          replay,
+          ...(mode === 'deadline' ? { deadlineMs: 100 } : {}),
+          [site]: () => {
+            entered++
+            return gate.promise
+          },
+          prepare: ctx => {
+            ctx.onDispose(() => {
+              disposals++
+            })
+            return { url: 'target', init: { body: 'payload' } }
+          },
+          consume: async (response, ctx) => {
+            await response.text()
+            throw ctx.retryableReadFailure(new Error('read'))
+          }
+        })
+        const result = target.result.catch((error: unknown) => error)
+        target.observe(event => {
+          records.push(event)
+        })
+        void target.resourcesDone.then(() => {
+          resources++
+        })
+        try {
+          await clock.flush()
+          assert.equal(entered, 1)
+          if (mode === 'abort') target.abort()
+          else if (mode === 'stop') planner.stop()
+          else await clock.advance(mode === 'deadline' ? 100 : 1000)
+          const primary = await result
+          assert.ok(primary instanceof OperationError)
+          assert.equal(
+            primary.code,
+            mode === 'timeout'
+              ? 'HOOK_FAILED'
+              : mode === 'abort'
+                ? 'ABORTED'
+                : mode === 'stop'
+                  ? 'STOPPED'
+                  : 'DEADLINE'
+          )
+          assert.equal(resources, 0)
+          assert.deepEqual(
+            [planner.snapshot().leasedAttempts, planner.snapshot().sentActive],
+            [1, 0]
+          )
+          gate.resolve(late)
+          await target.resourcesDone
+          assert.equal(reads, 1, 'LATE_GETTER_REALLY_EXTRACTED')
+          for (const id of ids) assert.equal(id, 0, 'LATE_EXTRACTION_REENTRY_REJECTED')
+          for (const outcome of await Promise.all(outcomes)) {
+            assert.ok(outcome instanceof OperationError)
+            assert.equal(outcome.code, 'REENTRANT_OPERATION')
+          }
+          await clock.advance(2000)
+          assert.equal(await result, primary)
+          assert.equal(target.snapshot().failureCode, primary.code)
+          assert.deepEqual([sends, disposals, resources], [site === 'beforeRetry' ? 1 : 0, 1, 1])
+          assert.equal(records.filter(record => record.type === 'operation-settled').length, 1)
+          assert.equal(records.filter(record => record.type === 'resources-settled').length, 1)
+          assert.equal(JSON.stringify(records).includes(canary), false)
+          assert.equal(planner.snapshot().leasedAttempts, 0)
+        } finally {
+          gate.resolve(late)
+          target.abort()
+          for (const child of children) child.abort()
+          await Promise.allSettled([
+            result,
+            target.resourcesDone,
+            ...outcomes,
+            ...children.flatMap(child => [child.result, child.resourcesDone])
+          ])
+        }
+      })
+    }
+  }
 }
