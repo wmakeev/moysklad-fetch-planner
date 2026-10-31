@@ -737,3 +737,348 @@ for (const [entry, Constructor] of [
     })
   }
 }
+
+// Hold only delivery of the coordinator's queued pump, as in T72. The ready
+// phase proves the actual hook's full assimilation/extraction has finished.
+// No await or callback is inserted into final gate -> charge -> transport.
+function holdResolvedWake(t: import('node:test').TestContext) {
+  const enqueue = globalThis.queueMicrotask
+  let armed = false
+  let held: (() => void) | undefined
+  t.mock.method(globalThis, 'queueMicrotask', (callback: () => void) => {
+    if (armed && !held) {
+      armed = false
+      held = callback
+    } else enqueue(callback)
+  })
+  return {
+    arm() {
+      armed = true
+    },
+    get pending() {
+      return held !== undefined
+    },
+    change(callback: () => void) {
+      enqueue(callback)
+    },
+    release() {
+      const callback = held
+      held = undefined
+      if (callback) enqueue(callback)
+    }
+  }
+}
+
+for (const [entry, Constructor] of [
+  ['root', RootPlanner],
+  ['deep', FetchPlanner]
+] as const) {
+  for (const family of ['native', 'undici'] as const) {
+    for (const boundary of ['hook', 'wait'] as const) {
+      for (const safety of [
+        'stop',
+        'abort',
+        'deadline',
+        'pause',
+        'pacing',
+        'effective',
+        'guard'
+      ] as const) {
+        test(`T84 resolved ${boundary} ${entry} ${family} microtask rechecks ${safety} before actual admission`, async t => {
+          const clock = createRuntime(t)
+          const timers = trackTimeouts(t)
+          const wake = holdResolvedWake(t)
+          const hook = deferred<Decision>()
+          const receipt = deferred<Response>()
+          const undiciReceipt = deferred<UndiciResponse>()
+          const ownerResponse = deferred<Response>()
+          const undiciOwnerResponse = deferred<UndiciResponse>()
+          const trace: string[] = []
+          const eventTimes: number[] = []
+          const mark = (event: string) => {
+            trace.push(event)
+            eventTimes.push(performance.now())
+          }
+          const sends: string[] = []
+          const noReplay = { serverSafe: false, consumeSafe: false }
+          const overflow = '{"errors":[{"code":1073}]}'
+          const options = {
+            maxParallelLimit: 3,
+            jitter: 0,
+            throttlingCoefficient: 1,
+            maxRequestDelayTimeMs: 200
+          }
+          const nativeTransport: typeof fetch = url => {
+            assert.equal(typeof url, 'string')
+            if (typeof url !== 'string')
+              throw new Error('T84 descriptor must materialize a string URL')
+            const name = url
+            sends.push(name)
+            mark(`send:${name}`)
+            if (name === 'receipt') return receipt.promise
+            if (name === 'owner') return ownerResponse.promise
+            return Promise.resolve(
+              new Response(name === 'correction-seed' ? overflow : null, {
+                status: name === 'correction-seed' ? 429 : name === 'guard-seed' ? 500 : 200,
+                headers: name === 'correction-seed' ? { 'content-type': 'application/json' } : {}
+              })
+            )
+          }
+          const undiciTransport: typeof undiciFetch = url => {
+            assert.equal(typeof url, 'string')
+            if (typeof url !== 'string')
+              throw new Error('T84 descriptor must materialize a string URL')
+            const name = url
+            sends.push(name)
+            mark(`send:${name}`)
+            if (name === 'receipt') return undiciReceipt.promise
+            if (name === 'owner') return undiciOwnerResponse.promise
+            return Promise.resolve(
+              new UndiciResponse(name === 'correction-seed' ? overflow : null, {
+                status: name === 'correction-seed' ? 429 : name === 'guard-seed' ? 500 : 200,
+                headers: name === 'correction-seed' ? { 'content-type': 'application/json' } : {}
+              })
+            )
+          }
+          const planner =
+            family === 'native'
+              ? new Constructor<typeof fetch>(nativeTransport, options)
+              : new Constructor<typeof undiciFetch>(undiciTransport, options)
+          // Real receipts establish the first correction, or 99/100 guard history.
+          // The correction seed releases fully before the two sent peers start.
+          for (let i = 0; i < (safety === 'guard' ? 99 : safety === 'effective' ? 1 : 0); i++) {
+            const seed = planner.submit({
+              method: 'GET',
+              replay: noReplay,
+              prepare: () => ({
+                url: safety === 'guard' ? 'guard-seed' : 'correction-seed',
+                init: {}
+              }),
+              consume: () => 0
+            })
+            await Promise.allSettled([seed.result, seed.resourcesDone])
+            assert.equal(seed.snapshot().dispatchCalls, 1)
+          }
+          await clock.flush()
+          assert.equal(planner.snapshot().guardOpen, false)
+          if (safety === 'effective') assert.equal(planner.snapshot().effectiveParallelism, 2)
+          const peer = planner.submit({
+            method: 'GET',
+            replay: noReplay,
+            prepare: () => ({ url: 'receipt', init: {} }),
+            consume: () => 0
+          })
+          const owner =
+            safety === 'effective'
+              ? planner.submit({
+                  method: 'GET',
+                  replay: noReplay,
+                  prepare: () => ({ url: 'owner', init: {} }),
+                  consume: () => 0
+                })
+              : undefined
+          await clock.flush()
+          const sentBefore = sends.length
+          assert.equal(sends.at(-1), safety === 'effective' ? 'owner' : 'receipt')
+          if (owner) {
+            assert.equal(owner.snapshot().dispatchCalls, 1, 'ADDITIONAL_OWNER_ACTUALLY_SENT')
+            assert.equal(planner.snapshot().sentActive, 2)
+          }
+          let hooks = 0
+          let materialized = 0
+          let disposals = 0
+          const puts: ReturnType<typeof planner.submit>[] = []
+          const start = performance.now()
+          const handle = planner.submit({
+            method: 'PUT',
+            entityKey: 't84-target',
+            replay,
+            ...(safety === 'deadline' ? { deadlineMs: 100 } : {}),
+            prepare: ctx => {
+              ctx.onDispose(() => {
+                disposals++
+              })
+              return {
+                url: 'target',
+                init: {
+                  get body() {
+                    materialized++
+                    return 'payload'
+                  }
+                }
+              }
+            },
+            beforeDispatch: () => {
+              hooks++
+              mark('hook-entered')
+              assert.equal(materialized, 1, 'INIT_MATERIALIZED_BEFORE_HOOK')
+              return hook.promise
+            },
+            consume: () => 2
+          })
+          try {
+            await clock.flush()
+            assert.equal(hooks, 1)
+            assert.equal(handle.snapshot().phase, 'preparing')
+            if (boundary === 'hook') wake.arm()
+            hook.resolve(boundary === 'hook' ? { type: 'allow' } : { type: 'defer', delayMs: 50 })
+            await clock.flush()
+            assert.equal(handle.snapshot().phase, 'ready', 'ACTUAL_HOOK_FULLY_RESOLVED')
+            mark('hook-resolved-ready')
+            if (boundary === 'wait') {
+              wake.arm()
+              clock.tick(50)
+              mark('wait-expired')
+            }
+            assert.equal(wake.pending, true, 'ACTUAL_RESOLVED_WAKE_HELD')
+            assert.equal(sends.length, sentBefore)
+            wake.change(() => {
+              mark(`control:${safety}`)
+              if (safety === 'stop') planner.stop()
+              else if (safety === 'abort') handle.abort()
+              else if (safety === 'deadline') t.mock.method(performance, 'now', () => start + 100)
+              else {
+                const status = safety === 'effective' ? 429 : safety === 'guard' ? 500 : 200
+                const headers =
+                  safety === 'pause'
+                    ? { 'x-lognex-reset': '400' }
+                    : safety === 'pacing'
+                      ? {
+                          'x-ratelimit-limit': '10',
+                          'x-ratelimit-remaining': '0',
+                          'x-lognex-retry-timeinterval': '1000'
+                        }
+                      : safety === 'effective'
+                        ? { 'content-type': 'application/json' }
+                        : {}
+                receipt.resolve(
+                  new Response(safety === 'effective' ? overflow : null, { status, headers })
+                )
+                undiciReceipt.resolve(
+                  new UndiciResponse(safety === 'effective' ? overflow : null, { status, headers })
+                )
+              }
+            })
+            await clock.flush()
+            mark('control-processed')
+            const changedAt = performance.now()
+            if (safety === 'pause')
+              assert.equal(planner.snapshot().serverNotBefore, changedAt + 400)
+            if (safety === 'guard')
+              assert.equal(planner.snapshot().guardOpen, true, 'ACTUAL_100TH_RECEIPT_OPENS_GUARD')
+            if (safety === 'effective') {
+              await peer.resourcesDone
+              assert.equal(planner.snapshot().effectiveParallelism, 1)
+              assert.equal(
+                planner.snapshot().sentActive,
+                1,
+                'ADDITIONAL_SENT_OWNER_ALONE_FILLS_EFFECTIVE'
+              )
+              assert.equal(owner?.snapshot().outcome, 'pending')
+            }
+            assert.equal(sends.length, sentBefore, 'CONTROL_PROCESSED_BEFORE_ADMISSION')
+            wake.release()
+            await clock.flush()
+            mark('admission-rechecked')
+            assert.equal(
+              sends.length,
+              sentBefore,
+              'T84_FINAL_RECHECK_PREVENTS_ACTUAL_EXCESS_DISPATCH'
+            )
+            assert.equal(handle.snapshot().dispatchCalls, 0, 'BLOCKED_READY_HAS_NO_DISPATCH_CHARGE')
+            assert.equal(hooks, 1)
+            const terminal =
+              safety === 'stop' || safety === 'abort' || safety === 'deadline' || safety === 'guard'
+            if (terminal) {
+              await assert.rejects(handle.result, {
+                code:
+                  safety === 'stop'
+                    ? 'STOPPED'
+                    : safety === 'abort'
+                      ? 'ABORTED'
+                      : safety === 'deadline'
+                        ? 'DEADLINE'
+                        : 'GUARD_OPEN',
+                dispatchEntered: false
+              })
+              await handle.resourcesDone
+              await clock.advance(60001)
+              assert.equal(sends.length, sentBefore, 'PERMANENT_TERMINAL_CANNOT_RESURRECT')
+            } else {
+              // Re-deliver a real stale timer wake; the callback must stay once.
+              timers.callbacks.at(-1)?.()
+              await clock.flush()
+              assert.equal(sends.length, sentBefore)
+              if (safety === 'effective') {
+                ownerResponse.resolve(new Response())
+                undiciOwnerResponse.resolve(new UndiciResponse())
+                await owner?.resourcesDone
+                await clock.flush()
+              } else {
+                // At elapsed 0/50 the preserved linear formula yields 200/190ms.
+                const delay = safety === 'pause' ? 400 : boundary === 'hook' ? 200 : 190
+                await clock.advance(delay - 1)
+                assert.equal(sends.length, sentBefore, 'ACTUAL_SAFETY_MINUS_ONE_BLOCKS')
+                await clock.advance(1)
+              }
+              assert.equal(sends.length, sentBefore + 1, 'RESTORED_SAFETY_REACHES_ACTUAL_TRANSPORT')
+              assert.equal(sends.at(-1), 'target')
+              assert.equal((await handle.result).value, 2)
+              await handle.resourcesDone
+              assert.equal(handle.snapshot().dispatchCalls, 1)
+              // One actual target PUT leaves exactly 59 charges in the minute.
+              for (let i = 0; i < 60; i++) {
+                const put = planner.submit({
+                  method: 'PUT',
+                  entityKey: 't84-target',
+                  replay: noReplay,
+                  prepare: () => ({ url: 'put-budget', init: {} }),
+                  consume: () => 0
+                })
+                puts.push(put)
+                // The real pacing history remains active for these follow-up sends.
+                if (safety === 'pacing') await clock.advance(200)
+                if (i < 59)
+                  assert.equal((await put.result).value, 0, 'NO_PHANTOM_PUT_CHARGE_ON_BLOCKED_WAKE')
+                else await assert.rejects(put.result, { code: 'PUT_LIMIT', dispatchEntered: false })
+                await put.resourcesDone
+              }
+            }
+            assert.equal(hooks, 1, 'WAKES_NEVER_REPEAT_RESOLVED_HOOK')
+            assert.equal(materialized, 1)
+            assert.equal(disposals, 1)
+            assert.equal(handle.snapshot().attempts, 1)
+            assert.ok(trace.indexOf('hook-resolved-ready') < trace.indexOf(`control:${safety}`))
+            assert.ok(trace.indexOf('control-processed') < trace.indexOf('admission-rechecked'))
+            console.log(
+              'T84_CAUSAL',
+              JSON.stringify({ boundary, entry, family, safety, trace, eventTimes })
+            )
+          } finally {
+            hook.resolve({ type: 'allow' })
+            receipt.resolve(new Response())
+            undiciReceipt.resolve(new UndiciResponse())
+            ownerResponse.resolve(new Response())
+            undiciOwnerResponse.resolve(new UndiciResponse())
+            wake.release()
+            handle.abort()
+            peer.abort()
+            owner?.abort()
+            for (const put of puts) put.abort()
+            await Promise.allSettled(
+              [handle, peer, ...(owner ? [owner] : []), ...puts].flatMap(h => [
+                h.result,
+                h.resourcesDone
+              ])
+            )
+            await clock.flush()
+            assert.equal(planner.snapshot().leasedAttempts, 0)
+            assert.equal(planner.snapshot().sentActive, 0)
+            assert.equal(timers.active.size, 0)
+            assert.ok(timers.maximum() <= 1)
+          }
+        })
+      }
+    }
+  }
+}
