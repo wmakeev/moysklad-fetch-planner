@@ -1719,3 +1719,454 @@ test('Before retry Q1 sleep reservation rejects observer burst without hidden ba
     await Promise.allSettled([handle.result, handle.resourcesDone, ...rejected])
   }
 })
+
+// T22 circle-three reproducer: the second (subclass: third) read starts a
+// pending outer return assimilation. Only the fixture counts reads.
+for (const form of ['thenable', 'promise-subclass'] as const) {
+  for (const mode of ['normal', 'invalid', 'timeout', 'abort', 'stop', 'deadline'] as const) {
+    test(`T90 full chain beforeRetry ${form} ${mode} retains owning lifetime`, async t => {
+      const clock = createRuntime(t)
+      const timers = trackTimeouts(t)
+      const entered = deferred<undefined>()
+      const gate = deferred<undefined>()
+      const steps = Array.from({ length: 12 }, () => ({
+        entered: deferred<undefined>(),
+        release: deferred<undefined>()
+      }))
+      const materialized = deferred<undefined>()
+      let context: HookContext | undefined
+      let reads = 0
+      let hooks = 0
+      let prepares = 0
+      let childPrepares = 0
+      let siblingPrepares = 0
+      let disposals = 0
+      let deliveries = 0
+      let discards = 0
+      let uploadStops = 0
+      let registryClosed = false
+      let capturedBrand = false
+      let retrySchedules = 0
+      const inits: object[] = []
+      const bodies: object[] = []
+      const signals: AbortSignal[] = []
+      const dispatchContexts: HookContext[] = []
+      const payloads: string[] = []
+      const order: string[] = []
+      const retryBoundary: { resources: string; settlements: number; lease: number }[] = []
+      let settlements = 0
+      let resourceSettlements = 0
+      const sends: string[] = []
+      const events: unknown[] = []
+      const jobs: Promise<void>[] = []
+      const planner = new FetchPlanner<typeof fetch>(
+        (url, init) => {
+          assert.equal(typeof url, 'string')
+          if (typeof url !== 'string') throw new Error('T90 expects materialized string URL')
+          sends.push(url)
+          if (url === 'T90-private-target') {
+            assert.equal(init?.method, 'POST')
+            order.push(`dispatch${sends.filter(value => value === url).length}`)
+          }
+          return Promise.resolve(new Response('T90-private-value'))
+        },
+        { maxParallelLimit: 1 }
+      )
+      const children: ReturnType<typeof planner.submit>[] = []
+      const probes: {
+        stage: string
+        id: number
+        outcome: Promise<string>
+        lease: number
+        sent: number
+        resources: number
+        sibling: number
+      }[] = []
+      // Assertions stay outside callbacks: a callback assertion would be wrapped
+      // as HOOK_FAILED and could conceal the actual accepted nested submit.
+      const inspect = (stage: string) => {
+        const child = planner.submit({
+          method: 'GET',
+          replay,
+          prepare: () => {
+            childPrepares++
+            return { url: 'T90-private-child', init: {} }
+          },
+          consume: () => 2
+        })
+        children.push(child)
+        const outcome = child.result.then(
+          () => 'accepted',
+          (error: unknown) => (error instanceof OperationError ? error.code : 'unexpected-error')
+        )
+        const snapshot = planner.snapshot()
+        probes.push({
+          stage,
+          id: child.id,
+          outcome,
+          lease: snapshot.leasedAttempts,
+          sent: snapshot.sentActive,
+          resources: resourceSettlements,
+          sibling: siblingPrepares
+        })
+      }
+      const final: Decision = {
+        get type() {
+          inspect('final materialization')
+          materialized.resolve(undefined)
+          return 'allow' as const
+        },
+        ...(mode === 'invalid' ? { extra: 'T90-private-invalid' } : {})
+      }
+      const chain = (index: number): Decision => {
+        const step = steps[index]
+        if (!step) return final
+        const value: Decision = { type: 'allow' }
+        Object.setPrototypeOf(value, {
+          get then() {
+            inspect(`chain getter ${index}`)
+            return (resolve: (value: Decision) => void) => {
+              inspect(`chain job ${index}`)
+              step.entered.resolve(undefined)
+              jobs.push(
+                step.release.promise.then(() => {
+                  resolve(chain(index + 1))
+                })
+              )
+            }
+          }
+        })
+        return value
+      }
+      const stateful: Decision = { type: 'allow' }
+      Object.setPrototypeOf(stateful, {
+        get then() {
+          inspect(`stateful getter ${++reads}`)
+          if (reads !== (form === 'thenable' ? 2 : 3)) return undefined
+          return (resolve: (value: Decision) => void) => {
+            inspect('pending outer assimilation')
+            entered.resolve(undefined)
+            jobs.push(
+              gate.promise.then(() => {
+                resolve(chain(0))
+              })
+            )
+          }
+        }
+      })
+      const handle = planner.submit({
+        method: 'POST',
+        replay,
+        ...(mode === 'deadline' ? { deadlineMs: 800 } : {}),
+        prepare: ctx => {
+          prepares++
+          order.push(`prepare${ctx.attemptNumber}`)
+          signals.push(ctx.signal)
+          const body = new ReadableStream<Uint8Array>({
+            start(controller) {
+              controller.enqueue(new TextEncoder().encode('T90-private-body'))
+              controller.close()
+            }
+          })
+          bodies.push(body)
+          const init = { body, duplex: 'half' as const }
+          inits.push(init)
+          ctx.onDispose(async () => {
+            // This fixture owns no hidden producer work. Wait for its actual
+            // stream EOF; successful cleanup confirms the known upload work.
+            payloads.push(await new Response(body).text())
+            uploadStops++
+          })
+          ctx.onDispose(() => {
+            disposals++
+            if (ctx.attemptNumber === 1) registryClosed = true
+          })
+          return { url: 'T90-private-target', init }
+        },
+        beforeDispatch: ctx => {
+          dispatchContexts.push(ctx)
+          order.push(`beforeDispatch${ctx.attemptNumber}`)
+          return { type: 'allow' }
+        },
+        beforeRetry: ctx => {
+          hooks++
+          context = ctx
+          inspect('hook body')
+          if (form === 'promise-subclass') {
+            class HookPromise extends Promise<Decision> {}
+            return new HookPromise(resolve => {
+              resolve(stateful)
+            })
+          }
+          const wrapper: Decision = { type: 'allow' }
+          Object.defineProperty(wrapper, 'then', {
+            value: (resolve: (value: Decision) => void) => {
+              inspect('initial resolving thenable')
+              resolve(stateful)
+            }
+          })
+          return wrapper
+        },
+        consume: async (response, ctx) => {
+          const value = await response.text()
+          if (ctx.attemptNumber === 1) {
+            ctx.onDiscard(() => {
+              discards++
+            })
+            const failure = ctx.retryableReadFailure(new Error('T90-private-read'))
+            capturedBrand = failure instanceof ConsumeReadFailure
+            throw failure
+          }
+          deliveries++
+          return value
+        }
+      })
+      const result = handle.result.then(
+        value => value,
+        (error: unknown) => {
+          assert.ok(error instanceof OperationError)
+          return error
+        }
+      )
+      const resources = handle.resourcesDone.then(value => {
+        resourceSettlements++
+        return value
+      })
+      handle.observe(event => {
+        events.push(event)
+        if (event.type === 'retry-scheduled') {
+          retrySchedules++
+          retryBoundary.push({
+            resources: handle.snapshot().resources,
+            settlements: resourceSettlements,
+            lease: planner.snapshot().leasedAttempts
+          })
+        }
+        if (event.type === 'operation-settled') settlements++
+      })
+      const sibling = planner.submit({
+        method: 'GET',
+        replay,
+        prepare: () => {
+          siblingPrepares++
+          return { url: 'T90-private-sibling', init: {} }
+        },
+        consume: () => 3
+      })
+      const siblingResult = sibling.result.then(
+        value => value,
+        (error: unknown) => {
+          assert.ok(error instanceof OperationError)
+          return error
+        }
+      )
+      const assertProbes = async () => {
+        for (const probe of probes) {
+          assert.equal(probe.id, 0, `T90_NESTED_ACCEPTED: ${probe.stage}`)
+          assert.equal(await probe.outcome, 'REENTRANT_OPERATION', probe.stage)
+          assert.equal(probe.lease, 1, probe.stage)
+          assert.equal(probe.sent, 0, probe.stage)
+          assert.equal(probe.resources, 0, probe.stage)
+          assert.equal(probe.sibling, 0, probe.stage)
+        }
+        assert.equal(childPrepares, 0)
+      }
+      const assertPending = () => {
+        assert.equal(planner.snapshot().leasedAttempts, 1)
+        assert.equal(planner.snapshot().sentActive, 0)
+        assert.equal(handle.snapshot().resources, 'pending')
+        assert.equal(resourceSettlements, 0)
+        assert.equal(siblingPrepares, 0)
+        assert.equal(disposals, 1)
+        assert.equal(discards, 1)
+        assert.equal(uploadStops, 1)
+        assert.equal(registryClosed, true)
+        assert.equal(capturedBrand, true)
+        assert.deepEqual(sends, ['T90-private-target'])
+        assert.equal(prepares, 1)
+        assert.equal(deliveries, 0)
+      }
+      try {
+        await entered.promise
+        assert.equal(reads, form === 'thenable' ? 2 : 3, 'ORIGINAL_PENDING_STEP_ENTERED')
+        assert.equal(handle.snapshot().outcome, 'pending')
+        assert.ok(context)
+        assert.ok(Object.isFrozen(context))
+        assert.ok(Object.isFrozen(context.snapshot))
+        assert.equal(context.status, 200)
+        assert.equal(context.attemptNumber, 1)
+        assert.equal(context.dispatchCalls, 1)
+        assert.equal(context.snapshot.dispatchEntered, true)
+        assert.equal(context.snapshot.resources, 'pending')
+        assert.equal(context.signal.aborted, false)
+        assert.ok(sibling.id > 0, 'EXTERNAL_SIBLING_ACCEPTED')
+        assert.equal(planner.snapshot().queued, 1)
+        assert.equal(timers.delays.at(-1), mode === 'deadline' ? 800 : 1000)
+        assertPending()
+        await assertProbes()
+        const code =
+          mode === 'timeout'
+            ? 'HOOK_FAILED'
+            : mode === 'abort'
+              ? 'ABORTED'
+              : mode === 'stop'
+                ? 'STOPPED'
+                : mode === 'deadline'
+                  ? 'DEADLINE'
+                  : undefined
+        if (mode === 'abort') handle.abort('T90-private-abort')
+        else if (mode === 'stop') planner.stop('T90-private-stop')
+        else if (mode === 'timeout' || mode === 'deadline') {
+          await clock.advance(mode === 'timeout' ? 999 : 799)
+          assert.equal(handle.snapshot().outcome, 'pending')
+          assert.equal(context.signal.aborted, false)
+          await clock.advance(1)
+        }
+        let primary: unknown
+        if (code) {
+          primary = await result
+          assert.ok(primary instanceof OperationError)
+          assert.equal(primary.code, code)
+          assert.equal(primary.dispatchEntered, true)
+          assert.equal(primary.serverOutcome, 'http-response')
+          assert.equal(primary.status, 200)
+          assert.equal(context.signal.aborted, true)
+        }
+        assertPending()
+        gate.resolve(undefined)
+        for (const step of steps) {
+          await step.entered.promise
+          assertPending()
+          await assertProbes()
+          step.release.resolve(undefined)
+        }
+        await materialized.promise
+        await assertProbes()
+        if (mode === 'normal') {
+          await clock.flush()
+          assert.equal(handle.snapshot().phase, 'retry-wait')
+          assert.equal(resourceSettlements, 0)
+          assert.equal(handle.snapshot().resources, 'pending')
+          await clock.advance(3000)
+        }
+        const completed = await result
+        if (primary) assert.equal(completed, primary, 'LATE_ALLOW_PRESERVES_PRIMARY_FAILURE')
+        else if (mode === 'invalid') {
+          assert.ok(completed instanceof OperationError)
+          assert.equal(completed.code, 'HOOK_FAILED')
+          assert.equal(completed.serverOutcome, 'http-response')
+          assert.equal(completed.status, 200)
+          assert.equal(completed.dispatchEntered, true)
+          assert.ok(completed.cause instanceof OperationError)
+          assert.ok(completed.cause.cause instanceof TypeError)
+        } else {
+          assert.ok(!(completed instanceof Error))
+          assert.equal(completed.value, 'T90-private-value')
+          assert.equal(completed.status, 200)
+        }
+        await resources
+        await assertProbes()
+        const peer = await siblingResult
+        if (mode === 'stop') {
+          assert.ok(peer instanceof OperationError)
+          assert.equal(peer.code, 'STOPPED')
+        } else {
+          assert.ok(!(peer instanceof Error))
+          assert.equal(peer.value, 3)
+        }
+        await sibling.resourcesDone
+        assert.equal(siblingPrepares, mode === 'stop' ? 0 : 1)
+        assert.deepEqual(sends, [
+          'T90-private-target',
+          ...(mode === 'stop' ? [] : ['T90-private-sibling']),
+          ...(mode === 'normal' ? ['T90-private-target'] : [])
+        ])
+        assert.equal(handle.snapshot().dispatchCalls, mode === 'normal' ? 2 : 1)
+        assert.equal(handle.snapshot().attempts, mode === 'normal' ? 2 : 1)
+        assert.equal(deliveries, mode === 'normal' ? 1 : 0)
+        assert.equal(hooks, 1)
+        assert.equal(prepares, mode === 'normal' ? 2 : 1)
+        assert.equal(disposals, prepares)
+        assert.equal(uploadStops, prepares)
+        assert.equal(discards, 1)
+        assert.deepEqual(
+          payloads,
+          Array.from({ length: prepares }, () => 'T90-private-body')
+        )
+        assert.equal(dispatchContexts.length, prepares)
+        assert.equal(retrySchedules, mode === 'normal' ? 1 : 0)
+        assert.deepEqual(
+          retryBoundary,
+          mode === 'normal' ? [{ resources: 'pending', settlements: 0, lease: 0 }] : []
+        )
+        if (mode === 'normal') {
+          assert.notEqual(inits[0], inits[1])
+          assert.notEqual(bodies[0], bodies[1])
+          assert.notEqual(signals[0], signals[1])
+          assert.notEqual(dispatchContexts[0]?.signal, dispatchContexts[1]?.signal)
+          assert.notEqual(context.signal, signals[0])
+          assert.deepEqual(order, [
+            'prepare1',
+            'beforeDispatch1',
+            'dispatch1',
+            'prepare2',
+            'beforeDispatch2',
+            'dispatch2'
+          ])
+        }
+        assert.equal(settlements, 1)
+        assert.equal(resourceSettlements, 1)
+        assert.equal((await resources).resources, 'released')
+        assert.equal(planner.snapshot().stopped, mode === 'stop')
+        const stable = handle.snapshot()
+        await clock.advance(5000)
+        assert.deepEqual(handle.snapshot(), stable, 'NO_LATE_RESURRECTION')
+        assert.equal(await result, completed)
+        if (mode === 'stop') {
+          const stopped = planner.submit({
+            method: 'GET',
+            replay,
+            prepare: () => ({ url: '', init: {} }),
+            consume: () => 0
+          })
+          await assert.rejects(stopped.result, { code: 'STOPPED' })
+          await stopped.resourcesDone
+        }
+        assert.equal(JSON.stringify(events).includes('T90-private'), false)
+        assert.equal(probes.filter(probe => probe.stage.startsWith('chain getter')).length, 12)
+        assert.equal(probes.filter(probe => probe.stage.startsWith('chain job')).length, 12)
+        assert.equal(probes.filter(probe => probe.stage === 'final materialization').length, 1)
+        console.log(
+          'T90_CAUSAL',
+          JSON.stringify({
+            form,
+            mode,
+            reads,
+            stages: probes.map(probe => probe.stage),
+            sends,
+            settlements,
+            resourceSettlements,
+            disposals,
+            uploadStops,
+            discards,
+            order,
+            retryBoundary
+          })
+        )
+      } finally {
+        gate.resolve(undefined)
+        for (const step of steps) step.release.resolve(undefined)
+        handle.abort()
+        sibling.abort()
+        for (const child of children) child.abort()
+        await Promise.allSettled([result, resources, siblingResult, sibling.resourcesDone])
+        await Promise.all(jobs)
+        await Promise.allSettled(children.flatMap(child => [child.result, child.resourcesDone]))
+        assert.equal(planner.snapshot().leasedAttempts, 0)
+        assert.equal(planner.snapshot().sentActive, 0)
+        assert.equal(timers.active.size, 0)
+        assert.ok(timers.maximum() <= 1)
+      }
+    })
+  }
+}
