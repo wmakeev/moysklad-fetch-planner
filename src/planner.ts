@@ -75,7 +75,8 @@ function validateSpec(input: unknown): void {
     'consume',
     'replay',
     'deadlineMs',
-    'beforeDispatch'
+    'beforeDispatch',
+    'beforeRetry'
   ]
   if (Reflect.ownKeys(spec).some(key => typeof key !== 'string' || !allowed.includes(key)))
     throw invalid()
@@ -95,6 +96,8 @@ function validateSpec(input: unknown): void {
   )
     throw invalid()
   if (spec['beforeDispatch'] !== undefined && typeof spec['beforeDispatch'] !== 'function')
+    throw invalid()
+  if (spec['beforeRetry'] !== undefined && typeof spec['beforeRetry'] !== 'function')
     throw invalid()
   const replay = record(spec['replay'])
   if (
@@ -323,6 +326,7 @@ export class FetchPlanner<F extends Transport> implements Planner<Init<F>, Respo
       classificationWake: number | undefined
       hookNotBefore: number | undefined
       hookDeadline: number | undefined
+      hookController: AbortController | undefined
       hookWork: ReturnType<typeof runHook> | undefined
       token: ReturnType<Lease['trySend']>
       response: ResponseOf<F> | undefined
@@ -341,7 +345,9 @@ export class FetchPlanner<F extends Transport> implements Planner<Init<F>, Respo
             phase: snapshot.phase,
             operationId: snapshot.id,
             attemptNumber: snapshot.attempts,
-            dispatchEntered: currentAttempt?.token !== undefined,
+            dispatchEntered: currentAttempt?.hookController
+              ? snapshot.dispatchEntered
+              : currentAttempt?.token !== undefined,
             status: snapshot.status
           },
           cause
@@ -384,6 +390,7 @@ export class FetchPlanner<F extends Transport> implements Planner<Init<F>, Respo
               ? 'HOOK_FAILED'
               : undefined
       if (code && fail(code)) {
+        attempt?.hookController?.abort()
         attempt?.controller.abort()
         attempt?.classifier?.cancel()
         entry.releaseReady()
@@ -411,6 +418,7 @@ export class FetchPlanner<F extends Transport> implements Planner<Init<F>, Respo
           return
         }
         if (!fail(code, reason)) return
+        currentAttempt?.hookController?.abort(reason)
         currentAttempt?.controller.abort(reason)
         currentAttempt?.classifier?.cancel()
         entry.releaseReady()
@@ -432,6 +440,7 @@ export class FetchPlanner<F extends Transport> implements Planner<Init<F>, Respo
           classificationWake: undefined,
           hookNotBefore: undefined,
           hookDeadline: undefined,
+          hookController: undefined,
           hookWork: undefined,
           token: undefined,
           response: undefined
@@ -784,13 +793,15 @@ export class FetchPlanner<F extends Transport> implements Planner<Init<F>, Respo
           if (state.snapshot().resultCommitted)
             state.succeed(summary.resources === 'released' ? 'released' : 'failed', this.#stamp())
           attempt.token?.release()
-          attempt.lease.release()
+          if (spec.beforeRetry) attempt.token = undefined
+          // Preserve the accepted no-hook path; retry hooks retain physical ownership.
+          if (!spec.beforeRetry) attempt.lease.release()
           // Cleanup is physical: never retire this operation between attempts.
           let retryScheduled = false
           expire(monotonicNow())
           if (failure && state.snapshot().outcome === 'pending') {
             const now = monotonicNow()
-            const decision = retryDecision({
+            const retryFacts = {
               candidate: spec.replay.serverSafe && spec.replay.consumeSafe ? candidate : undefined,
               attempts: attempt.number,
               maxAttempts: this.#options.maxAttempts,
@@ -802,15 +813,84 @@ export class FetchPlanner<F extends Transport> implements Planner<Init<F>, Respo
               jitterFactor: 0.8 + Math.random() * 0.4,
               adaptiveNotBefore: this.#dispatchNotBefore(now, Math.random()),
               serverNotBefore: this.#pacing.serverNotBefore
-            })
+            }
+            let decision = retryDecision(retryFacts)
             // Random/clock sources may run user code: repeat terminal checks afterwards.
             expire(monotonicNow())
+            if (spec.beforeRetry)
+              decision = retryDecision({
+                ...retryFacts,
+                candidate:
+                  spec.replay.serverSafe && spec.replay.consumeSafe ? candidate : undefined,
+                stopped: this.#stopRequested
+              })
+            if (
+              spec.beforeRetry &&
+              decision.kind === 'eligible' &&
+              state.snapshot().outcome === 'pending' &&
+              !this.#stopRequested
+            ) {
+              // HTTP and its registry are physically closed. The hook has its own
+              // cancellation signal and owning barrier, never a reopened registry.
+              attempt.hookController = new AbortController()
+              attempt.hookDeadline = absoluteDeadline(monotonicNow(), this.#options.hookTimeoutMs)
+              try {
+                if (attempt.hookDeadline === undefined) fail('HOOK_FAILED')
+                else {
+                  this.#armTimer()
+                  attempt.hookWork = runHook(
+                    this.#context,
+                    spec.beforeRetry,
+                    {
+                      snapshot: state.snapshot(),
+                      signal: attempt.hookController.signal,
+                      attemptNumber: attempt.number,
+                      dispatchCalls: state.snapshot().dispatchCalls,
+                      ...(state.snapshot().status === undefined
+                        ? {}
+                        : { status: state.snapshot().status })
+                    },
+                    monotonicNow
+                  )
+                  const hook = await attempt.hookWork
+                  expire(monotonicNow())
+                  if (state.snapshot().outcome === 'pending') {
+                    if (hook.value.type === 'deny') fail('HOOK_DENIED', hook.value.code)
+                    // Retry defer is enabled with its floor/FIFO proof in T87.
+                    else if (hook.value.type !== 'allow') fail('HOOK_FAILED')
+                  }
+                }
+              } catch (cause) {
+                expire(monotonicNow())
+                fail('HOOK_FAILED', cause)
+              } finally {
+                expire(monotonicNow())
+                attempt.hookWork = undefined
+                attempt.hookDeadline = undefined
+                this.#armTimer()
+              }
+              // Reuse the original fallback sample/time: waiting for a hook does not
+              // restart backoff. New receipts can only increase the policy floor.
+              decision = retryDecision({
+                ...retryFacts,
+                candidate:
+                  spec.replay.serverSafe && spec.replay.consumeSafe ? candidate : undefined,
+                stopped: this.#stopRequested,
+                adaptiveNotBefore: Math.max(
+                  retryFacts.adaptiveNotBefore,
+                  this.#dispatchNotBefore(monotonicNow(), Math.random())
+                ),
+                serverNotBefore: this.#pacing.serverNotBefore
+              })
+              expire(monotonicNow())
+            }
             if (state.snapshot().outcome === 'pending') {
               if (this.#stopRequested) fail(this.#stopCode, this.#stopReason)
               else if (decision.kind === 'eligible') {
                 const nextReservation = this.#capacity.reserve(entry)
                 if (nextReservation) {
                   retryScheduled = true
+                  if (spec.beforeRetry) attempt.lease.release()
                   currentAttempt = undefined
                   reservation = nextReservation
                   retryNotBefore = decision.notBefore
@@ -822,6 +902,7 @@ export class FetchPlanner<F extends Transport> implements Planner<Init<F>, Respo
             }
           }
           if (!retryScheduled) {
+            if (spec.beforeRetry) attempt.lease.release()
             currentAttempt = undefined
             this.#active.delete(entry)
             state.settleResources(summary, this.#stamp())

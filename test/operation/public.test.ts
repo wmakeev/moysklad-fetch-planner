@@ -89,7 +89,6 @@ test('Unknown hooks and invalid specs fail with sentinel zero without dispatch',
     { ...base, deadlineMs: 1.5 },
     { ...base, beforeDispatch: 42 },
     { ...base, beforeRetry: 42 },
-    { ...base, beforeRetry: () => ({ type: 'allow' }) },
     { ...base, beforeUnknown: () => ({ type: 'allow' }) }
   ]
   for (const spec of invalid) {
@@ -224,5 +223,34 @@ for (const [name, Planner] of [
       assert.equal(context.dispatchCalls, 0)
       assert.equal(context.snapshot.dispatchEntered, false)
     }
+  })
+}
+
+for (const [name, Planner] of [
+  ['root', root.FetchPlanner],
+  ['deep', DeepPlanner]
+] as const) {
+  test(`Before retry configuration accepts ${name} without a candidate`, async () => {
+    let calls = 0
+    let hooks = 0
+    const planner = new Planner<typeof fetch>(() => {
+      calls++
+      return Promise.resolve(new Response('ok'))
+    })
+    const handle = planner.submit({
+      method: 'GET',
+      replay,
+      prepare: () => ({ url: '', init: {} }),
+      beforeRetry: () => {
+        hooks++
+        return { type: 'allow' }
+      },
+      consume: response => response.text()
+    })
+    assert.ok(handle.id > 0)
+    assert.equal((await handle.result).value, 'ok')
+    await handle.resourcesDone
+    assert.equal(calls, 1)
+    assert.equal(hooks, 0)
   })
 }
