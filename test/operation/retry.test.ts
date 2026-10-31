@@ -1,8 +1,10 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
+import { spawnSync } from 'node:child_process'
+import { readFileSync, writeFileSync, unlinkSync } from 'node:fs'
 import { setImmediate } from 'node:timers/promises'
 import { FetchPlanner, OperationError } from '../../src/index.js'
-import { createRuntime, deferred } from './helpers.js'
+import { createRuntime, deferred, trackTimeouts } from './helpers.js'
 import { FetchPlanner as DeepFetchPlanner } from '../../src/planner.js'
 import { fetch as UndiciFetch, Response as UndiciResponse } from 'undici'
 import { CallbackContext } from '../../src/callback-context.js'
@@ -884,6 +886,606 @@ test('Runtime fresh streams and init preserve one logical payload through retry'
     assert.notEqual(streams[0], streams[1])
     assert.notEqual(inits[0], inits[1])
     assert.deepEqual(order, ['prepare1', 'dispose1', 'prepare2', 'dispose2'])
+  } finally {
+    handle.abort()
+    await Promise.allSettled([handle.result, handle.resourcesDone])
+  }
+})
+
+for (const full of [false, true]) {
+  test(`Retry reservation follows physical cleanup and FIFO with queue full ${full}`, async t => {
+    const clock = createRuntime(t)
+    const timers = trackTimeouts(t)
+    const cleanup = deferred<undefined>()
+    const disposing = deferred<undefined>()
+    const owner = deferred<undefined>()
+    const trace: string[] = []
+    const planner = new FetchPlanner<typeof globalThis.fetch>(
+      url => Promise.resolve(new Response(null, { status: url === 'retry' ? 429 : 200 })),
+      { maxParallelLimit: 1, maxQueuedOperations: 2 }
+    )
+    const first = planner.submit({
+      method: 'POST',
+      replay,
+      prepare: ctx => {
+        trace.push(`retry${ctx.attemptNumber}`)
+        ctx.onDispose(async () => {
+          disposing.resolve(undefined)
+          await cleanup.promise
+        })
+        return { url: 'retry', init: {} }
+      },
+      consume: () => 'unexpected'
+    })
+    const handles = [first]
+    void first.result.catch(() => undefined)
+    const submit = (name: string) =>
+      planner.submit({
+        method: 'GET',
+        replay,
+        prepare: async () => {
+          trace.push(name)
+          await owner.promise
+          return { url: name, init: {} }
+        },
+        consume: () => name
+      })
+    try {
+      await disposing.promise
+      handles.push(submit('older'))
+      if (full) handles.push(submit('newer'))
+      assert.equal(planner.snapshot().queued, full ? 2 : 1)
+      assert.equal(planner.snapshot().leasedAttempts, 1)
+      assert.equal(planner.snapshot().sentActive, 1)
+      cleanup.resolve(undefined)
+      await clock.flush()
+      assert.equal(trace[1], 'older', 'OLDER_FIFO_PREPARES_BEFORE_RETRY')
+      if (full) {
+        await assert.rejects(first.result, { code: 'QUEUE_FULL' })
+        await first.resourcesDone
+        assert.equal(first.snapshot().attempts, 1)
+      } else {
+        assert.equal(first.snapshot().phase, 'retry-wait')
+        assert.equal(planner.snapshot().queued, 1, 'RETRY_WAIT_RESERVES_Q_BEFORE_ELIGIBILITY')
+        // One lease belongs to the gated sibling; the sleeping retry owns none.
+        assert.equal(planner.snapshot().leasedAttempts, 1)
+        assert.equal(planner.snapshot().sentActive, 0)
+        await clock.advance(2999)
+        assert.deepEqual(trace, ['retry1', 'older'], 'NO_PREPARE_BEFORE_NOT_BEFORE')
+        handles.push(submit('newer'))
+        await clock.advance(1)
+        assert.equal(planner.snapshot().queued, 2)
+      }
+      const s = planner.snapshot()
+      assert.ok(
+        handles.filter(h => h.snapshot().resources === 'pending').length <=
+          s.queued + s.leasedAttempts,
+        'N_LE_Q_PLUS_L'
+      )
+      assert.ok(s.sentActive <= s.leasedAttempts && s.leasedAttempts <= 1)
+      owner.resolve(undefined)
+      await clock.flush()
+      assert.deepEqual(
+        trace.slice(0, 3),
+        ['retry1', 'older', 'newer'],
+        'ELIGIBLE_RETRY_JOINS_READY_FIFO_TAIL'
+      )
+      first.abort()
+      await Promise.allSettled(handles.flatMap(h => [h.result, h.resourcesDone]))
+      assert.deepEqual(
+        [
+          planner.snapshot().queued,
+          planner.snapshot().leasedAttempts,
+          planner.snapshot().sentActive
+        ],
+        [0, 0, 0]
+      )
+      assert.equal(timers.active.size, 0)
+      assert.ok(timers.maximum() <= 1)
+    } finally {
+      cleanup.resolve(undefined)
+      owner.resolve(undefined)
+      handles.forEach(h => {
+        h.abort()
+      })
+      await Promise.allSettled(handles.flatMap(h => [h.result, h.resourcesDone]))
+    }
+  })
+}
+
+for (const interrupt of ['stop', 'abort', 'deadline'] as const) {
+  test(`Retry wait ${interrupt} clears reservation once without another attempt`, async t => {
+    const clock = createRuntime(t)
+    const timers = trackTimeouts(t)
+    let sends = 0
+    let prepares = 0
+    let settles = 0
+    let releases = 0
+    const planner = new DeepFetchPlanner<typeof globalThis.fetch>(
+      () => {
+        sends++
+        return Promise.resolve(new Response(null, { status: 429 }))
+      },
+      { maxParallelLimit: 1, maxQueuedOperations: 1, deadlineMs: 4000 }
+    )
+    const handle = planner.submit({
+      method: 'POST',
+      replay,
+      prepare: () => {
+        prepares++
+        return { url: '', init: {} }
+      },
+      consume: () => 0
+    })
+    void handle.result.catch(() => undefined)
+    handle.observe(e => {
+      if (e.type === 'operation-settled') settles++
+      if (e.type === 'resources-settled') releases++
+    })
+    try {
+      await clock.flush()
+      assert.equal(handle.snapshot().phase, 'retry-wait')
+      assert.equal(handle.snapshot().dispatchEntered, true, 'HISTORY_IS_NOT_CURRENT_SENT')
+      assert.deepEqual(
+        [
+          planner.snapshot().queued,
+          planner.snapshot().leasedAttempts,
+          planner.snapshot().sentActive
+        ],
+        [1, 0, 0],
+        'SLEEP_OWNS_ONLY_RESERVATION'
+      )
+      const reason = new Error('first reason')
+      if (interrupt === 'deadline') {
+        // Move the monotonic clock without delivering the scheduled retry timer.
+        t.mock.method(performance, 'now', () => 1_004_000)
+        timers.callbacks.at(-1)?.()
+      } else
+        for (let i = 0; i < 100; i++) {
+          if (interrupt === 'stop') planner.stop(i === 0 ? reason : i)
+          else handle.abort(i === 0 ? reason : i)
+        }
+      assert.equal(
+        handle.snapshot().failureCode,
+        interrupt === 'stop' ? 'STOPPED' : interrupt === 'abort' ? 'ABORTED' : 'DEADLINE',
+        'STOP_OR_ABORT_RETRY_WAIT_TERMINATES_SYNCHRONOUSLY'
+      )
+      await assert.rejects(
+        handle.result,
+        error =>
+          error instanceof OperationError &&
+          error.code ===
+            (interrupt === 'stop' ? 'STOPPED' : interrupt === 'abort' ? 'ABORTED' : 'DEADLINE') &&
+          (interrupt === 'deadline' || error.cause === reason)
+      )
+      await handle.resourcesDone
+      await clock.advance(10_000)
+      for (const callback of timers.callbacks.slice()) callback()
+      await clock.flush()
+      assert.deepEqual(
+        [prepares, sends, settles, releases],
+        [1, 1, 1, 1],
+        'NO_RETRY_AFTER_TERMINAL'
+      )
+      assert.equal(planner.snapshot().queued, 0)
+      assert.equal(timers.active.size, 0)
+      assert.ok(timers.maximum() <= 1)
+    } finally {
+      handle.abort()
+      planner.stop()
+      await Promise.allSettled([handle.result, handle.resourcesDone])
+    }
+  })
+}
+
+test('Retry observer burst reserves before spec access and completes full fanout', async t => {
+  const clock = createRuntime(t)
+  const seenA: number[] = []
+  const seenB: number[] = []
+  const handles: ReturnType<FetchPlanner<typeof globalThis.fetch>['submit']>[] = []
+  const measurements: number[][] = []
+  let copies = 0
+  let once = false
+  const planner = new FetchPlanner<typeof globalThis.fetch>(
+    () => Promise.resolve(new Response(null, { status: 429 })),
+    { maxParallelLimit: 1, maxQueuedOperations: 2 }
+  )
+  planner.observe(e => {
+    seenA.push(e.sequence)
+    if (e.type !== 'retry-scheduled' || once) return
+    once = true
+    for (let i = 0; i < 100; i++) {
+      handles.push(
+        planner.submit({
+          get method(): 'GET' {
+            copies++
+            return 'GET'
+          },
+          replay,
+          prepare: () => ({ url: '', init: {} }),
+          consume: () => 0
+        })
+      )
+    }
+    measurements.push([planner.snapshot().queued, copies, handles.filter(h => h.id !== 0).length])
+    for (let i = 0; i < 100; i++) planner.stop('first')
+  })
+  planner.observe(e => {
+    seenB.push(e.sequence)
+  })
+  const root = planner.submit({
+    method: 'POST',
+    replay,
+    prepare: () => ({ url: '', init: {} }),
+    consume: () => 0
+  })
+  try {
+    await clock.flush()
+    await Promise.allSettled([root, ...handles].flatMap(h => [h.result, h.resourcesDone]))
+    assert.deepEqual(measurements, [[2, 1, 1]], 'RETRY_RESERVATION_BOUNDS_OBSERVER_SPEC_RETENTION')
+    assert.equal(handles.filter(h => h.snapshot().failureCode === 'QUEUE_FULL').length, 99)
+    assert.equal(
+      root.snapshot().failureCode,
+      'STOPPED',
+      'STOP_USES_CURRENT_ATTEMPT_NOT_DISPATCH_HISTORY'
+    )
+    assert.deepEqual(seenA, seenB, 'RETRY_FULL_FANOUT_BEFORE_COMMANDS')
+    assert.deepEqual(
+      [planner.snapshot().queued, planner.snapshot().leasedAttempts, planner.snapshot().sentActive],
+      [0, 0, 0]
+    )
+  } finally {
+    planner.stop()
+    root.abort()
+    handles.forEach(h => {
+      h.abort()
+    })
+    await Promise.allSettled([root, ...handles].flatMap(h => [h.result, h.resourcesDone]))
+  }
+})
+
+for (const status of [200, 429]) {
+  test(`Stop sent POST status ${status} keeps current work and prohibits retries`, async t => {
+    const clock = createRuntime(t)
+    const timers = trackTimeouts(t)
+    const receipt = deferred<Response>()
+    const cancel = deferred<undefined>()
+    const disposing = deferred<undefined>()
+    const cleanup = deferred<undefined>()
+    let signal: AbortSignal | undefined
+    let sends = 0
+    const planner = new FetchPlanner<typeof globalThis.fetch>(() => {
+      sends++
+      return receipt.promise
+    })
+    const handle = planner.submit({
+      method: 'POST',
+      replay,
+      prepare: ctx => {
+        signal = ctx.signal
+        ctx.onDispose(async () => {
+          disposing.resolve(undefined)
+          await cleanup.promise
+        })
+        return { url: '', init: {} }
+      },
+      consume: () => 'complete'
+    })
+    void handle.result.catch(() => undefined)
+    try {
+      await clock.flush()
+      receipt.resolve(
+        new Response(
+          status === 429 ? new ReadableStream<Uint8Array>({ cancel: () => cancel.promise }) : null,
+          { status, headers: { 'content-type': 'application/json' } }
+        )
+      )
+      await clock.flush()
+      if (status === 429) assert.equal(handle.snapshot().phase, 'classifying')
+      planner.stop('first')
+      planner.stop('ignored')
+      assert.equal(signal?.aborted, false)
+      if (status === 429) await clock.advance(250)
+      await disposing.promise
+      assert.equal(planner.snapshot().leasedAttempts, 1)
+      assert.equal(planner.snapshot().sentActive, 1)
+      cleanup.resolve(undefined)
+      cancel.resolve(undefined)
+      if (status === 429) await assert.rejects(handle.result, { code: 'STOPPED', cause: 'first' })
+      else assert.equal((await handle.result).value, 'complete')
+      await handle.resourcesDone
+      await clock.advance(10_000)
+      assert.equal(sends, 1)
+      assert.equal(handle.snapshot().attempts, 1)
+      assert.equal(timers.active.size, 0)
+      assert.ok(timers.maximum() <= 1)
+    } finally {
+      receipt.resolve(new Response())
+      cancel.resolve(undefined)
+      cleanup.resolve(undefined)
+      handle.abort()
+      await Promise.allSettled([handle.result, handle.resourcesDone])
+    }
+  })
+}
+
+test('Retry finite strict child preserves real admission deadline and exits naturally', () => {
+  const child = spawnSync(
+    process.execPath,
+    [
+      '--unhandled-rejections=strict',
+      '--input-type=module',
+      '-e',
+      `
+import assert from 'node:assert/strict';
+import {FetchPlanner} from ${JSON.stringify(new URL('../../src/index.js', import.meta.url).href)};
+const watchdog=setTimeout(()=>{throw new Error('retry child leaked')},2000);
+let release; const gate=new Promise(r=>{release=r}); let attempts=0,sends=0;
+const start=performance.now();
+const p=new FetchPlanner(()=>{sends++;throw new TypeError('transport')},{deadlineMs:80,attemptTimeoutMs:1000});
+const h=p.submit({method:'POST',replay:{serverSafe:true,consumeSafe:true},prepare:async()=>{
+ attempts++; if(attempts===2)await gate;return {url:'',init:{}};
+},consume:()=>0});
+try{
+ await assert.rejects(h.result,{code:'DEADLINE'});
+ assert.equal(attempts,2);assert.equal(sends,1);assert.equal(p.snapshot().leasedAttempts,1);
+ assert.ok(performance.now()-start>=70,'REAL_DEADLINE_NOT_EARLY');
+ release();await h.resourcesDone;
+ assert.deepEqual([p.snapshot().queued,p.snapshot().leasedAttempts,p.snapshot().sentActive],[0,0,0]);
+ console.log('PASS retry real deadline, natural exit');
+}finally{release();h.abort();await Promise.allSettled([h.result,h.resourcesDone]);clearTimeout(watchdog)}
+`
+    ],
+    { encoding: 'utf8', timeout: 5000 }
+  )
+  assert.ifError(child.error)
+  assert.equal(child.signal, null)
+  assert.equal(child.status, 0, child.stdout + child.stderr)
+  assert.match(child.stdout, /PASS retry real deadline, natural exit/)
+})
+
+test('Retry default budget exhausts at three preparations without resetting deadline', async t => {
+  const clock = createRuntime(t)
+  let sends = 0
+  let prepares = 0
+  const planner = new FetchPlanner<typeof globalThis.fetch>(() => {
+    sends++
+    throw new TypeError('transport')
+  })
+  const handle = planner.submit({
+    method: 'GET',
+    replay,
+    prepare: () => {
+      prepares++
+      return { url: '', init: {} }
+    },
+    consume: () => 0
+  })
+  void handle.result.catch(() => undefined)
+  try {
+    await clock.flush()
+    await clock.advance(1)
+    await clock.advance(1)
+    await assert.rejects(handle.result, { code: 'TRANSPORT_FAILED', attemptNumber: 3 })
+    await handle.resourcesDone
+    await clock.advance(10_000)
+    assert.deepEqual([prepares, sends], [3, 3])
+  } finally {
+    handle.abort()
+    await Promise.allSettled([handle.result, handle.resourcesDone])
+  }
+})
+
+test('Retry eligibility wakes prepare but final safety recheck still rejects expired work', async t => {
+  const clock = createRuntime(t)
+  const timers = trackTimeouts(t)
+  const prepare = deferred<undefined>()
+  let sends = 0
+  let prepares = 0
+  const planner = new FetchPlanner<typeof globalThis.fetch>(
+    () => {
+      sends++
+      throw new TypeError('transport')
+    },
+    { deadlineMs: 100 }
+  )
+  const handle = planner.submit({
+    method: 'GET',
+    replay,
+    prepare: async () => {
+      prepares++
+      if (prepares === 2) await prepare.promise
+      return { url: '', init: {} }
+    },
+    consume: () => 0
+  })
+  void handle.result.catch(() => undefined)
+  try {
+    await clock.flush()
+    await clock.advance(1)
+    assert.equal(prepares, 2)
+    // The deadline expires while the retry's preparation owns a lease. Deliver no timer.
+    t.mock.method(performance, 'now', () => 1_000_100)
+    prepare.resolve(undefined)
+    await clock.flush()
+    await assert.rejects(handle.result, { code: 'DEADLINE' })
+    await handle.resourcesDone
+    assert.equal(sends, 1, 'RETRY_WAIT_IS_NOT_DISPATCH_PERMIT')
+    assert.equal(planner.snapshot().leasedAttempts, 0)
+    assert.equal(timers.active.size, 0)
+  } finally {
+    prepare.resolve(undefined)
+    handle.abort()
+    await Promise.allSettled([handle.result, handle.resourcesDone])
+  }
+})
+
+test('Retry finite collector bounds active specs and coalesced commands before observer drain', () => {
+  const source = readFileSync(new URL('../../src/planner.js', import.meta.url), 'utf8')
+  const fixture = new URL('../../src/planner-t69-collector.js', import.meta.url)
+  const anchor = '    snapshot() {'
+  assert.equal(source.split(anchor).length, 2, 'EXACT_COLLECTOR_ANCHOR')
+  const instrumented = source.replace(
+    anchor,
+    `    t69() { return {active:this.#active.size, commands:this.commands.length, ...this.#capacity.snapshot(), diagnostics:this.observation.diagnostics.snapshot()}; }\n${anchor}`
+  )
+  try {
+    writeFileSync(fixture, instrumented)
+    const child = spawnSync(
+      process.execPath,
+      [
+        '--unhandled-rejections=strict',
+        '--input-type=module',
+        '-e',
+        `
+import assert from 'node:assert/strict';
+import {setImmediate} from 'node:timers/promises';
+import {FetchPlanner} from ${JSON.stringify(fixture.href)};
+const handles=[], samples=[],a=[],b=[];let copies=0,prepares=0,once=false;
+const p=new FetchPlanner(()=>Promise.resolve(new Response(null,{status:429})),{maxParallelLimit:1,maxQueuedOperations:2});
+const spec=()=>({get method(){copies++;return 'POST'},replay:{serverSafe:true,consumeSafe:true},prepare:()=>{prepares++;return {url:'',init:{}}},consume:()=>0});
+p.observe(e=>{a.push(e.sequence);if(e.type==='retry-scheduled'&&!once){once=true;
+ samples.push(p.t69());
+ for(let i=0;i<1000;i++)handles.push(p.submit(spec()));
+ samples.push(p.t69());
+ for(let i=0;i<1000;i++){p.stop('first');root.abort('abort-first')}
+ samples.push(p.t69());
+}});
+p.observe(e=>b.push(e.sequence));
+const root=p.submit(spec());
+try{
+ await setImmediate();
+ assert.equal(once,true);
+ assert.deepEqual(samples.map(s=>[s.active,s.queued,s.leasedAttempts,s.sentActive,s.commands]),[[1,1,0,0,0],[2,2,0,0,1],[2,2,0,0,3]],'RETRY_ACTIVE_SPEC_COMMAND_BOUNDS');
+ assert.equal(copies,2,'NO_RETAINED_REJECTED_SPEC_ACCESS');
+ assert.equal(handles.filter(h=>h.id===0).length,999);
+ await Promise.allSettled([root,...handles].flatMap(h=>[h.result,h.resourcesDone]));
+ assert.deepEqual(a,b,'FULL_FANOUT');assert.equal(prepares,1);
+ const final=p.t69();assert.deepEqual([final.active,final.queued,final.leasedAttempts,final.sentActive,final.commands],[0,0,0,0,0]);
+ assert.equal(final.diagnostics.OBSERVER_FAILED,0);
+ console.log(JSON.stringify({samples,final,copies,prepares}));
+}finally{p.stop();root.abort();for(const h of handles)h.abort();await Promise.allSettled([root,...handles].flatMap(h=>[h.result,h.resourcesDone]))}
+let release,entered;
+const cleanup=new Promise(r=>{release=r}),disposing=new Promise(r=>{entered=r});
+const full=new FetchPlanner(()=>Promise.resolve(new Response(null,{status:429})),{maxParallelLimit:1,maxQueuedOperations:1});
+const retry=full.submit({...spec(),prepare:ctx=>{ctx.onDispose(()=>{entered();return cleanup});return {url:'',init:{}}}});
+void retry.result.catch(()=>{});
+let queued;
+try{
+ await disposing;
+ queued=full.submit({...spec(),replay:{serverSafe:false,consumeSafe:false}});
+ release();await assert.rejects(retry.result,{code:'QUEUE_FULL'});await retry.resourcesDone;
+ await Promise.allSettled([queued.result,queued.resourcesDone]);
+ const final=full.t69();
+ assert.deepEqual([final.active,final.queued,final.leasedAttempts,final.sentActive,final.commands],[0,0,0,0,0],'FULL_RETRY_RETAINS_NO_SPEC_OR_BACKLOG');
+ console.log('QUEUE_FULL_COLLECTOR',JSON.stringify(final));
+}finally{release();full.stop();retry.abort();queued?.abort();await Promise.allSettled([retry.result,retry.resourcesDone,queued?.result,queued?.resourcesDone])}
+`
+      ],
+      { encoding: 'utf8', timeout: 5000 }
+    )
+    assert.ifError(child.error)
+    assert.equal(child.signal, null)
+    assert.equal(child.status, 0, child.stdout + child.stderr)
+    console.log('T69_COLLECTOR', child.stdout.trim())
+  } finally {
+    unlinkSync(fixture)
+  }
+})
+
+for (const zeroHints of [false, true]) {
+  test(`Retry actual 429 positive fallback and ordinal persist with zero hints ${zeroHints}`, async t => {
+    const clock = createRuntime(t)
+    const timers = trackTimeouts(t)
+    let sends = 0
+    let prepares = 0
+    const planner = new FetchPlanner<typeof globalThis.fetch>(() => {
+      sends++
+      return Promise.resolve(
+        new Response(null, {
+          status: 429,
+          headers: zeroHints
+            ? { 'x-lognex-retry-after': '0', 'x-lognex-reset': '0', 'retry-after': '0' }
+            : {}
+        })
+      )
+    })
+    const handle = planner.submit({
+      method: 'GET',
+      replay,
+      prepare: () => {
+        prepares++
+        return { url: '', init: {} }
+      },
+      consume: () => 0
+    })
+    void handle.result.catch(() => undefined)
+    try {
+      await clock.flush()
+      assert.equal(handle.snapshot().phase, 'retry-wait')
+      const stale = timers.callbacks.at(-1)
+      await clock.advance(2999)
+      stale?.()
+      await clock.flush()
+      assert.equal(sends, 1, 'STALE_WAKE_CANNOT_SHORTEN_FALLBACK')
+      assert.equal(planner.snapshot().leasedAttempts, 0)
+      await clock.advance(1)
+      assert.equal(sends, 2)
+      assert.equal(handle.snapshot().phase, 'retry-wait')
+      await clock.advance(5999)
+      assert.equal(sends, 2, 'SECOND_429_ORDINAL_NOT_RESET')
+      await clock.advance(1)
+      await assert.rejects(handle.result, { code: 'HTTP_FAILED', attemptNumber: 3 })
+      await handle.resourcesDone
+      assert.deepEqual([prepares, sends], [3, 3])
+      assert.equal(timers.active.size, 0)
+      assert.ok(timers.maximum() <= 1)
+      assert.ok(timers.delays.every(delay => delay >= 0 && delay <= 2_147_483_647))
+    } finally {
+      handle.abort()
+      await Promise.allSettled([handle.result, handle.resourcesDone])
+    }
+  })
+}
+
+test('Retry PUT attempts charge the same entity guard without globally stopping another key', async t => {
+  const clock = createRuntime(t)
+  let sends = 0
+  const planner = new FetchPlanner<typeof globalThis.fetch>(
+    url => {
+      sends++
+      if (url === 'first') throw new TypeError('transport')
+      return Promise.resolve(new Response())
+    },
+    { entityPutPerMinuteLimit: 2 }
+  )
+  const submit = (entityKey: string) =>
+    planner.submit({
+      method: 'PUT',
+      entityKey,
+      replay,
+      prepare: () => ({ url: entityKey, init: {} }),
+      consume: () => 'complete'
+    })
+  const handle = submit('first')
+  void handle.result.catch(() => undefined)
+  try {
+    await clock.flush()
+    await clock.advance(1)
+    await clock.advance(1)
+    await assert.rejects(handle.result, { code: 'PUT_LIMIT', attemptNumber: 3 })
+    await handle.resourcesDone
+    assert.equal(sends, 2, 'EACH_RETRY_CHARGES_ENTITY_PUT')
+    assert.equal(planner.snapshot().stopped, false)
+    const sibling = submit('second')
+    try {
+      assert.equal((await sibling.result).value, 'complete')
+      await sibling.resourcesDone
+    } finally {
+      sibling.abort()
+      await Promise.allSettled([sibling.result, sibling.resourcesDone])
+    }
+    assert.equal(sends, 3)
   } finally {
     handle.abort()
     await Promise.allSettled([handle.result, handle.resourcesDone])
