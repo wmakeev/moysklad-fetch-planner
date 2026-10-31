@@ -2,7 +2,9 @@ import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { setImmediate } from 'node:timers/promises'
 import { FetchPlanner, OperationError } from '../../src/index.js'
-import { deferred } from './helpers.js'
+import { createRuntime, deferred } from './helpers.js'
+import { FetchPlanner as DeepFetchPlanner } from '../../src/planner.js'
+import { fetch as UndiciFetch, Response as UndiciResponse } from 'undici'
 import { CallbackContext } from '../../src/callback-context.js'
 import { ConsumeReadFailure, type FailureCode } from '../../src/operation-types.js'
 import { parseResponsePolicy } from '../../src/response-policy.js'
@@ -498,6 +500,392 @@ test('Single attempt keeps current send and guarded value through consume and cl
   } finally {
     consumeGate.resolve(undefined)
     disposeGate.resolve(undefined)
+    await Promise.allSettled([handle.result, handle.resourcesDone])
+  }
+})
+
+for (const [entry, Constructor] of [
+  ['root', FetchPlanner],
+  ['deep', DeepFetchPlanner]
+] as const) {
+  for (const first of ['known-work', 'finalization'] as const) {
+    test(`Runtime safe429 waits for known work AND finalization ${entry} release ${first} first`, async t => {
+      const runtime = createRuntime(t)
+      const knownWork = deferred<undefined>()
+      const finalization = deferred<undefined>()
+      const disposing = deferred<undefined>()
+      const signals: AbortSignal[] = []
+      let prepares = 0
+      let sends = 0
+      let settled = false
+      let resourcesSettled = false
+      const consumed: number[] = []
+      const planner = new Constructor<typeof globalThis.fetch>(
+        () => {
+          sends++
+          return Promise.resolve(
+            sends === 1
+              ? new Response(new ReadableStream<Uint8Array>({ cancel: () => knownWork.promise }), {
+                  status: 429
+                })
+              : new Response('complete')
+          )
+        },
+        { maxParallelLimit: 1 }
+      )
+      const handle = planner.submit({
+        method: 'POST',
+        replay,
+        prepare: ctx => {
+          prepares++
+          signals.push(ctx.signal)
+          assert.equal(ctx.operationId, handle.id)
+          assert.equal(ctx.attemptNumber, prepares)
+          assert.equal(handle.snapshot().status, undefined, 'FRESH_ATTEMPT_CLEARS_STATUS')
+          if (prepares === 1)
+            ctx.onDispose(async () => {
+              disposing.resolve(undefined)
+              await finalization.promise
+            })
+          return { url: '', init: { body: 'same logical payload' } }
+        },
+        consume: async response => {
+          consumed.push(response.status)
+          return await response.text()
+        }
+      })
+      void handle.result.then(
+        () => {
+          settled = true
+        },
+        () => {
+          settled = true
+        }
+      )
+      void handle.resourcesDone.then(() => {
+        resourcesSettled = true
+      })
+      try {
+        await disposing.promise
+        await runtime.flush()
+        assert.equal(settled, false, 'SAFE429_RESULT_PENDING_BEFORE_KNOWN_WORK')
+        assert.equal(prepares, 1, 'NO_RETRY_BEFORE_KNOWN_WORK')
+        assert.equal(planner.snapshot().sentActive, 1, 'PENDING_WORK_RETAINS_SENT')
+        assert.equal(planner.snapshot().leasedAttempts, 1, 'PENDING_WORK_RETAINS_LEASE')
+        if (first === 'known-work') knownWork.resolve(undefined)
+        else finalization.resolve(undefined)
+        await runtime.flush()
+        assert.equal(settled, false, 'SAFE429_RESULT_PENDING_BEFORE_SECOND_BARRIER')
+        assert.equal(prepares, 1, 'NO_RETRY_BEFORE_SECOND_BARRIER')
+        assert.equal(resourcesSettled, false)
+        assert.equal(planner.snapshot().sentActive, 1, 'SECOND_BARRIER_RETAINS_SENT')
+        assert.equal(planner.snapshot().leasedAttempts, 1, 'SECOND_BARRIER_RETAINS_LEASE')
+        finalization.resolve(undefined)
+        knownWork.resolve(undefined)
+        await runtime.flush()
+        await runtime.advance(3601)
+        assert.equal(sends, 2, 'SAFE429_DISPATCH_1_MUST_BECOME_2')
+        assert.equal((await handle.result).value, 'complete')
+        assert.deepEqual(await handle.resourcesDone, { resources: 'released' })
+        assert.equal(signals.length, 2)
+        assert.notEqual(signals[0], signals[1], 'FRESH_CONTROLLER')
+        assert.deepEqual(consumed, [200])
+        assert.equal(handle.snapshot().attempts, 2)
+        assert.equal(handle.snapshot().dispatchCalls, 2)
+      } finally {
+        knownWork.resolve(undefined)
+        finalization.resolve(undefined)
+        handle.abort()
+        await Promise.allSettled([handle.result, handle.resourcesDone])
+      }
+    })
+  }
+  for (const origin of ['branded', 'transport'] as const) {
+    test(`Runtime ${origin} dispatches fresh attempt ${entry}`, async t => {
+      const runtime = createRuntime(t)
+      let sends = 0
+      let prepares = 0
+      const order: string[] = []
+      const planner = new Constructor<typeof globalThis.fetch>(() => {
+        sends++
+        if (origin === 'transport' && sends === 1) throw new TypeError('transport')
+        return Promise.resolve(new Response('complete'))
+      })
+      const handle = planner.submit({
+        method: 'GET',
+        replay,
+        prepare: ctx => {
+          prepares++
+          order.push(`prepare${prepares}`)
+          ctx.onDispose(() => {
+            order.push(`dispose${ctx.attemptNumber}`)
+          })
+          return { url: '', init: {} }
+        },
+        consume: async (response, ctx) => {
+          await response.text()
+          if (ctx.attemptNumber === 1) {
+            ctx.onDiscard(() => {
+              order.push('discard1')
+            })
+            throw ctx.retryableReadFailure(new TypeError('read'))
+          }
+          return 'complete'
+        }
+      })
+      try {
+        await runtime.flush()
+        await runtime.advance(10)
+        assert.equal(sends, 2, 'RETRY_DISPATCH_1_MUST_BECOME_2')
+        assert.equal((await handle.result).value, 'complete')
+        await handle.resourcesDone
+        assert.equal(prepares, 2)
+        assert.ok(order.indexOf('dispose1') < order.indexOf('prepare2'))
+        if (origin === 'branded') assert.ok(order.indexOf('discard1') < order.indexOf('dispose1'))
+      } finally {
+        handle.abort()
+        await Promise.allSettled([handle.result, handle.resourcesDone])
+      }
+    })
+  }
+  for (const origin of ['branded', 'transport', '429'] as const) {
+    test(`Runtime undici ${origin} retry ${entry}`, async t => {
+      const runtime = createRuntime(t)
+      let sends = 0
+      const planner = new Constructor<typeof UndiciFetch>(() => {
+        sends++
+        if (origin === 'transport' && sends === 1) throw new TypeError('transport')
+        return Promise.resolve(
+          new UndiciResponse('complete', { status: origin === '429' && sends === 1 ? 429 : 200 })
+        )
+      })
+      const handle = planner.submit({
+        method: 'GET',
+        replay,
+        prepare: () => ({ url: '', init: {} }),
+        consume: async (response, ctx) => {
+          await response.text()
+          if (ctx.attemptNumber === 1 && origin === 'branded')
+            throw ctx.retryableReadFailure('read')
+          return 'complete'
+        }
+      })
+      try {
+        await runtime.flush()
+        await runtime.advance(origin === '429' ? 3601 : 10)
+        assert.equal(sends, 2, 'UNDICI_RETRY_DISPATCH_1_MUST_BECOME_2')
+        assert.equal((await handle.result).value, 'complete')
+      } finally {
+        handle.abort()
+        await Promise.allSettled([handle.result, handle.resourcesDone])
+      }
+    })
+  }
+}
+
+for (const mode of ['thenable', 'subclass', 'stateful'] as const) {
+  test(`Runtime active branded ${mode} rejection is captured before guard closes`, async t => {
+    const runtime = createRuntime(t)
+    let sends = 0
+    let expired: (() => Error) | undefined
+    const planner = new FetchPlanner<typeof globalThis.fetch>(() => {
+      sends++
+      return Promise.resolve(new Response())
+    })
+    const handle = planner.submit({
+      method: 'GET',
+      replay,
+      prepare: () => ({ url: '', init: {} }),
+      consume: (_response, ctx) => {
+        if (ctx.attemptNumber > 1) {
+          assert.throws(() => expired?.(), { code: 'INVALID_ARGUMENT' })
+          return 'complete'
+        }
+        expired = () => ctx.retryableReadFailure('escaped')
+        const rejectBrand = () => ctx.retryableReadFailure('active')
+        if (mode === 'subclass') {
+          class ReadPromise extends Promise<string> {
+            override then<A = string, B = never>(): Promise<A | B> {
+              throw rejectBrand()
+            }
+          }
+          return new ReadPromise(resolve => {
+            resolve('read')
+          })
+        }
+        let reads = 0
+        const value: PromiseLike<string> = {
+          then: (fulfilled, rejected) =>
+            Promise.reject<string>(rejectBrand()).then(fulfilled, rejected)
+        }
+        Object.defineProperty(value, 'then', {
+          get() {
+            reads++
+            if (mode === 'stateful' && reads === 1) return undefined
+            return (_resolve: (value: string) => void, reject: (reason: unknown) => void) => {
+              reject(rejectBrand())
+            }
+          }
+        })
+        // Descriptor preserves the public Promise return shape while hostile getters
+        // deliberately exercise the runtime assimilation protocol.
+        return new Promise<string>(resolve => {
+          resolve(value)
+        })
+      }
+    })
+    try {
+      await runtime.flush()
+      await runtime.advance(10)
+      assert.equal(sends, 2, 'ACTIVE_ASSIMILATION_BRAND_MUST_RETRY')
+      assert.equal((await handle.result).value, 'complete')
+    } finally {
+      handle.abort()
+      await Promise.allSettled([handle.result, handle.resourcesDone])
+    }
+  })
+}
+
+for (const mode of [
+  'unsafe',
+  'failed-cleanup',
+  'unknown-cleanup',
+  'foreign-brand',
+  'max-one',
+  'non2xx'
+] as const) {
+  test(`Runtime ${mode} branded failure remains terminal with original HTTP facts`, async t => {
+    const runtime = createRuntime(t)
+    const cause = new Error('read cause')
+    let sends = 0
+    let reader: ReadableStreamDefaultReader<Uint8Array> | undefined
+    const body = new ReadableStream<Uint8Array>()
+    const planner = new FetchPlanner<typeof globalThis.fetch>(
+      () => {
+        sends++
+        return Promise.resolve(
+          new Response(mode === 'unknown-cleanup' ? body : null, {
+            status: mode === 'non2xx' ? 412 : 200
+          })
+        )
+      },
+      { maxAttempts: mode === 'max-one' ? 1 : 3 }
+    )
+    let primary: Error | undefined
+    const handle = planner.submit({
+      method: 'POST',
+      replay: mode === 'unsafe' ? { serverSafe: false, consumeSafe: true } : replay,
+      prepare: ctx => {
+        if (mode === 'failed-cleanup')
+          ctx.onDispose(() => {
+            throw new Error('dispose')
+          })
+        return { url: '', init: {} }
+      },
+      consume: (response, ctx) => {
+        if (mode === 'unknown-cleanup') reader = response.body?.getReader()
+        primary =
+          mode === 'foreign-brand'
+            ? new ConsumeReadFailure({ active: true }, cause)
+            : ctx.retryableReadFailure(cause)
+        throw primary
+      }
+    })
+    try {
+      await runtime.flush()
+      await runtime.advance(10)
+      await assert.rejects(
+        handle.result,
+        error =>
+          error instanceof OperationError &&
+          error.code === 'CONSUME_FAILED' &&
+          error.status === (mode === 'non2xx' ? 412 : 200) &&
+          error.dispatchEntered &&
+          error.cause === primary &&
+          error.phase === 'consuming'
+      )
+      await handle.resourcesDone
+      assert.equal(sends, 1, 'TERMINAL_FAILURE_MUST_NOT_REPLAY')
+    } finally {
+      reader?.releaseLock()
+      await body.cancel()
+      handle.abort()
+      await Promise.allSettled([handle.result, handle.resourcesDone])
+    }
+  })
+}
+
+test('Runtime safe429 dispatch count advances after clean release', async t => {
+  const runtime = createRuntime(t)
+  let sends = 0
+  const planner = new FetchPlanner<typeof globalThis.fetch>(() => {
+    sends++
+    return Promise.resolve(new Response(null, { status: sends === 1 ? 429 : 200 }))
+  })
+  const handle = planner.submit({
+    method: 'GET',
+    replay,
+    prepare: () => ({ url: '', init: {} }),
+    consume: () => 'complete'
+  })
+  try {
+    await runtime.flush()
+    await runtime.advance(3601)
+    assert.equal(sends, 2, 'SAFE429_DISPATCH_1_MUST_BECOME_2')
+    assert.equal((await handle.result).value, 'complete')
+  } finally {
+    handle.abort()
+    await Promise.allSettled([handle.result, handle.resourcesDone])
+  }
+})
+
+test('Runtime fresh streams and init preserve one logical payload through retry', async t => {
+  const runtime = createRuntime(t)
+  const streams: ReadableStream<Uint8Array>[] = []
+  const inits: unknown[] = []
+  const bodies: string[] = []
+  const order: string[] = []
+  const planner = new FetchPlanner<typeof globalThis.fetch>(async (_url, init) => {
+    inits.push(init)
+    bodies.push(await new Response(init?.body).text())
+    return new Response()
+  })
+  const handle = planner.submit({
+    method: 'POST',
+    replay,
+    prepare: ctx => {
+      order.push(`prepare${ctx.attemptNumber}`)
+      const body = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode('business-id:stable;payload:complete'))
+          controller.close()
+        }
+      })
+      streams.push(body)
+      ctx.onDispose(() => {
+        order.push(`dispose${ctx.attemptNumber}`)
+      })
+      return { url: '', init: { body } }
+    },
+    consume: (_response, ctx) => {
+      if (ctx.attemptNumber === 1) throw ctx.retryableReadFailure('read')
+      return 'complete'
+    }
+  })
+  try {
+    await runtime.flush()
+    await runtime.advance(10)
+    assert.equal((await handle.result).value, 'complete')
+    await handle.resourcesDone
+    assert.deepEqual(bodies, [
+      'business-id:stable;payload:complete',
+      'business-id:stable;payload:complete'
+    ])
+    assert.notEqual(streams[0], streams[1])
+    assert.notEqual(inits[0], inits[1])
+    assert.deepEqual(order, ['prepare1', 'dispose1', 'prepare2', 'dispose2'])
+  } finally {
+    handle.abort()
     await Promise.allSettled([handle.result, handle.resourcesDone])
   }
 })

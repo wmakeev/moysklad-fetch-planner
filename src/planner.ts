@@ -13,6 +13,7 @@ import {
   requestDeadline,
   safeTime
 } from './pacing.js'
+import { retryCandidate, retryDecision, type RetryCandidate } from './retry-policy.js'
 import { absoluteDeadline, MAX_TIMEOUT_MS, monotonicNow } from './runtime.js'
 import type {
   Attachment,
@@ -264,8 +265,9 @@ export class FetchPlanner<F extends Transport> implements Planner<Init<F>, Respo
       admit: () => Infinity,
       releaseReady: () => undefined
     }
-    const reservation = this.#capacity.reserve(entry)
-    if (!reservation) return reject('QUEUE_FULL')
+    const initialReservation = this.#capacity.reserve(entry)
+    if (!initialReservation) return reject('QUEUE_FULL')
+    let reservation = initialReservation
     const rejectReserved = (code: FailureCode, cause?: unknown) => {
       reservation.release()
       return reject(code, cause)
@@ -313,6 +315,8 @@ export class FetchPlanner<F extends Transport> implements Planner<Init<F>, Respo
     }
     let currentAttempt: Attempt | undefined
     let cleanupDeadline: number | undefined
+    let retryNotBefore: number | undefined
+    let rateLimitOrdinal = 0
     const fail = (code: FailureCode, cause?: unknown) => {
       const snapshot = state.snapshot()
       return state.fail(
@@ -323,7 +327,7 @@ export class FetchPlanner<F extends Transport> implements Planner<Init<F>, Respo
             phase: snapshot.phase,
             operationId: snapshot.id,
             attemptNumber: snapshot.attempts,
-            dispatchEntered: snapshot.dispatchEntered,
+            dispatchEntered: currentAttempt?.token !== undefined,
             status: snapshot.status
           },
           cause
@@ -339,7 +343,8 @@ export class FetchPlanner<F extends Transport> implements Planner<Init<F>, Respo
         : Math.min(
             deadline,
             currentAttempt?.deadline ?? deadline,
-            currentAttempt?.classificationWake ?? Infinity
+            currentAttempt?.classificationWake ?? Infinity,
+            retryNotBefore ?? Infinity
           )
     }
     const expire = (now: number) => {
@@ -348,6 +353,11 @@ export class FetchPlanner<F extends Transport> implements Planner<Init<F>, Respo
         if (cleanupDeadline !== undefined && now >= cleanupDeadline)
           state.succeed('pending', this.#stamp())
         return
+      }
+      if (retryNotBefore !== undefined && now >= retryNotBefore && now < deadline) {
+        retryNotBefore = undefined
+        reservation.enqueue()
+        this.#wake()
       }
       const attempt = currentAttempt
       const code =
@@ -408,6 +418,51 @@ export class FetchPlanner<F extends Transport> implements Planner<Init<F>, Respo
         }
         currentAttempt = attempt
         let code: FailureCode = 'PREPARE_FAILED'
+        let candidate: RetryCandidate | undefined
+        let failure: { code: FailureCode; error: OperationError } | undefined
+        const recordFailure = (failureCode: FailureCode, cause?: unknown) => {
+          candidate ??= retryCandidate(
+            { code: failureCode, status: state.snapshot().status, cause },
+            spec.replay
+          )
+          if (
+            failureCode === 'TRANSPORT_FAILED' &&
+            (!attempt.token || attempt.response !== undefined)
+          )
+            candidate = undefined
+          const snapshot = state.snapshot()
+          failure = {
+            code: failureCode,
+            error: new OperationError(
+              failureCode,
+              {
+                phase: snapshot.phase,
+                operationId: snapshot.id,
+                attemptNumber: snapshot.attempts,
+                dispatchEntered: attempt.token !== undefined,
+                status: snapshot.status
+              },
+              cause
+            )
+          }
+          // A candidate with no possible remaining budget is already terminal; do not
+          // make its logical result wait for a cleanup that cannot permit another send.
+          const eligibility = retryDecision({
+            candidate,
+            attempts: attempt.number,
+            maxAttempts: this.#options.maxAttempts,
+            deadline,
+            now: monotonicNow(),
+            stopped: this.#stopRequested,
+            cleanup: 'pending',
+            rateLimitOrdinal,
+            jitterFactor: 0.8,
+            adaptiveNotBefore: 0,
+            serverNotBefore: this.#pacing.serverNotBefore
+          })
+          if (candidate && this.#stopRequested) fail(this.#stopCode, this.#stopReason)
+          else if (eligibility.kind === 'terminal') fail(failureCode, cause)
+        }
         try {
           expire(monotonicNow())
           if (state.snapshot().outcome !== 'pending') return
@@ -419,7 +474,7 @@ export class FetchPlanner<F extends Transport> implements Planner<Init<F>, Respo
           this.#armTimer()
           state.transition(
             'phase-changed',
-            { phase: 'preparing', attempts: attempt.number },
+            { phase: 'preparing', attempts: attempt.number, status: undefined },
             this.#stamp()
           )
           const descriptor = await attempt.resources.runOwner(
@@ -484,19 +539,23 @@ export class FetchPlanner<F extends Transport> implements Planner<Init<F>, Respo
                 state.deferDelivery(() => {
                   state.transition(
                     'dispatch-started',
-                    { phase: 'sending', dispatchCalls: 1, dispatchEntered: true },
+                    {
+                      phase: 'sending',
+                      dispatchCalls: state.snapshot().dispatchCalls + 1,
+                      dispatchEntered: true
+                    },
                     stamp
                   )
                   try {
                     resolve(this.#transport(url, init))
                   } catch (cause) {
-                    fail('TRANSPORT_FAILED', cause)
+                    recordFailure('TRANSPORT_FAILED', cause)
                     resolve(undefined)
                   }
                 })
                 return Infinity
               } catch (cause) {
-                fail('TRANSPORT_FAILED', cause)
+                recordFailure('TRANSPORT_FAILED', cause)
                 entry.releaseReady()
                 return Infinity
               }
@@ -553,7 +612,8 @@ export class FetchPlanner<F extends Transport> implements Planner<Init<F>, Respo
             attempt.classificationWake = undefined
             // Timer delivery is not required for an operation/attempt deadline to win.
             expire(monotonicNow())
-            fail('HTTP_FAILED')
+            rateLimitOrdinal++
+            recordFailure('HTTP_FAILED')
             return
           }
           code = 'CONSUME_FAILED'
@@ -566,19 +626,36 @@ export class FetchPlanner<F extends Transport> implements Planner<Init<F>, Respo
             // Keep both value boxes until outer materialization, preserving T49's guard.
             registrations =>
               this.#consumeScope.run(
-                lifetime =>
-                  spec.consume(borrowed, {
-                    signal: attempt.controller.signal,
-                    operationId: state.handle.id,
-                    attemptNumber: attempt.number,
-                    ...registrations,
-                    retryableReadFailure: cause => {
-                      if (!this.#context.isActive() || !this.#consumeScope.isCurrent(lifetime))
-                        throw invalid()
-                      return new ConsumeReadFailure(lifetime, cause)
-                    }
-                  }),
-                raw => raw
+                async lifetime => {
+                  // Complete the await/async-return assimilation while the exact consume
+                  // identity is active. Box the value before crossing either owner guard.
+                  const settle = async () => {
+                    return await spec.consume(borrowed, {
+                      signal: attempt.controller.signal,
+                      operationId: state.handle.id,
+                      attemptNumber: attempt.number,
+                      ...registrations,
+                      retryableReadFailure: cause => {
+                        if (!this.#context.isActive() || !this.#consumeScope.isCurrent(lifetime))
+                          throw invalid()
+                        return new ConsumeReadFailure(lifetime, cause)
+                      }
+                    })
+                  }
+                  try {
+                    const raw = await settle()
+                    const box = { value: raw }
+                    Object.setPrototypeOf(box, null)
+                    return Object.freeze(box)
+                  } catch (cause) {
+                    candidate = retryCandidate(
+                      { code: 'CONSUME_FAILED', status, cause, consumeLifetime: lifetime },
+                      spec.replay
+                    )
+                    throw cause
+                  }
+                },
+                boxed => boxed.value
               ),
             boxed => boxed.value
           )
@@ -593,7 +670,7 @@ export class FetchPlanner<F extends Transport> implements Planner<Init<F>, Respo
             this.#armTimer()
           }
         } catch (cause) {
-          fail(code, cause)
+          recordFailure(code, cause)
         } finally {
           if (state.snapshot().outcome === 'pending')
             state.transition('phase-changed', { phase: 'cleanup' }, this.#stamp())
@@ -644,9 +721,47 @@ export class FetchPlanner<F extends Transport> implements Planner<Init<F>, Respo
             state.succeed(summary.resources === 'released' ? 'released' : 'failed', this.#stamp())
           attempt.token?.release()
           attempt.lease.release()
-          currentAttempt = undefined
-          this.#active.delete(entry)
-          state.settleResources(summary, this.#stamp())
+          // Cleanup is physical: never retire this operation between attempts.
+          let retryScheduled = false
+          expire(monotonicNow())
+          if (failure && state.snapshot().outcome === 'pending') {
+            const now = monotonicNow()
+            const decision = retryDecision({
+              candidate: spec.replay.serverSafe && spec.replay.consumeSafe ? candidate : undefined,
+              attempts: attempt.number,
+              maxAttempts: this.#options.maxAttempts,
+              deadline,
+              now,
+              stopped: this.#stopRequested,
+              cleanup: summary.resources,
+              rateLimitOrdinal,
+              jitterFactor: 0.8 + Math.random() * 0.4,
+              adaptiveNotBefore: this.#dispatchNotBefore(now, Math.random()),
+              serverNotBefore: this.#pacing.serverNotBefore
+            })
+            // Random/clock sources may run user code: repeat terminal checks afterwards.
+            expire(monotonicNow())
+            if (state.snapshot().outcome === 'pending') {
+              if (this.#stopRequested) fail(this.#stopCode, this.#stopReason)
+              else if (decision.kind === 'eligible') {
+                const nextReservation = this.#capacity.reserve(entry)
+                if (nextReservation) {
+                  retryScheduled = true
+                  currentAttempt = undefined
+                  reservation = nextReservation
+                  retryNotBefore = decision.notBefore
+                  state.transition('retry-scheduled', { phase: 'retry-wait' }, this.#stamp())
+                  this.#armTimer()
+                  this.#wake()
+                } else fail('QUEUE_FULL')
+              } else state.fail(failure.code, failure.error, this.#stamp())
+            }
+          }
+          if (!retryScheduled) {
+            currentAttempt = undefined
+            this.#active.delete(entry)
+            state.settleResources(summary, this.#stamp())
+          }
           this.#armTimer()
           this.#wake()
         }

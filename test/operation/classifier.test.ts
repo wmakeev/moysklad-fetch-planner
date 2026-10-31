@@ -442,7 +442,7 @@ for (const family of families) {
       ['oversize', parallel + ' '.repeat(65537), 'application/json']
     ] as const) {
       test(`${family} ${entry} actual intercepted ${name} baseline`, async () => {
-        const { planner, calls } = actualFixture(family, entry, body, {}, media)
+        const { planner, calls } = actualFixture(family, entry, body, { maxAttempts: 1 }, media)
         let consumes = 0
         const handle = planner.submit({
           method: 'GET',
@@ -567,9 +567,11 @@ for (const family of families) {
                       ? 'DEADLINE'
                       : mode === 'attempt'
                         ? 'ATTEMPT_TIMEOUT'
-                        : 'HTTP_FAILED') &&
+                        : mode === 'stop'
+                          ? 'STOPPED'
+                          : 'HTTP_FAILED') &&
                 error.status === 429 &&
-                (mode !== 'abort' || error.cause === reason)
+                ((mode !== 'abort' && mode !== 'stop') || error.cause === reason)
             )
             await disposing.promise
             await clock.flush()
@@ -656,7 +658,7 @@ for (const family of families) {
           },
           { highWaterMark: 0 }
         )
-        const { planner } = actualFixture(family, entry, stream)
+        const { planner } = actualFixture(family, entry, stream, { maxAttempts: 1 })
         const handle = planner.submit({
           method: 'GET',
           replay,
@@ -790,7 +792,7 @@ test('Actual classifier strict child exits naturally after cancellation and disp
     const gate = new Promise(resolve => { release = resolve })
     const planner = new FetchPlanner(() => Promise.resolve(new Response(new ReadableStream({
       cancel() { return gate }
-    }), {status:429,headers:{'content-type':'application/json'}})), {maxParallelLimit:1})
+    }), {status:429,headers:{'content-type':'application/json'}})), {maxParallelLimit:1,maxAttempts:1})
     let disposals = 0
     const handle = planner.submit({method:'POST',replay:{serverSafe:true,consumeSafe:true},
       prepare:ctx => {ctx.onDispose(() => {disposals++; release()}); return {url:'',init:{}}},
@@ -841,7 +843,7 @@ for (const family of families) {
           },
           { highWaterMark: 0 }
         )
-        const { planner } = actualFixture(family, entry, stream)
+        const { planner } = actualFixture(family, entry, stream, { maxAttempts: 1 })
         const handle = planner.submit({
           method: 'GET',
           replay,
