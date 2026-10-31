@@ -44,12 +44,15 @@ export class ObservationDiagnostics {
 
 /** Subscription storage only, shared by the coordinator and its sole operation state. */
 export class OperationObservation {
+  private delivering = false
+  private deferred = false
   private pendingDeliveries: (() => void)[] | undefined
   private readonly listeners = new Set<(event: Event) => unknown>()
 
   constructor(
     private readonly maxSubscribers = 64,
-    readonly diagnostics = new ObservationDiagnostics()
+    readonly diagnostics = new ObservationDiagnostics(),
+    private readonly onIdle?: () => void
   ) {}
 
   attach<S>(
@@ -101,25 +104,37 @@ export class OperationObservation {
     }
   }
 
-  /** Only the coordinator's synchronous transport-entry section defers delivery. */
+  /** Shared synchronous delivery boundary; commands drain only after the entire fanout. */
+  get busy(): boolean {
+    return this.delivering
+  }
+
   deferDelivery<R>(work: () => R): R {
-    if (this.pendingDeliveries) return work()
-    const pending: (() => void)[] = []
-    this.pendingDeliveries = pending
+    if (this.deferred) return work()
+    this.deferred = true
     try {
       return work()
     } finally {
-      try {
-        for (const deliver of pending) deliver()
-      } finally {
-        this.pendingDeliveries = undefined
-      }
+      this.deferred = false
+      this.flush()
     }
   }
 
   deliver(delivery: () => void): void {
-    if (this.pendingDeliveries) this.pendingDeliveries.push(delivery)
-    else delivery()
+    ;(this.pendingDeliveries ??= []).push(delivery)
+    this.flush()
+  }
+
+  private flush(): void {
+    if (this.busy || this.deferred) return
+    this.delivering = true
+    try {
+      while (this.pendingDeliveries?.length) this.pendingDeliveries.shift()?.()
+    } finally {
+      this.pendingDeliveries = undefined
+      this.delivering = false
+    }
+    this.onIdle?.()
   }
 
   clear(): void {

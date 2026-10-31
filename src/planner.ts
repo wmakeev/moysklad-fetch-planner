@@ -172,6 +172,9 @@ export class FetchPlanner<F extends Transport> implements Planner<Init<F>, Respo
   private nextId = 1
   private idExhausted = false
   #sequenceExhausted = false
+  private readonly commands: (() => void)[] = []
+  private drainingCommands = false
+  #stopRequested = false
   #stopped = false
   #stopReason: unknown
   #pumpScheduled = false
@@ -185,7 +188,9 @@ export class FetchPlanner<F extends Transport> implements Planner<Init<F>, Respo
       if (cause instanceof OperationError) throw cause
       throw invalid(cause)
     }
-    this.observation = new OperationObservation(this.#options.maxSubscribers)
+    this.observation = new OperationObservation(this.#options.maxSubscribers, undefined, () => {
+      this.#drainCommands()
+    })
     this.#attenuationSteps = createAttenuationSteps(this.#options.throttlingCoefficient)
     this.#capacity = new OperationCapacity(
       this.#options.maxQueuedOperations,
@@ -217,24 +222,49 @@ export class FetchPlanner<F extends Transport> implements Planner<Init<F>, Respo
     }
     if (this.observationSequence.isExhausted) return reject('SEQUENCE_EXHAUSTED')
     if (this.#context.isActive()) return reject('REENTRANT_OPERATION')
-    if (this.#stopped) return reject('STOPPED', this.#stopReason)
+    if (this.#stopRequested) return reject('STOPPED', this.#stopReason)
+    // Reserve before copying/accessing user spec or retaining it in a command.
+    const entry: Entry = {
+      start: () => {
+        throw new Error('UNMATERIALIZED_OPERATION')
+      },
+      cancel: () => undefined,
+      nextWake: () => undefined,
+      expire: () => undefined,
+      admit: () => Infinity,
+      releaseReady: () => undefined
+    }
+    const reservation = this.#capacity.reserve(entry)
+    if (!reservation) return reject('QUEUE_FULL')
+    const rejectReserved = (code: FailureCode, cause?: unknown) => {
+      reservation.release()
+      return reject(code, cause)
+    }
     let spec: Spec<Init<F>, ResponseOf<F>, T>
     try {
       spec = { ...input }
       validateSpec(spec)
     } catch (cause) {
-      return reject('INVALID_ARGUMENT', cause)
+      return rejectReserved('INVALID_ARGUMENT', cause)
     }
+    if (this.#submissionStopped()) return rejectReserved('STOPPED', this.#stopReason)
+    if (this.observationSequence.current >= Number.MAX_SAFE_INTEGER)
+      return rejectReserved('SEQUENCE_EXHAUSTED')
     if (this.idExhausted || !Number.isSafeInteger(this.nextId) || this.nextId < 1)
-      return reject('ID_EXHAUSTED')
+      return rejectReserved('ID_EXHAUSTED')
 
     const deadline = absoluteDeadline(monotonicNow(), spec.deadlineMs ?? this.#options.deadlineMs)
-    if (deadline === undefined) return reject('INVALID_ARGUMENT')
+    if (deadline === undefined) return rejectReserved('INVALID_ARGUMENT')
     const controller = new AbortController()
+    let abortRequested = false
     const state = new OperationState<T>(
       this.nextId,
       reason => {
-        entry.cancel('ABORTED', reason)
+        if (abortRequested || state.snapshot().outcome !== 'pending') return
+        abortRequested = true
+        this.#command(() => {
+          entry.cancel('ABORTED', reason)
+        })
       },
       this.observation,
       this.#options.maxSubscribers
@@ -285,13 +315,13 @@ export class FetchPlanner<F extends Transport> implements Planner<Init<F>, Respo
         controller.abort()
         entry.releaseReady()
         if (!started) {
-          reservation?.release()
-          state.settleResources({ resources: 'released' }, this.#stamp())
+          reservation.release()
           this.#active.delete(entry)
+          state.settleResources({ resources: 'released' }, this.#stamp())
         }
       }
     }
-    const entry: Entry = {
+    const materialized: Entry = {
       admit: () => Infinity,
       releaseReady: () => undefined,
       nextWake,
@@ -307,9 +337,9 @@ export class FetchPlanner<F extends Transport> implements Planner<Init<F>, Respo
         controller.abort(reason)
         entry.releaseReady()
         if (!started) {
-          reservation?.release()
-          state.settleResources({ resources: 'released' }, this.#stamp())
+          reservation.release()
           this.#active.delete(entry)
+          state.settleResources({ resources: 'released' }, this.#stamp())
         }
         this.#armTimer()
       },
@@ -359,7 +389,7 @@ export class FetchPlanner<F extends Transport> implements Planner<Init<F>, Respo
                 const stamp = this.#stamp()
                 const now = monotonicNow()
                 expire(now)
-                if (this.#stopped) entry.cancel('STOPPED', this.#stopReason)
+                if (this.#stopRequested) entry.cancel('STOPPED', this.#stopReason)
                 if (this.#pacing.guardOpen) fail('GUARD_OPEN')
                 if (state.snapshot().outcome !== 'pending') {
                   entry.releaseReady()
@@ -470,22 +500,23 @@ export class FetchPlanner<F extends Transport> implements Planner<Init<F>, Respo
             state.succeed(summary.resources === 'released' ? 'released' : 'failed', this.#stamp())
           token?.release()
           lease.release()
-          state.settleResources(summary, this.#stamp())
           this.#active.delete(entry)
+          state.settleResources(summary, this.#stamp())
           this.#armTimer()
           this.#wake()
         }
       }
     }
-    const reservation = this.#capacity.reserve(entry)
-    if (!reservation) return reject('QUEUE_FULL')
+    Object.assign(entry, materialized)
     if (this.nextId === Number.MAX_SAFE_INTEGER) this.idExhausted = true
     else this.nextId++
     this.#active.add(entry)
-    reservation.enqueue()
-    state.transition('created', {}, this.#stamp())
-    this.#armTimer()
-    this.#wake()
+    this.#command(() => {
+      reservation.enqueue()
+      state.transition('created', {}, this.#stamp())
+      this.#armTimer()
+      this.#wake()
+    })
     return state.handle
   }
 
@@ -504,10 +535,35 @@ export class FetchPlanner<F extends Transport> implements Planner<Init<F>, Respo
   }
 
   stop(reason?: unknown): void {
-    if (this.#stopped) return
-    this.#stopped = true
+    if (this.#stopRequested) return
+    this.#stopRequested = true
     this.#stopReason = reason
-    for (const entry of this.#active) entry.cancel('STOPPED', reason)
+    this.#command(() => {
+      this.#stopped = true
+      for (const entry of this.#active) entry.cancel('STOPPED', reason)
+    })
+  }
+
+  #submissionStopped(): boolean {
+    return this.#stopRequested
+  }
+
+  #command(command: () => void): void {
+    this.commands.push(command)
+    this.#drainCommands()
+  }
+
+  #drainCommands(): void {
+    if (this.drainingCommands || this.observation.busy) return
+    this.drainingCommands = true
+    try {
+      while (this.commands.length) {
+        const command = this.commands.shift()
+        if (command) command()
+      }
+    } finally {
+      this.drainingCommands = false
+    }
   }
 
   #stamp() {
@@ -580,7 +636,7 @@ export class FetchPlanner<F extends Transport> implements Planner<Init<F>, Respo
       for (const entry of this.#ready) {
         this.#readyWake = Math.min(this.#readyWake, entry.admit())
       }
-      while (!this.#stopped) {
+      while (!this.#stopRequested) {
         const next = this.#capacity.take()
         if (!next) break
         void next.value.start(next.lease)
