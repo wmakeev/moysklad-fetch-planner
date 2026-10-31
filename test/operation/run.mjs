@@ -24,6 +24,7 @@ const registry = new Map([
   ['commands', 'commands.test.ts'],
   ['reentry', 'reentry.test.ts'],
   ['http-consume', 'http-consume.test.ts'],
+  ['http-integration', 'http-integration.test.ts'],
   ['upload', 'upload.test.ts'],
   ['integration', 'integration.test.ts'],
   ['classifier', 'classifier.test.ts'],
