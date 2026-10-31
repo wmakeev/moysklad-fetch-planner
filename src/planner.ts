@@ -329,6 +329,7 @@ export class FetchPlanner<F extends Transport> implements Planner<Init<F>, Respo
       hookController: AbortController | undefined
       hookWork: ReturnType<typeof runHook> | undefined
       token: ReturnType<Lease['trySend']>
+      dispatchEntered: boolean
       response: ResponseOf<F> | undefined
     }
     let currentAttempt: Attempt | undefined
@@ -345,9 +346,7 @@ export class FetchPlanner<F extends Transport> implements Planner<Init<F>, Respo
             phase: snapshot.phase,
             operationId: snapshot.id,
             attemptNumber: snapshot.attempts,
-            dispatchEntered: currentAttempt?.hookController
-              ? snapshot.dispatchEntered
-              : currentAttempt?.token !== undefined,
+            dispatchEntered: currentAttempt?.dispatchEntered ?? false,
             status: snapshot.status
           },
           cause
@@ -443,6 +442,7 @@ export class FetchPlanner<F extends Transport> implements Planner<Init<F>, Respo
           hookController: undefined,
           hookWork: undefined,
           token: undefined,
+          dispatchEntered: false,
           response: undefined
         }
         currentAttempt = attempt
@@ -603,6 +603,7 @@ export class FetchPlanner<F extends Transport> implements Planner<Init<F>, Respo
                 }
                 attempt.token = lease.trySend()
                 if (!attempt.token) return Infinity
+                attempt.dispatchEntered = true
                 // Final gate -> accounting -> committed state -> transport is synchronous.
                 // No observer, getter, random source, clock callback or await in this section.
                 if (putKey !== undefined) this.#guard.recordPutDispatch(putKey, guardNow)
@@ -838,26 +839,37 @@ export class FetchPlanner<F extends Transport> implements Planner<Init<F>, Respo
                 if (attempt.hookDeadline === undefined) fail('HOOK_FAILED')
                 else {
                   this.#armTimer()
-                  attempt.hookWork = runHook(
-                    this.#context,
-                    spec.beforeRetry,
-                    {
-                      snapshot: state.snapshot(),
-                      signal: attempt.hookController.signal,
-                      attemptNumber: attempt.number,
-                      dispatchCalls: state.snapshot().dispatchCalls,
-                      ...(state.snapshot().status === undefined
-                        ? {}
-                        : { status: state.snapshot().status })
-                    },
-                    monotonicNow
-                  )
-                  const hook = await attempt.hookWork
+                  // Timer setup reads the host clock. Materialize it before the
+                  // final eligibility check, then enter the hook without a gap.
                   expire(monotonicNow())
-                  if (state.snapshot().outcome === 'pending') {
-                    if (hook.value.type === 'deny') fail('HOOK_DENIED', hook.value.code)
-                    // Retry defer is enabled with its floor/FIFO proof in T87.
-                    else if (hook.value.type !== 'allow') fail('HOOK_FAILED')
+                  decision = retryDecision({
+                    ...retryFacts,
+                    candidate:
+                      spec.replay.serverSafe && spec.replay.consumeSafe ? candidate : undefined,
+                    stopped: this.#stopRequested
+                  })
+                  if (decision.kind === 'eligible' && state.snapshot().outcome === 'pending') {
+                    attempt.hookWork = runHook(
+                      this.#context,
+                      spec.beforeRetry,
+                      {
+                        snapshot: state.snapshot(),
+                        signal: attempt.hookController.signal,
+                        attemptNumber: attempt.number,
+                        dispatchCalls: state.snapshot().dispatchCalls,
+                        ...(state.snapshot().status === undefined
+                          ? {}
+                          : { status: state.snapshot().status })
+                      },
+                      monotonicNow
+                    )
+                    const hook = await attempt.hookWork
+                    expire(monotonicNow())
+                    if (state.snapshot().outcome === 'pending') {
+                      if (hook.value.type === 'deny') fail('HOOK_DENIED', hook.value.code)
+                      // Retry defer is enabled with its floor/FIFO proof in T87.
+                      else if (hook.value.type !== 'allow') fail('HOOK_FAILED')
+                    }
                   }
                 }
               } catch (cause) {
@@ -871,18 +883,21 @@ export class FetchPlanner<F extends Transport> implements Planner<Init<F>, Respo
               }
               // Reuse the original fallback sample/time: waiting for a hook does not
               // restart backoff. New receipts can only increase the policy floor.
+              const adaptiveNotBefore = Math.max(
+                retryFacts.adaptiveNotBefore,
+                this.#dispatchNotBefore(monotonicNow(), Math.random())
+              )
+              expire(monotonicNow())
+              // Host clocks/randomness can revoke replay permission. Read the
+              // mutable flags only after those calls, immediately before reserve.
               decision = retryDecision({
                 ...retryFacts,
+                adaptiveNotBefore,
+                serverNotBefore: this.#pacing.serverNotBefore,
                 candidate:
                   spec.replay.serverSafe && spec.replay.consumeSafe ? candidate : undefined,
-                stopped: this.#stopRequested,
-                adaptiveNotBefore: Math.max(
-                  retryFacts.adaptiveNotBefore,
-                  this.#dispatchNotBefore(monotonicNow(), Math.random())
-                ),
-                serverNotBefore: this.#pacing.serverNotBefore
+                stopped: this.#stopRequested
               })
-              expire(monotonicNow())
             }
             if (state.snapshot().outcome === 'pending') {
               if (this.#stopRequested) fail(this.#stopCode, this.#stopReason)
