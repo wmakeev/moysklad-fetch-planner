@@ -6,7 +6,12 @@ import { OperationResources } from './operation-resources.js'
 import { OperationState } from './operation-state.js'
 import { ResponseClassifier } from './response-classifier.js'
 import { parseResponsePolicy } from './response-policy.js'
-import { calculateRequestDelay, createAttenuationSteps, requestDeadline } from './pacing.js'
+import {
+  calculateRequestDelay,
+  createAttenuationSteps,
+  requestDeadline,
+  safeTime
+} from './pacing.js'
 import { absoluteDeadline, MAX_TIMEOUT_MS, monotonicNow } from './runtime.js'
 import type {
   Attachment,
@@ -128,7 +133,10 @@ function optionsFrom(input: Partial<FetchPlannerOptions>): FetchPlannerOptions {
 type Lease = NonNullable<ReturnType<OperationCapacity<Entry>['take']>>['lease']
 interface Entry {
   start(lease: Lease): Promise<void>
-  cancel(code: 'ABORTED' | 'STOPPED' | 'SEQUENCE_EXHAUSTED', reason?: unknown): void
+  cancel(
+    code: 'ABORTED' | 'STOPPED' | 'SEQUENCE_EXHAUSTED' | 'INVALID_ARGUMENT',
+    reason?: unknown
+  ): void
   nextWake(): number | undefined
   expire(now: number): void
   admit(): number
@@ -154,7 +162,9 @@ export class FetchPlanner<F extends Transport> implements Planner<Init<F>, Respo
   readonly #startedAt = monotonicNow()
   readonly #ready = new Set<Entry>()
   readonly #attenuationSteps: readonly number[]
-  // HTTP receipt inputs and correction updates are connected in stage III.
+  #parallelCorrection = 0
+  #parallelCorrectionAt = 0
+  #recoveryWake = Infinity
   readonly #pacing: {
     limit: number | null
     remaining: number | null
@@ -413,6 +423,7 @@ export class FetchPlanner<F extends Transport> implements Planner<Init<F>, Respo
                   entry.releaseReady()
                   return Infinity
                 }
+                this.#reviewParallelism(now, random)
                 const notBefore = this.#dispatchNotBefore(now, random)
                 if (now < notBefore) return notBefore
                 token = lease.trySend()
@@ -461,6 +472,8 @@ export class FetchPlanner<F extends Transport> implements Planner<Init<F>, Respo
             this.#pacing.serverNotBefore,
             policy.serverNotBefore
           )
+          if (policy.responseType === 'PARALLEL_LIMIT_OVERFLOW')
+            this.#reduceParallelism(receipt.monotonic)
           for (let i = 0; i < policy.invalidHints; i++)
             this.observation.diagnostics.increment('INVALID_HINT')
           this.#wake()
@@ -477,7 +490,12 @@ export class FetchPlanner<F extends Transport> implements Planner<Init<F>, Respo
             classificationWake = classifier.deadline
             if (state.snapshot().outcome !== 'pending') classifier.cancel()
             this.#armTimer()
-            await classifier.result
+            const classification = await classifier.result
+            if (
+              classification === 'parallel1073' &&
+              policy.responseType !== 'PARALLEL_LIMIT_OVERFLOW'
+            )
+              this.#reduceParallelism(receipt.monotonic)
             classificationWake = undefined
             // Timer delivery is not required for an operation/attempt deadline to win.
             expire(monotonicNow())
@@ -679,16 +697,53 @@ export class FetchPlanner<F extends Transport> implements Planner<Init<F>, Respo
     return Math.max(this.#pacingPlan.notBefore, p.serverNotBefore)
   }
 
+  #reduceParallelism(receiptAt: number): void {
+    this.#parallelCorrection = Math.max(
+      1 - this.#options.maxParallelLimit,
+      this.#parallelCorrection - 1
+    )
+    this.#parallelCorrectionAt = Math.max(this.#parallelCorrectionAt, receiptAt)
+    this.#capacity.setEffectiveParallelism(
+      this.#options.maxParallelLimit + this.#parallelCorrection
+    )
+    this.#wake()
+  }
+
+  /** Preserved 003 strict period and one-step recovery, only while processing work. */
+  #reviewParallelism(now: number, random: number): void {
+    this.#recoveryWake = Infinity
+    if (this.#parallelCorrection === 0) return
+    const period = safeTime(
+      this.#options.parallelLimitCorrectionPeriodMs * (1 + 2 * random * this.#options.jitter)
+    )
+    if (now - this.#parallelCorrectionAt > period) {
+      this.#parallelCorrection = Math.min(0, this.#parallelCorrection + 1)
+      this.#parallelCorrectionAt = now
+      this.#capacity.setEffectiveParallelism(
+        this.#options.maxParallelLimit + this.#parallelCorrection
+      )
+    }
+    if (this.#parallelCorrection < 0) {
+      // Clocks are integer milliseconds; equality is deliberately not a recovery.
+      const next = this.#parallelCorrectionAt + Math.floor(period) + 1
+      if (Number.isSafeInteger(next)) this.#recoveryWake = next
+    }
+  }
+
   /** One timer belongs to this coordinator, including logical cleanup grace. */
   #armTimer(): void {
     clearTimeout(this.#timer)
     this.#timer = undefined
     let next = this.#ready.size ? this.#readyWake : Infinity
     for (const entry of this.#active) next = Math.min(next, entry.nextWake() ?? Infinity)
+    if (this.#active.size) next = Math.min(next, this.#recoveryWake)
     if (next === Infinity) return
-    this.#timer = setTimeout(
+    const timer = setTimeout(
       () => {
+        // A delayed callback only wakes current policy; retire any newer scheduled wake.
+        clearTimeout(this.#timer)
         this.#timer = undefined
+        this.#recoveryWake = Infinity
         const now = monotonicNow()
         for (const entry of this.#active) entry.expire(now)
         this.#readyWake = Infinity
@@ -697,6 +752,7 @@ export class FetchPlanner<F extends Transport> implements Planner<Init<F>, Respo
       },
       Math.min(MAX_TIMEOUT_MS, Math.max(0, next - monotonicNow()))
     )
+    this.#timer = timer
   }
 
   #wake(): void {
@@ -708,6 +764,17 @@ export class FetchPlanner<F extends Transport> implements Planner<Init<F>, Respo
       queueMicrotask(() => {
         this.#pumpScheduled = false
         this.#readyWake = Infinity
+        const random = Math.random()
+        const now = monotonicNow()
+        if (this.#active.size) {
+          try {
+            this.#reviewParallelism(now, random)
+          } catch (cause) {
+            // Unsafe configured arithmetic is an explicit operation failure, not an
+            // unhandled microtask error or a silently shortened recovery period.
+            for (const entry of this.#active) entry.cancel('INVALID_ARGUMENT', cause)
+          }
+        }
         for (const entry of this.#ready) {
           this.#readyWake = Math.min(this.#readyWake, entry.admit())
         }

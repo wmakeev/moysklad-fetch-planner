@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
+import { spawnSync } from 'node:child_process'
 import { FetchPlanner, OperationError } from '../../src/index.js'
 import { FetchPlanner as DeepPlanner } from '../../src/planner.js'
 import { fetch as undiciFetch, Response as UndiciResponse } from 'undici'
@@ -670,3 +671,522 @@ test('RFC850 past receipt retains a previously accepted public maximum', async t
     ])
   }
 })
+
+for (const max of [1, 2, 4]) {
+  for (const legacy of [false, true]) {
+    test(`Parallel receipts clamp effective capacity and retain sent work at max ${max} legacy ${legacy}`, async t => {
+      const clock = createRuntime(t)
+      const timers = trackTimeouts(t)
+      const replies = Array.from({ length: max + 2 }, () => deferred<Response>())
+      const signals: AbortSignal[] = []
+      let sends = 0
+      const planner = new DeepPlanner<typeof fetch>(
+        (_url, init) => {
+          assert.ok(init?.signal)
+          signals.push(init.signal)
+          const reply = replies[sends++]
+          assert.ok(reply)
+          return reply.promise
+        },
+        { maxParallelLimit: max, jitter: 0 }
+      )
+      const spec = {
+        method: 'GET' as const,
+        replay,
+        prepare: () => ({ url: canary, init: {} }),
+        consume: (body: Response) => body.text()
+      }
+      const handles = Array.from({ length: max + 2 }, () => planner.submit(spec))
+      const results = handles.map(handle =>
+        handle.result.catch((error: unknown) => {
+          assert.ok(error instanceof OperationError && error.code === 'HTTP_FAILED')
+        })
+      )
+      try {
+        await clock.flush()
+        assert.equal(sends, max)
+        assert.equal(planner.snapshot().queued, 2)
+        for (let i = 0; i < max; i++) {
+          const headers = legacy
+            ? { 'x-lognex-auth': '429005' }
+            : { 'content-type': 'application/json' }
+          replies[i]?.resolve(
+            new Response(legacy ? 'overflow' : '{"errors":[{"code":1073}]}', {
+              status: 429,
+              headers
+            })
+          )
+          await handles[i]?.resourcesDone
+          await clock.flush()
+          assert.equal(
+            planner.snapshot().effectiveParallelism,
+            Math.max(1, max - i - 1),
+            'RECEIPT_EFFECTIVE_CLAMP'
+          )
+          assert.equal(
+            sends,
+            i === max - 1 ? max + 1 : max,
+            'ACTUAL_DISPATCH_USES_REDUCED_EFFECTIVE'
+          )
+          assert.ok(
+            signals.every(signal => !signal.aborted),
+            'SENT_WORK_IS_NOT_CANCELLED_BY_CORRECTION'
+          )
+        }
+        assert.equal(planner.snapshot().effectiveParallelism, 1)
+        assert.equal(planner.snapshot().sentActive, 1)
+        replies[max]?.resolve(new Response('next'))
+        await handles[max]?.resourcesDone
+        await clock.flush()
+        assert.equal(sends, max + 2)
+        replies[max + 1]?.resolve(new Response('last'))
+        await Promise.all(results)
+        await Promise.all(handles.map(handle => handle.resourcesDone))
+        diagnostics(planner, 0)
+        assert.equal(timers.active.size, 0)
+        assert.ok(timers.maximum() <= 1)
+      } finally {
+        for (const reply of replies) reply.resolve(new Response('cleanup'))
+        for (const handle of handles) handle.abort()
+        await Promise.allSettled(handles.flatMap(handle => [handle.result, handle.resourcesDone]))
+      }
+    })
+  }
+}
+
+for (const max of [1, 2, 4]) {
+  for (const random of [0, 0.5, 1]) {
+    test(`Recovery dispatches active ready work one step after strict period max ${max} random ${random}`, async t => {
+      const clock = createRuntime(t)
+      clock.setRandom(random)
+      const timers = trackTimeouts(t)
+      let seed = true
+      let sends = 0
+      const release = deferred<undefined>()
+      const planner = new FetchPlanner<typeof undiciFetch>(
+        () => {
+          sends++
+          return Promise.resolve(
+            seed
+              ? new UndiciResponse('{"errors":[{"code":1073}]}', {
+                  status: 429,
+                  headers: { 'content-type': 'application/json' }
+                })
+              : new UndiciResponse('ok')
+          )
+        },
+        { maxParallelLimit: max, parallelLimitCorrectionPeriodMs: 1000, jitter: 0.3 }
+      )
+      const spec = {
+        method: 'GET' as const,
+        replay,
+        prepare: () => ({ url: canary, init: {} }),
+        consume: async (body: UndiciResponse) => {
+          await release.promise
+          return body.text()
+        }
+      }
+      for (let i = 0; i < max + 1; i++) {
+        const handle = planner.submit(spec)
+        await assert.rejects(
+          handle.result,
+          error => error instanceof OperationError && error.code === 'HTTP_FAILED'
+        )
+        await handle.resourcesDone
+      }
+      assert.equal(planner.snapshot().effectiveParallelism, 1, 'REPEATED_RECEIPTS_SATURATE')
+      seed = false
+      const base = sends
+      const handles = Array.from({ length: max }, () => planner.submit(spec))
+      try {
+        await clock.flush()
+        assert.equal(sends, base + 1)
+        const origin = performance.now()
+        for (const jump of [10000000, -20000000]) {
+          clock.jumpWall(jump)
+          await clock.flush()
+          assert.equal(performance.now(), origin)
+          assert.equal(planner.snapshot().effectiveParallelism, 1)
+        }
+        const period = 1000 * (1 + 2 * random * 0.3)
+        for (let effective = 1; effective < max; effective++) {
+          await clock.advance(period)
+          assert.equal(
+            planner.snapshot().effectiveParallelism,
+            effective,
+            'STRICT_RECOVERY_BOUNDARY'
+          )
+          assert.equal(sends, base + effective)
+          await clock.advance(1)
+          assert.equal(
+            planner.snapshot().effectiveParallelism,
+            effective + 1,
+            'RECOVERY_WITHOUT_NEW_RECEIPTS'
+          )
+          assert.equal(sends, base + effective + 1, 'RECOVERY_ACTUALLY_DISPATCHES_READY_WORK')
+        }
+        await clock.advance(period + 1)
+        assert.equal(
+          planner.snapshot().effectiveParallelism,
+          max,
+          'RECOVERY_NEVER_EXCEEDS_CONFIGURED_MAX'
+        )
+        assert.equal(sends, base + max)
+        release.resolve(undefined)
+        await Promise.all(handles.map(handle => handle.result))
+        await Promise.all(handles.map(handle => handle.resourcesDone))
+        diagnostics(planner, 0)
+        assert.equal(timers.active.size, 0, 'NO_IDLE_RECOVERY_INTERVAL')
+        assert.ok(timers.maximum() <= 1)
+      } finally {
+        release.resolve(undefined)
+        for (const handle of handles) handle.abort()
+        await Promise.allSettled(handles.flatMap(handle => [handle.result, handle.resourcesDone]))
+      }
+    })
+  }
+}
+
+for (const remaining of [0, 100]) {
+  test(`Changed HTTP budget invalidates a cached numeric wait with remaining ${remaining}`, async t => {
+    const clock = createRuntime(t)
+    const timers = trackTimeouts(t)
+    const replies = Array.from({ length: 4 }, () => deferred<Response>())
+    const calls: number[] = []
+    const planner = new FetchPlanner<typeof fetch>(
+      () => {
+        const reply = replies[calls.length]
+        calls.push(performance.now())
+        assert.ok(reply)
+        return reply.promise
+      },
+      { maxParallelLimit: 3, jitter: 0, throttlingCoefficient: 1, maxRequestDelayTimeMs: 1000 }
+    )
+    const spec = {
+      method: 'GET' as const,
+      replay,
+      prepare: () => ({ url: canary, init: {} }),
+      consume: (body: Response) => body.text()
+    }
+    const handles = Array.from({ length: 4 }, () => planner.submit(spec))
+    try {
+      await clock.flush()
+      assert.equal(calls.length, 3)
+      replies[0]?.resolve(
+        new Response('first', {
+          headers: {
+            'x-ratelimit-limit': '100',
+            'x-ratelimit-remaining': '50',
+            'x-lognex-retry-timeinterval': '10000'
+          }
+        })
+      )
+      await handles[0]?.resourcesDone
+      await clock.flush()
+      assert.equal(handles[3]?.snapshot().phase, 'ready')
+      assert.equal(calls.length, 3)
+      await clock.advance(100)
+      replies[1]?.resolve(
+        new Response('changed', {
+          headers: {
+            'x-ratelimit-limit': '200',
+            'x-ratelimit-remaining': String(remaining),
+            'x-lognex-retry-timeinterval': '2000'
+          }
+        })
+      )
+      await handles[1]?.resourcesDone
+      await clock.flush()
+      // elapsed100/2000=.05; remaining/200 is 0 or .5. Formula003 => 950 or450.
+      const delay = remaining === 0 ? 950 : 450
+      await clock.advance(399)
+      assert.equal(calls.length, 3, 'OLD_CACHED_WAIT_IS_NOT_A_PERMIT')
+      await clock.advance(delay - 400)
+      assert.equal(calls.length, 3)
+      await clock.advance(1)
+      assert.equal(calls.length, 4, 'HTTP_NUMBERS_CHANGE_ACTUAL_NEXT_DISPATCH')
+      assert.equal(calls[3], 1000100 + delay)
+      replies[2]?.resolve(new Response('late'))
+      replies[3]?.resolve(new Response('last'))
+      await Promise.all(handles.map(handle => handle.result))
+      await Promise.all(handles.map(handle => handle.resourcesDone))
+      diagnostics(planner, 0)
+      assert.equal(timers.active.size, 0)
+      assert.ok(timers.maximum() <= 1)
+    } finally {
+      for (const reply of replies) reply.resolve(new Response('cleanup'))
+      for (const handle of handles) handle.abort()
+      await Promise.allSettled(handles.flatMap(handle => [handle.result, handle.resourcesDone]))
+    }
+  })
+}
+
+test('Default recovery preserves the receipt maximum across late success and undelivered timers', async t => {
+  const clock = createRuntime(t)
+  clock.setRandom(0)
+  const timers = trackTimeouts(t)
+  let mono = performance.now()
+  t.mock.method(performance, 'now', () => mono)
+  const replies = Array.from({ length: 5 }, () => deferred<Response>())
+  let sends = 0
+  const planner = new FetchPlanner<typeof fetch>(
+    () => {
+      const reply = replies[sends++]
+      assert.ok(reply)
+      return reply.promise
+    },
+    { maxParallelLimit: 3, jitter: 0, attemptTimeoutMs: 90000 }
+  )
+  const prepare = deferred<undefined>()
+  const spec = {
+    method: 'GET' as const,
+    replay,
+    prepare: async () => {
+      await prepare.promise
+      return { url: canary, init: {} }
+    },
+    consume: (body: Response) => body.text()
+  }
+  prepare.resolve(undefined)
+  const handles = Array.from({ length: 4 }, () => planner.submit(spec))
+  const first = handles[0]
+  assert.ok(first)
+  const failed = assert.rejects(
+    first.result,
+    error => error instanceof OperationError && error.code === 'HTTP_FAILED'
+  )
+  try {
+    await clock.flush()
+    assert.equal(sends, 3)
+    replies[0]?.resolve(
+      new Response('{"errors":[{"code":1073}]}', {
+        status: 429,
+        headers: { 'content-type': 'application/json', 'x-lognex-reset': '50000' }
+      })
+    )
+    await failed
+    await handles[0]?.resourcesDone
+    await clock.flush()
+    assert.equal(handles[3]?.snapshot().phase, 'ready')
+    assert.equal(planner.snapshot().effectiveParallelism, 2)
+    assert.equal(planner.snapshot().serverNotBefore, 1050000)
+    mono -= 1000
+    clock.jumpWall(100000000)
+    replies[1]?.resolve(new Response('late', { headers: { 'x-lognex-reset': '1' } }))
+    await handles[1]?.resourcesDone
+    await clock.flush()
+    assert.equal(planner.snapshot().effectiveParallelism, 2, 'BACKWARD_CLOCK_DOES_NOT_RECOVER')
+    mono = 1010000
+    const next = planner.submit(spec)
+    handles.push(next)
+    await clock.flush()
+    assert.equal(planner.snapshot().effectiveParallelism, 2, 'DEFAULT_STRICT_10000')
+    mono++
+    replies[2]?.resolve(new Response('later'))
+    await handles[2]?.resourcesDone
+    await clock.flush()
+    assert.equal(planner.snapshot().effectiveParallelism, 3, 'WORK_RECOVERS_WITHOUT_TIMER_DELIVERY')
+    assert.equal(planner.snapshot().serverNotBefore, 1050000)
+    assert.equal(sends, 3, 'RECOVERY_AND_SUCCESS_DO_NOT_SHORTEN_SERVER_PAUSE')
+    mono = 1049999
+    timers.callbacks[0]?.()
+    await clock.flush()
+    assert.equal(sends, 3, 'STALE_CALLBACK_ONLY_WAKES_CURRENT_GATE')
+    mono++
+    timers.callbacks[0]?.()
+    await clock.flush()
+    assert.equal(sends, 5, 'STALE_WAKE_RECHECKS_CURRENT_POLICY_AT_DEADLINE')
+    replies[3]?.resolve(new Response('fourth'))
+    replies[4]?.resolve(new Response('fifth'))
+    await Promise.all(handles.slice(1).map(handle => handle.result))
+    await Promise.all(handles.map(handle => handle.resourcesDone))
+    diagnostics(planner, 0)
+    assert.equal(timers.active.size, 0)
+    assert.ok(timers.maximum() <= 1)
+  } finally {
+    for (const reply of replies) reply.resolve(new Response('cleanup'))
+    for (const handle of handles) handle.abort()
+    await Promise.allSettled([
+      failed,
+      ...handles.flatMap(handle => [handle.result, handle.resourcesDone])
+    ])
+  }
+})
+
+test('Receipt pause during prepare gates concurrent readiness after recovery', async t => {
+  const clock = createRuntime(t)
+  const timers = trackTimeouts(t)
+  const prepared = deferred<undefined>()
+  let sends = 0
+  const planner = new DeepPlanner<typeof fetch>(
+    () => {
+      sends++
+      return Promise.resolve(
+        sends === 1
+          ? new Response('{"errors":[{"code":1073}]}', {
+              status: 429,
+              headers: { 'content-type': 'application/json', 'x-lognex-retry-after': '5000' }
+            })
+          : new Response('ok')
+      )
+    },
+    { maxParallelLimit: 3, jitter: 0, parallelLimitCorrectionPeriodMs: 1000 }
+  )
+  const spec = {
+    method: 'GET' as const,
+    replay,
+    prepare: () => ({ url: canary, init: {} }),
+    consume: (body: Response) => body.text()
+  }
+  const first = planner.submit(spec)
+  const failed = assert.rejects(
+    first.result,
+    error => error instanceof OperationError && error.code === 'HTTP_FAILED'
+  )
+  const handles = Array.from({ length: 2 }, () =>
+    planner.submit({
+      ...spec,
+      prepare: async () => {
+        await prepared.promise
+        return { url: canary, init: {} }
+      }
+    })
+  )
+  try {
+    await failed
+    await first.resourcesDone
+    assert.equal(planner.snapshot().effectiveParallelism, 2)
+    await clock.advance(1001)
+    assert.equal(planner.snapshot().effectiveParallelism, 3)
+    await clock.advance(3998)
+    prepared.resolve(undefined)
+    await clock.flush()
+    assert.ok(handles.every(handle => handle.snapshot().phase === 'ready'))
+    assert.equal(sends, 1, 'CONCURRENT_READY_RECHECKS_RECEIPT_PAUSE')
+    await clock.advance(1)
+    assert.equal(sends, 3)
+    await Promise.all(handles.map(handle => handle.result))
+    await Promise.all(handles.map(handle => handle.resourcesDone))
+    diagnostics(planner, 0)
+    assert.equal(timers.active.size, 0)
+    assert.ok(timers.maximum() <= 1)
+  } finally {
+    prepared.resolve(undefined)
+    first.abort()
+    for (const handle of handles) handle.abort()
+    await Promise.allSettled([
+      failed,
+      first.resourcesDone,
+      ...handles.flatMap(handle => [handle.result, handle.resourcesDone])
+    ])
+  }
+})
+
+test('Finite corrected idle planner exits naturally without a recovery interval', () => {
+  const module = new URL('../../src/index.js', import.meta.url)
+  const script = `
+    import assert from 'node:assert/strict'
+    import { FetchPlanner, OperationError } from ${JSON.stringify(module.href)}
+    const planner = new FetchPlanner(() => Promise.resolve(new Response('{"errors":[{"code":1073}]}', {
+      status:429, headers:{'content-type':'application/json'}
+    })), { maxParallelLimit:2 })
+    const handle = planner.submit({method:'GET',replay:{serverSafe:false,consumeSafe:false},
+      prepare:()=>({url:'https://example.invalid',init:{}}),consume:()=>{throw new Error('UNEXPECTED_CONSUME')}})
+    await assert.rejects(handle.result,error=>error instanceof OperationError && error.code==='HTTP_FAILED')
+    await handle.resourcesDone
+    assert.equal(planner.snapshot().effectiveParallelism,1)
+    assert.equal(planner.snapshot().leasedAttempts,0)
+    console.log('FINITE_CORRECTED_IDLE')
+  `
+  const child = spawnSync(
+    process.execPath,
+    ['--unhandled-rejections=strict', '--input-type=module', '-e', script],
+    { encoding: 'utf8', timeout: 5000 }
+  )
+  assert.ifError(child.error)
+  assert.equal(child.status, 0, child.stdout + child.stderr)
+  assert.equal(child.signal, null)
+  assert.equal(child.stdout.trim(), 'FINITE_CORRECTED_IDLE')
+  assert.equal(child.stderr, '')
+})
+
+test('Unsafe recovery arithmetic fails explicitly and retains known sent work until cleanup', async t => {
+  const clock = createRuntime(t)
+  clock.setRandom(1)
+  const timers = trackTimeouts(t)
+  const release = deferred<undefined>()
+  const planner = new FetchPlanner<typeof fetch>(
+    () =>
+      Promise.resolve(new Response(null, { status: 429, headers: { 'x-lognex-auth': '429005' } })),
+    { maxParallelLimit: 2, jitter: 0.3, parallelLimitCorrectionPeriodMs: Number.MAX_SAFE_INTEGER }
+  )
+  const handle = planner.submit({
+    method: 'GET',
+    replay,
+    prepare: context => {
+      context.onDispose(() => release.promise)
+      return { url: canary, init: {} }
+    },
+    consume: () => assert.fail('NO_CONSUME')
+  })
+  try {
+    await assert.rejects(
+      handle.result,
+      error => error instanceof OperationError && error.code === 'INVALID_ARGUMENT'
+    )
+    assert.equal(planner.snapshot().leasedAttempts, 1)
+    assert.equal(planner.snapshot().sentActive, 1)
+    release.resolve(undefined)
+    await handle.resourcesDone
+    await clock.flush()
+    assert.equal(planner.snapshot().leasedAttempts, 0)
+    assert.equal(timers.active.size, 0)
+    assert.ok(timers.maximum() <= 1)
+    diagnostics(planner, 0)
+  } finally {
+    release.resolve(undefined)
+    handle.abort()
+    await Promise.allSettled([handle.result, handle.resourcesDone])
+  }
+})
+
+for (const entry of ['root', 'deep']) {
+  for (const family of ['native', 'undici']) {
+    test(`${family} ${entry} combined legacy and EOF1073 count as one receipt correction`, async t => {
+      createRuntime(t)
+      const headers = { 'content-type': 'application/json', 'x-lognex-auth': '429005' }
+      const body = '{"errors":[{"code":1073}]}'
+      const Constructor = entry === 'root' ? FetchPlanner : DeepPlanner
+      const planner =
+        family === 'native'
+          ? new Constructor<typeof fetch>(
+              () => Promise.resolve(new Response(body, { status: 429, headers })),
+              { maxParallelLimit: 4 }
+            )
+          : new Constructor<typeof undiciFetch>(
+              () => Promise.resolve(new UndiciResponse(body, { status: 429, headers })),
+              { maxParallelLimit: 4 }
+            )
+      let consumes = 0
+      const handle = planner.submit({
+        method: 'GET',
+        replay,
+        prepare: () => ({ url: canary, init: {} }),
+        consume: () => {
+          consumes++
+          return 'bad'
+        }
+      })
+      await assert.rejects(
+        handle.result,
+        error =>
+          error instanceof OperationError && error.code === 'HTTP_FAILED' && error.status === 429
+      )
+      await handle.resourcesDone
+      assert.equal(planner.snapshot().effectiveParallelism, 3, 'ONE_DECREMENT_PER_RECEIPT')
+      assert.equal(handle.snapshot().dispatchCalls, 1)
+      assert.equal(consumes, 0)
+      diagnostics(planner, 0)
+    })
+  }
+}
