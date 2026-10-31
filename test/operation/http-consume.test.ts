@@ -111,7 +111,7 @@ function observe(planner: ReturnType<typeof fixture>['planner']) {
     })
     snapshots.push(attachment.snapshot)
   }
-  function verify<T>(handle: Handle<T>, status: number) {
+  function verify<T>(handle: Handle<T>, status: number, expectedInvalidHints: number) {
     snapshots.push(handle.snapshot(), handle.observe(() => undefined).snapshot)
     for (const record of [...events, ...snapshots]) checkRecord(record)
     for (const record of plannerSnapshots) {
@@ -136,12 +136,12 @@ function observe(planner: ReturnType<typeof fixture>['planner']) {
     assert.ok(events.some(event => event.type === 'resources-settled' && event.status === status))
     const observation: unknown = Reflect.get(planner, 'observation')
     assert.ok(observation instanceof OperationObservation)
-    assert.deepEqual(observation.diagnostics.snapshot(), {
-      OBSERVER_FAILED: 0,
-      INVALID_HINT: 0,
-      LATE_COMPLETION: 0,
-      rejections: {}
-    })
+    const diagnostics = observation.diagnostics.snapshot()
+    assert.equal(diagnostics.INVALID_HINT, expectedInvalidHints)
+    assert.equal(diagnostics.OBSERVER_FAILED, 0)
+    assert.equal(diagnostics.LATE_COMPLETION, 0)
+    assert.deepEqual(diagnostics.rejections, {})
+    assert.equal(JSON.stringify(diagnostics).includes(canary), false)
     assert.equal(handle.snapshot().dispatchCalls, 1, 'NON2XX_MUST_NOT_REPLAY')
     assert.equal(handle.snapshot().attempts, 1, 'NO_SECOND_PREPARE')
     assert.equal(planner.snapshot().leasedAttempts, 0)
@@ -225,7 +225,7 @@ for (const family of ['native/root', 'undici7.3/deep'] as const) {
           assert.equal(source.response.bodyUsed, true)
           assert.equal(prepared, 1)
           assert.equal(source.calls(), 1, 'NON2XX_MUST_NOT_REPLAY')
-          records.verify(handle, item.status)
+          records.verify(handle, item.status, 2)
         } finally {
           handle.abort()
           await Promise.allSettled([handle.result, handle.resourcesDone])
@@ -323,7 +323,7 @@ for (const family of ['native/root', 'undici7.3/deep'] as const) {
       assert.equal(discarded, 1)
       assert.equal(disposed, 1)
       assert.equal(source.calls(), 1)
-      records.verify(handle, 412)
+      records.verify(handle, 412, 2)
     } finally {
       gate.resolve(undefined)
       handle.abort()
@@ -372,7 +372,7 @@ for (const family of ['native/root', 'undici7.3/deep'] as const) {
         assert.equal(brand?.cause, cause)
         assert.equal(prepared, 1, 'NO_SECOND_PREPARE')
         assert.equal(source.calls(), 1, `NON2XX_MUST_NOT_REPLAY status=${status}`)
-        records.verify(handle, status)
+        records.verify(handle, status, 2)
       } finally {
         handle.abort()
         await Promise.allSettled([handle.result, handle.resourcesDone])
@@ -398,7 +398,7 @@ for (const family of ['native/root', 'undici7.3/deep'] as const) {
       await assert.rejects(handle.result, error => httpFailure(error, cause, 200))
       await handle.resourcesDone
       assert.equal(source.calls(), 1)
-      records.verify(handle, 200)
+      records.verify(handle, 200, 2)
     } finally {
       handle.abort()
       await Promise.allSettled([handle.result, handle.resourcesDone])
@@ -570,7 +570,7 @@ test('Observer commands cannot inherit a pending consume read-failure capability
     await clock.advance(3000)
     await child.result
     await child.resourcesDone
-    records.verify(handle, 200)
+    records.verify(handle, 200, 0)
   } finally {
     gate.resolve(undefined)
     handle.abort()

@@ -5,6 +5,7 @@ import { OperationCapacity } from './operation-capacity.js'
 import { OperationResources } from './operation-resources.js'
 import { OperationState } from './operation-state.js'
 import { ResponseClassifier } from './response-classifier.js'
+import { parseResponsePolicy } from './response-policy.js'
 import { calculateRequestDelay, createAttenuationSteps, requestDeadline } from './pacing.js'
 import { absoluteDeadline, MAX_TIMEOUT_MS, monotonicNow } from './runtime.js'
 import type {
@@ -447,15 +448,29 @@ export class FetchPlanner<F extends Transport> implements Planner<Init<F>, Respo
           if (!work) return
           response = work
           // Read the receipt's HTTP fact once; custom Response accessors can run user code.
+          const receipt = { monotonic: monotonicNow(), wall: Date.now() }
           const status = response.status
           if (!Number.isInteger(status) || status < 0 || status > 599) throw invalid()
+          const headers = response.headers
+          const policy = parseResponsePolicy(status, headers, receipt)
+          if (policy.limit !== null) this.#pacing.limit = policy.limit
+          if (policy.remaining !== null) this.#pacing.remaining = policy.remaining
+          if (policy.retryTimeInterval !== null)
+            this.#pacing.retryTimeInterval = policy.retryTimeInterval
+          this.#pacing.serverNotBefore = Math.max(
+            this.#pacing.serverNotBefore,
+            policy.serverNotBefore
+          )
+          for (let i = 0; i < policy.invalidHints; i++)
+            this.observation.diagnostics.increment('INVALID_HINT')
+          this.#wake()
           state.transition('headers-received', { phase: 'classifying', status }, this.#stamp())
           if (state.snapshot().outcome !== 'pending') return
           if (status === 429) {
             code = 'HTTP_FAILED'
             const classificationStartedAt = monotonicNow()
             classifier = new ResponseClassifier(
-              { status, headers: response.headers, body: response.body },
+              { status, headers, body: response.body },
               classificationStartedAt,
               monotonicNow
             )

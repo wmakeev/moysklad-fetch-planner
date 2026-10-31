@@ -26,7 +26,8 @@ const registry = new Map([
   ['http-consume', 'http-consume.test.ts'],
   ['upload', 'upload.test.ts'],
   ['integration', 'integration.test.ts'],
-  ['classifier', 'classifier.test.ts']
+  ['classifier', 'classifier.test.ts'],
+  ['hints', 'hints.test.ts']
 ])
 const compilers = [
   ['5.7.3', 'node_modules/.pnpm/typescript@5.7.3/node_modules/typescript/bin/tsc'],
