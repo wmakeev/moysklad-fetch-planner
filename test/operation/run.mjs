@@ -27,7 +27,8 @@ const registry = new Map([
   ['upload', 'upload.test.ts'],
   ['integration', 'integration.test.ts'],
   ['classifier', 'classifier.test.ts'],
-  ['hints', 'hints.test.ts']
+  ['hints', 'hints.test.ts'],
+  ['guard', 'guard.test.ts']
 ])
 const compilers = [
   ['5.7.3', 'node_modules/.pnpm/typescript@5.7.3/node_modules/typescript/bin/tsc'],
