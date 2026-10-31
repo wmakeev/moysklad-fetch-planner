@@ -2,6 +2,7 @@ import { OperationObservation, ObservationSequence } from './operation-observati
 import { isErrored, isReadable } from 'node:stream'
 import { CallbackContext } from './callback-context.js'
 import { OperationCapacity } from './operation-capacity.js'
+import { runHook } from './operation-hooks.js'
 import { OperationResources } from './operation-resources.js'
 import { OperationState } from './operation-state.js'
 import { GuardStore } from './guard.js'
@@ -67,7 +68,15 @@ function record(input: unknown): Record<string, unknown> {
 
 function validateSpec(input: unknown): void {
   const spec = record(input)
-  const allowed = ['method', 'entityKey', 'prepare', 'consume', 'replay', 'deadlineMs']
+  const allowed = [
+    'method',
+    'entityKey',
+    'prepare',
+    'consume',
+    'replay',
+    'deadlineMs',
+    'beforeDispatch'
+  ]
   if (Reflect.ownKeys(spec).some(key => typeof key !== 'string' || !allowed.includes(key)))
     throw invalid()
   if (
@@ -84,6 +93,8 @@ function validateSpec(input: unknown): void {
         spec['entityKey'].length > 128
       : spec['entityKey'] !== undefined
   )
+    throw invalid()
+  if (spec['beforeDispatch'] !== undefined && typeof spec['beforeDispatch'] !== 'function')
     throw invalid()
   const replay = record(spec['replay'])
   if (
@@ -310,6 +321,8 @@ export class FetchPlanner<F extends Transport> implements Planner<Init<F>, Respo
       deadline: number | undefined
       classifier: ResponseClassifier | undefined
       classificationWake: number | undefined
+      hookDeadline: number | undefined
+      hookWork: ReturnType<typeof runHook> | undefined
       token: ReturnType<Lease['trySend']>
       response: ResponseOf<F> | undefined
     }
@@ -344,6 +357,7 @@ export class FetchPlanner<F extends Transport> implements Planner<Init<F>, Respo
             deadline,
             currentAttempt?.deadline ?? deadline,
             currentAttempt?.classificationWake ?? Infinity,
+            currentAttempt?.hookDeadline ?? Infinity,
             retryNotBefore ?? Infinity
           )
     }
@@ -365,7 +379,9 @@ export class FetchPlanner<F extends Transport> implements Planner<Init<F>, Respo
           ? 'DEADLINE'
           : attempt?.deadline !== undefined && now >= attempt.deadline
             ? 'ATTEMPT_TIMEOUT'
-            : undefined
+            : attempt?.hookDeadline !== undefined && now >= attempt.hookDeadline
+              ? 'HOOK_FAILED'
+              : undefined
       if (code && fail(code)) {
         attempt?.controller.abort()
         attempt?.classifier?.cancel()
@@ -413,6 +429,8 @@ export class FetchPlanner<F extends Transport> implements Planner<Init<F>, Respo
           deadline: undefined,
           classifier: undefined,
           classificationWake: undefined,
+          hookDeadline: undefined,
+          hookWork: undefined,
           token: undefined,
           response: undefined
         }
@@ -489,13 +507,58 @@ export class FetchPlanner<F extends Transport> implements Planner<Init<F>, Respo
             raw => this.#descriptor(raw)
           )
           if (state.snapshot().outcome !== 'pending') return
-          state.transition('phase-changed', { phase: 'ready' }, this.#stamp())
           // All descriptor accessors were read under the prepare lifetime. Materialize
           // the final transport arguments before admission, including the method/signal.
           const url = descriptor.value.url
           const method = spec.method
           const putKey = method === 'PUT' ? spec.entityKey : undefined
           const init = { ...descriptor.value.init, method, signal: attempt.controller.signal }
+          if (spec.beforeDispatch) {
+            expire(monotonicNow())
+            if (state.snapshot().outcome !== 'pending') return
+            code = 'HOOK_FAILED'
+            attempt.hookDeadline = absoluteDeadline(monotonicNow(), this.#options.hookTimeoutMs)
+            if (attempt.hookDeadline === undefined) {
+              fail('HOOK_FAILED')
+              return
+            }
+            this.#armTimer()
+            // A separate physical owner, with no request registrations. Await its full
+            // assimilation/extraction before cleanup or lease release, even after timeout.
+            attempt.hookWork = runHook(
+              this.#context,
+              spec.beforeDispatch,
+              {
+                snapshot: state.snapshot(),
+                signal: attempt.controller.signal,
+                attemptNumber: attempt.number,
+                dispatchCalls: state.snapshot().dispatchCalls
+              },
+              monotonicNow
+            )
+            try {
+              const decision = await attempt.hookWork
+              expire(monotonicNow())
+              if (state.snapshot().outcome !== 'pending') return
+              if (decision.value.type === 'deny') {
+                fail('HOOK_DENIED', decision.value.code)
+                return
+              }
+              // Defer admission is implemented by T83; never treat it as allow here.
+              if (decision.value.type === 'defer') {
+                fail('HOOK_FAILED')
+                return
+              }
+            } finally {
+              // Absolute expiry also wins on rejection or a synchronously blocking hook.
+              expire(monotonicNow())
+              attempt.hookWork = undefined
+              attempt.hookDeadline = undefined
+              this.#armTimer()
+            }
+          }
+          if (state.snapshot().outcome !== 'pending') return
+          state.transition('phase-changed', { phase: 'ready' }, this.#stamp())
           code = 'TRANSPORT_FAILED'
           const work = await new Promise<ResponseOf<F> | undefined>(resolve => {
             entry.releaseReady = () => {

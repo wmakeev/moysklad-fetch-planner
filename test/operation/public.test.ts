@@ -87,7 +87,10 @@ test('Unknown hooks and invalid specs fail with sentinel zero without dispatch',
     { ...base, replay: {} },
     { ...base, method: 'PUT' },
     { ...base, deadlineMs: 1.5 },
-    { ...base, beforeDispatch: () => ({ type: 'allow' }) }
+    { ...base, beforeDispatch: 42 },
+    { ...base, beforeRetry: 42 },
+    { ...base, beforeRetry: () => ({ type: 'allow' }) },
+    { ...base, beforeUnknown: () => ({ type: 'allow' }) }
   ]
   for (const spec of invalid) {
     const result: unknown = Reflect.apply(planner.submit.bind(planner), planner, [spec])
@@ -163,3 +166,63 @@ test('Runtime init cannot override core method or signal', async () => {
   }
   assert.equal(calls, 0)
 })
+
+for (const [name, Planner] of [
+  ['root', root.FetchPlanner],
+  ['deep', DeepPlanner]
+] as const) {
+  test(`Public ${name} beforeDispatch accepts frozen allow context for both families`, async () => {
+    let calls = 0
+    let hooks = 0
+    const contexts: root.HookContext[] = []
+    const beforeDispatch: root.Hook = context => {
+      hooks++
+      contexts.push(context)
+      return { type: 'allow' }
+    }
+    const native: typeof globalThis.fetch = () => {
+      calls++
+      return Promise.resolve(new Response('native'))
+    }
+    const undici: typeof UndiciFetch = () => {
+      calls++
+      return Promise.resolve(new UndiciResponse('undici'))
+    }
+    const first = new Planner(native).submit({
+      method: 'POST',
+      replay,
+      prepare: () => ({ url: '', init: { body: 'payload' } }),
+      beforeDispatch,
+      consume: response => response.text()
+    })
+    assert.equal((await first.result).value, 'native')
+    await first.resourcesDone
+    assert.equal(calls, 1)
+    assert.equal(hooks, 1)
+    const second = new Planner(undici).submit({
+      method: 'POST',
+      replay,
+      prepare: () => ({ url: '', init: { body: 'payload' } }),
+      beforeDispatch,
+      consume: response => response.text()
+    })
+    assert.equal((await second.result).value, 'undici')
+    await second.resourcesDone
+    assert.equal(calls, 2)
+    assert.equal(hooks, 2)
+    for (const context of contexts) {
+      assert.ok(Object.isFrozen(context))
+      assert.ok(Object.isFrozen(context.snapshot))
+      assert.deepEqual(Object.keys(context).sort(), [
+        'attemptNumber',
+        'dispatchCalls',
+        'signal',
+        'snapshot'
+      ])
+      assert.equal(context.snapshot.phase, 'preparing')
+      assert.equal(context.attemptNumber, 1)
+      assert.equal(context.dispatchCalls, 0)
+      assert.equal(context.snapshot.dispatchEntered, false)
+    }
+  })
+}
