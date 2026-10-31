@@ -22,7 +22,8 @@ const registry = new Map([
   ['observation', 'observation.test.ts'],
   ['capacity', 'capacity.test.ts'],
   ['commands', 'commands.test.ts'],
-  ['reentry', 'reentry.test.ts']
+  ['reentry', 'reentry.test.ts'],
+  ['http-consume', 'http-consume.test.ts']
 ])
 const compilers = [
   ['5.7.3', 'node_modules/.pnpm/typescript@5.7.3/node_modules/typescript/bin/tsc'],

@@ -187,3 +187,22 @@ export class OperationError extends Error {
           : 'not-dispatched'
   }
 }
+
+/** Internal identity seam for the stage III retry policy, never inferred from error text. */
+export class ConsumeReadFailure extends Error {
+  readonly #identity: object
+
+  constructor(identity: object, cause: unknown) {
+    super('RETRYABLE_READ_FAILURE', { cause })
+    this.#identity = identity
+  }
+
+  static isFor(error: unknown, identity: object): boolean {
+    return (
+      typeof error === 'object' &&
+      error !== null &&
+      #identity in error &&
+      error.#identity === identity
+    )
+  }
+}

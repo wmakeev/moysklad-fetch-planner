@@ -22,7 +22,7 @@ import type {
   Spec,
   Transport
 } from './operation-types.js'
-import { OperationError } from './operation-types.js'
+import { ConsumeReadFailure, OperationError } from './operation-types.js'
 
 const defaults: FetchPlannerOptions = {
   maxParallelLimit: 4,
@@ -144,6 +144,7 @@ export class FetchPlanner<F extends Transport> implements Planner<Init<F>, Respo
   ) => Promise<ResponseOf<F>>
   readonly #options: FetchPlannerOptions
   readonly #context = new CallbackContext()
+  readonly #consumeScope = new CallbackContext()
   readonly #capacity: OperationCapacity<Entry>
   readonly #active = new Set<Entry>()
   private readonly observation: OperationObservation
@@ -450,15 +451,26 @@ export class FetchPlanner<F extends Transport> implements Planner<Init<F>, Respo
           const borrowed = response
           const value = await resources.runOwner(
             'consume',
+            // The inner lifetime gives the read-failure capability its exact consume
+            // identity; another active owner on this planner must not be able to use it.
+            // Keep both value boxes until outer materialization, preserving T49's guard.
             registrations =>
-              spec.consume(borrowed, {
-                signal: controller.signal,
-                operationId: state.handle.id,
-                attemptNumber: 1,
-                ...registrations,
-                retryableReadFailure: cause => new Error('RETRYABLE_READ_FAILURE', { cause })
-              }),
-            raw => raw
+              this.#consumeScope.run(
+                lifetime =>
+                  spec.consume(borrowed, {
+                    signal: controller.signal,
+                    operationId: state.handle.id,
+                    attemptNumber: 1,
+                    ...registrations,
+                    retryableReadFailure: cause => {
+                      if (!this.#context.isActive() || !this.#consumeScope.isCurrent(lifetime))
+                        throw invalid()
+                      return new ConsumeReadFailure(lifetime, cause)
+                    }
+                  }),
+                raw => raw
+              ),
+            boxed => boxed.value
           )
           // Materialize clocks before the final safety decision: even Date.now may run
           // user code. Only scalar facts and the guarded value box enter commit.
@@ -637,18 +649,22 @@ export class FetchPlanner<F extends Transport> implements Planner<Init<F>, Respo
   #wake(): void {
     if (this.#pumpScheduled) return
     this.#pumpScheduled = true
-    queueMicrotask(() => {
-      this.#pumpScheduled = false
-      this.#readyWake = Infinity
-      for (const entry of this.#ready) {
-        this.#readyWake = Math.min(this.#readyWake, entry.admit())
-      }
-      while (!this.#stopRequested) {
-        const next = this.#capacity.take()
-        if (!next) break
-        void next.value.start(next.lease)
-      }
-      this.#armTimer()
+    // A wake raised by consume must not lend its read-failure capability to
+    // the next owner admitted by the coordinator.
+    this.#consumeScope.detached(() => {
+      queueMicrotask(() => {
+        this.#pumpScheduled = false
+        this.#readyWake = Infinity
+        for (const entry of this.#ready) {
+          this.#readyWake = Math.min(this.#readyWake, entry.admit())
+        }
+        while (!this.#stopRequested) {
+          const next = this.#capacity.take()
+          if (!next) break
+          void next.value.start(next.lease)
+        }
+        this.#armTimer()
+      })
     })
   }
 }
