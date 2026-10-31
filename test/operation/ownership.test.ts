@@ -238,7 +238,7 @@ for (const rejectCleanup of [false, true]) {
     )
     const first = planner.submit({
       method: 'POST',
-      replay,
+      replay: { serverSafe: false, consumeSafe: false },
       prepare: ctx => {
         firstPrepares++
         ctx.onDispose(async () => {

@@ -206,7 +206,7 @@ export async function runUploadCase(family: Family, mode: Mode) {
     const base = `http://127.0.0.1:${address.port}`
     handle = planner.submit({
       method: 'POST',
-      replay: { serverSafe: true, consumeSafe: true },
+      replay: { serverSafe: false, consumeSafe: false },
       prepare: ctx => {
         ctx.onDispose(async () => {
           assert.equal(source.body.locked, true)
