@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
-import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync, writeSync } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -41,14 +41,55 @@ const compilers = [
   ['7.0.2', 'node_modules/typescript/bin/tsc']
 ]
 
+/** @param {number} fd @param {string} text */
+function writeDiagnostic(fd, text) {
+  try {
+    const bytes = Buffer.from(text)
+    let offset = 0
+    while (offset < bytes.length) {
+      const written = writeSync(fd, bytes, offset, bytes.length - offset)
+      if (written === 0) return
+      offset += written
+    }
+  } catch {
+    // Diagnostic I/O must not replace the original child failure.
+  }
+}
+
 /** @param {string[]} args */
 function child(args) {
+  const started = performance.now()
   const result = spawnSync(process.execPath, args, {
     cwd: root,
     encoding: 'utf8',
     timeout: 30_000,
     maxBuffer: 4 * 1024 * 1024
   })
+  if (result.error) {
+    writeDiagnostic(1, result.stdout)
+    writeDiagnostic(2, result.stderr)
+    try {
+      /** @type {unknown} */
+      const code = Reflect.get(result.error, 'code')
+      writeDiagnostic(
+        2,
+        JSON.stringify({
+          command: [process.execPath, ...args],
+          cwd: root,
+          elapsedMs: performance.now() - started,
+          status: result.status,
+          signal: result.signal,
+          error: {
+            name: result.error.name,
+            message: result.error.message,
+            code: typeof code === 'string' || typeof code === 'number' ? code : undefined
+          }
+        }) + '\n'
+      )
+    } catch {
+      // Metadata preparation must not replace the original child failure either.
+    }
+  }
   assert.ifError(result.error)
   return result
 }
