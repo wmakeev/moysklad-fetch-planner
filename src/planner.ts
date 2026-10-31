@@ -4,6 +4,7 @@ import { CallbackContext } from './callback-context.js'
 import { OperationCapacity } from './operation-capacity.js'
 import { OperationResources } from './operation-resources.js'
 import { OperationState } from './operation-state.js'
+import { GuardStore } from './guard.js'
 import { ResponseClassifier } from './response-classifier.js'
 import { parseResponsePolicy } from './response-policy.js'
 import {
@@ -134,7 +135,7 @@ type Lease = NonNullable<ReturnType<OperationCapacity<Entry>['take']>>['lease']
 interface Entry {
   start(lease: Lease): Promise<void>
   cancel(
-    code: 'ABORTED' | 'STOPPED' | 'SEQUENCE_EXHAUSTED' | 'INVALID_ARGUMENT',
+    code: 'ABORTED' | 'STOPPED' | 'GUARD_OPEN' | 'SEQUENCE_EXHAUSTED' | 'INVALID_ARGUMENT',
     reason?: unknown
   ): void
   nextWake(): number | undefined
@@ -153,6 +154,8 @@ export class FetchPlanner<F extends Transport> implements Planner<Init<F>, Respo
     }
   ) => Promise<ResponseOf<F>>
   readonly #options: FetchPlannerOptions
+  readonly #guard: GuardStore
+  #guardAt = -Infinity
   readonly #context = new CallbackContext()
   readonly #consumeScope = new CallbackContext()
   readonly #capacity: OperationCapacity<Entry>
@@ -187,6 +190,7 @@ export class FetchPlanner<F extends Transport> implements Planner<Init<F>, Respo
   #sequenceExhausted = false
   private readonly commands: (() => void)[] = []
   private drainingCommands = false
+  #stopCode: 'STOPPED' | 'GUARD_OPEN' = 'STOPPED'
   #stopRequested = false
   #stopped = false
   #stopReason: unknown
@@ -201,6 +205,12 @@ export class FetchPlanner<F extends Transport> implements Planner<Init<F>, Respo
       if (cause instanceof OperationError) throw cause
       throw invalid(cause)
     }
+    this.#guard = new GuardStore({
+      maxEntityKeys: this.#options.maxEntityKeys,
+      errorPerMinuteLimit: this.#options.errorPerMinuteLimit,
+      rateLimitPerMinuteLimit: this.#options.rateLimitPerMinuteLimit,
+      entityPutPerMinuteLimit: this.#options.entityPutPerMinuteLimit
+    })
     this.observation = new OperationObservation(
       this.#options.maxSubscribers,
       undefined,
@@ -242,7 +252,7 @@ export class FetchPlanner<F extends Transport> implements Planner<Init<F>, Respo
     }
     if (this.observationSequence.isExhausted) return reject('SEQUENCE_EXHAUSTED')
     if (this.#context.isActive()) return reject('REENTRANT_OPERATION')
-    if (this.#stopRequested) return reject('STOPPED', this.#stopReason)
+    if (this.#stopRequested) return reject(this.#stopCode, this.#stopReason)
     // Reserve before copying/accessing user spec or retaining it in a command.
     const entry: Entry = {
       start: () => {
@@ -267,7 +277,7 @@ export class FetchPlanner<F extends Transport> implements Planner<Init<F>, Respo
     } catch (cause) {
       return rejectReserved('INVALID_ARGUMENT', cause)
     }
-    if (this.#submissionStopped()) return rejectReserved('STOPPED', this.#stopReason)
+    if (this.#submissionStopped()) return rejectReserved(this.#stopCode, this.#stopReason)
     if (this.observationSequence.current >= Number.MAX_SAFE_INTEGER)
       return rejectReserved('SEQUENCE_EXHAUSTED')
     if (this.idExhausted || !Number.isSafeInteger(this.nextId) || this.nextId < 1)
@@ -354,8 +364,9 @@ export class FetchPlanner<F extends Transport> implements Planner<Init<F>, Respo
       nextWake,
       expire,
       cancel: (code, reason) => {
-        if (code === 'STOPPED' && state.snapshot().dispatchEntered) return
-        if (code !== 'STOPPED' && state.snapshot().resultCommitted) {
+        if ((code === 'STOPPED' || code === 'GUARD_OPEN') && state.snapshot().dispatchEntered)
+          return
+        if (code !== 'STOPPED' && code !== 'GUARD_OPEN' && state.snapshot().resultCommitted) {
           state.succeed('pending', this.#stamp())
           this.#armTimer()
           return
@@ -402,7 +413,9 @@ export class FetchPlanner<F extends Transport> implements Planner<Init<F>, Respo
           // All descriptor accessors were read under the prepare lifetime. Materialize
           // the final transport arguments before admission, including the method/signal.
           const url = descriptor.value.url
-          const init = { ...descriptor.value.init, method: spec.method, signal: controller.signal }
+          const method = spec.method
+          const putKey = method === 'PUT' ? spec.entityKey : undefined
+          const init = { ...descriptor.value.init, method, signal: controller.signal }
           code = 'TRANSPORT_FAILED'
           const work = await new Promise<ResponseOf<F> | undefined>(resolve => {
             entry.releaseReady = () => {
@@ -416,8 +429,9 @@ export class FetchPlanner<F extends Transport> implements Planner<Init<F>, Respo
                 const random = Math.random()
                 const stamp = this.#stamp()
                 const now = monotonicNow()
+                const guardNow = this.#guardTime(now)
                 expire(now)
-                if (this.#stopRequested) entry.cancel('STOPPED', this.#stopReason)
+                if (this.#stopRequested) entry.cancel(this.#stopCode, this.#stopReason)
                 if (this.#pacing.guardOpen) fail('GUARD_OPEN')
                 if (state.snapshot().outcome !== 'pending') {
                   entry.releaseReady()
@@ -426,10 +440,19 @@ export class FetchPlanner<F extends Transport> implements Planner<Init<F>, Respo
                 this.#reviewParallelism(now, random)
                 const notBefore = this.#dispatchNotBefore(now, random)
                 if (now < notBefore) return notBefore
+                if (putKey !== undefined) {
+                  const decision = this.#guard.checkPut(putKey, guardNow)
+                  if (decision.code) {
+                    fail(decision.code)
+                    entry.releaseReady()
+                    return Infinity
+                  }
+                }
                 token = lease.trySend()
                 if (!token) return Infinity
                 // Final gate -> accounting -> committed state -> transport is synchronous.
                 // No observer, getter, random source, clock callback or await in this section.
+                if (putKey !== undefined) this.#guard.recordPutDispatch(putKey, guardNow)
                 this.#pacing.lastDispatchAt = now
                 this.#pacingPlan = undefined
                 this.#ready.delete(entry)
@@ -462,6 +485,12 @@ export class FetchPlanner<F extends Transport> implements Planner<Init<F>, Respo
           const receipt = { monotonic: monotonicNow(), wall: Date.now() }
           const status = response.status
           if (!Number.isInteger(status) || status < 0 || status > 599) throw invalid()
+          // Count every materialized HTTP receipt, even after logical termination, before
+          // touching headers or delivering observations. Opening is a permanent local stop.
+          if (this.#guard.recordReceipt(status, this.#guardTime(receipt.monotonic)).guardOpen) {
+            this.#pacing.guardOpen = true
+            this.#requestStop('GUARD_OPEN')
+          }
           const headers = response.headers
           const policy = parseResponsePolicy(status, headers, receipt)
           if (policy.limit !== null) this.#pacing.limit = policy.limit
@@ -625,13 +654,24 @@ export class FetchPlanner<F extends Transport> implements Planner<Init<F>, Respo
   }
 
   stop(reason?: unknown): void {
+    this.#requestStop('STOPPED', reason)
+  }
+
+  #requestStop(code: 'STOPPED' | 'GUARD_OPEN', reason?: unknown): void {
     if (this.#stopRequested) return
     this.#stopRequested = true
+    this.#stopCode = code
     this.#stopReason = reason
     this.#command(() => {
       this.#stopped = true
-      for (const entry of this.#active) entry.cancel('STOPPED', reason)
+      for (const entry of this.#active) entry.cancel(code, reason)
     })
+  }
+
+  /** Keep store time monotonic even if an injected host clock moves backwards. */
+  #guardTime(now: number): number {
+    this.#guardAt = Math.max(this.#guardAt, now)
+    return this.#guardAt
   }
 
   #submissionStopped(): boolean {
