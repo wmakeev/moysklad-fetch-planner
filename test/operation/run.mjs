@@ -13,6 +13,7 @@ const registry = new Map([
   ['public', 'public.test.ts'],
   ['before-dispatch', 'before-dispatch.test.ts'],
   ['before-retry', 'before-retry.test.ts'],
+  ['hooks-integration', 'hooks-integration.test.ts'],
   ['admission', 'admission.test.ts'],
   ['ownership', 'ownership.test.ts'],
   ['commit', 'commit.test.ts'],
