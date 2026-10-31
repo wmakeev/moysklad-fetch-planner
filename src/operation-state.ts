@@ -1,3 +1,5 @@
+import { OperationObservation } from './operation-observation.js'
+import type { ObservationStamp as Stamp } from './operation-observation.js'
 import type { CallbackValue } from './callback-context.js'
 import type {
   Attachment,
@@ -10,12 +12,6 @@ import type {
   Snapshot
 } from './operation-types.js'
 
-/** Sequence and clocks belong to the coordinator, never to an individual handle. */
-interface Stamp {
-  readonly sequence: number
-  readonly epochTime: number
-  readonly elapsedMs: number
-}
 type Progress = Partial<
   Pick<Snapshot, 'phase' | 'attempts' | 'dispatchCalls' | 'dispatchEntered' | 'status'>
 >
@@ -39,13 +35,18 @@ export class OperationState<T> {
   private current: Snapshot
   private readonly result = settlement<Completed<T>>()
   private readonly resources = settlement<ResourceSummary>()
-  private readonly listeners = new Set<(event: Event) => void>()
-  private pendingDeliveries: (() => void)[] | undefined
+  private readonly observation: OperationObservation
   private committed: CallbackValue<T> | undefined
   private abortRequest: ((reason?: unknown) => void) | undefined
   readonly handle: Handle<T>
 
-  constructor(id: number, abortRequest?: (reason?: unknown) => void) {
+  constructor(
+    id: number,
+    abortRequest?: (reason?: unknown) => void,
+    private plannerObservation?: OperationObservation,
+    maxSubscribers = 64
+  ) {
+    this.observation = new OperationObservation(maxSubscribers, plannerObservation?.diagnostics)
     this.current = {
       id,
       sequence: 0,
@@ -105,17 +106,7 @@ export class OperationState<T> {
   }
 
   private observe(listener: (event: Event) => void): Attachment<Snapshot> {
-    // Each attachment is independent, even when the callback identity is reused.
-    const subscription = (event: Event) => {
-      listener(event)
-    }
-    if (!this.finished()) this.listeners.add(subscription)
-    return Object.freeze({
-      snapshot: this.snapshot(),
-      unsubscribe: () => {
-        this.listeners.delete(subscription)
-      }
-    })
+    return this.observation.attach(listener, () => this.snapshot(), this.finished())
   }
 
   /** Terminal results retain their outcome/phase while late HTTP facts arrive. */
@@ -141,19 +132,7 @@ export class OperationState<T> {
    * The coordinator uses this only around transport entry, never across an await.
    */
   deferDelivery<R>(work: () => R): R {
-    if (this.pendingDeliveries) return work()
-    const pending: (() => void)[] = []
-    this.pendingDeliveries = pending
-    try {
-      return work()
-    } finally {
-      try {
-        // Reentrant publications append after records already committed in this section.
-        for (const deliver of pending) deliver()
-      } finally {
-        this.pendingDeliveries = undefined
-      }
-    }
+    return (this.plannerObservation ?? this.observation).deferDelivery(work)
   }
 
   /** Caller performs deadline/abort checks before handing over the guarded box. */
@@ -219,15 +198,20 @@ export class OperationState<T> {
       epochTime: stamp.epochTime,
       elapsedMs: stamp.elapsedMs
     })
-    const listeners = [...this.listeners]
-    const deliver = () => {
-      try {
-        for (const listener of listeners) listener(event)
-      } finally {
-        if (this.finished()) this.listeners.clear()
-      }
+    if (type === 'late-completion') this.observation.diagnostics.increment('LATE_COMPLETION')
+    const operationDelivery = stamp.emit === false ? undefined : this.observation.capture(event)
+    const plannerDelivery =
+      stamp.emit === false ? undefined : this.plannerObservation?.capture(event)
+    const deliveryScope = this.plannerObservation ?? this.observation
+    // Retire at commit, keeping only the captured final fanout until delivery.
+    if (this.finished()) {
+      this.observation.clear()
+      this.plannerObservation = undefined
     }
-    if (this.pendingDeliveries) this.pendingDeliveries.push(deliver)
-    else deliver()
+    const deliver = () => {
+      plannerDelivery?.()
+      operationDelivery?.()
+    }
+    deliveryScope.deliver(deliver)
   }
 }

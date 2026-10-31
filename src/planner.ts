@@ -1,3 +1,4 @@
+import { OperationObservation, ObservationSequence } from './operation-observation.js'
 import { isErrored, isReadable } from 'node:stream'
 import { CallbackContext } from './callback-context.js'
 import { OperationCapacity } from './operation-capacity.js'
@@ -125,7 +126,7 @@ function optionsFrom(input: Partial<FetchPlannerOptions>): FetchPlannerOptions {
 type Lease = NonNullable<ReturnType<OperationCapacity<Entry>['take']>>['lease']
 interface Entry {
   start(lease: Lease): Promise<void>
-  cancel(code: 'ABORTED' | 'STOPPED', reason?: unknown): void
+  cancel(code: 'ABORTED' | 'STOPPED' | 'SEQUENCE_EXHAUSTED', reason?: unknown): void
   nextWake(): number | undefined
   expire(now: number): void
   admit(): number
@@ -145,7 +146,8 @@ export class FetchPlanner<F extends Transport> implements Planner<Init<F>, Respo
   readonly #context = new CallbackContext()
   readonly #capacity: OperationCapacity<Entry>
   readonly #active = new Set<Entry>()
-  readonly #listeners = new Set<(event: Event) => void>()
+  private readonly observation: OperationObservation
+  private readonly observationSequence = new ObservationSequence()
   readonly #startedAt = monotonicNow()
   readonly #ready = new Set<Entry>()
   readonly #attenuationSteps: readonly number[]
@@ -167,8 +169,9 @@ export class FetchPlanner<F extends Transport> implements Planner<Init<F>, Respo
   }
   #pacingPlan: { key: string; notBefore: number } | undefined
   #readyWake = Infinity
-  #sequence = 0
-  #nextId = 1
+  private nextId = 1
+  private idExhausted = false
+  #sequenceExhausted = false
   #stopped = false
   #stopReason: unknown
   #pumpScheduled = false
@@ -182,6 +185,7 @@ export class FetchPlanner<F extends Transport> implements Planner<Init<F>, Respo
       if (cause instanceof OperationError) throw cause
       throw invalid(cause)
     }
+    this.observation = new OperationObservation(this.#options.maxSubscribers)
     this.#attenuationSteps = createAttenuationSteps(this.#options.throttlingCoefficient)
     this.#capacity = new OperationCapacity(
       this.#options.maxQueuedOperations,
@@ -200,8 +204,9 @@ export class FetchPlanner<F extends Transport> implements Planner<Init<F>, Respo
   }
 
   submit<T>(input: Spec<Init<F>, ResponseOf<F>, T>): Handle<T> {
-    const reject = (code: FailureCode, cause?: unknown) =>
-      OperationState.rejected<T>(
+    const reject = (code: FailureCode, cause?: unknown) => {
+      this.observation.diagnostics.reject(code)
+      return OperationState.rejected<T>(
         code,
         new OperationError(
           code,
@@ -209,6 +214,8 @@ export class FetchPlanner<F extends Transport> implements Planner<Init<F>, Respo
           cause
         )
       )
+    }
+    if (this.observationSequence.isExhausted) return reject('SEQUENCE_EXHAUSTED')
     if (this.#context.isActive()) return reject('REENTRANT_OPERATION')
     if (this.#stopped) return reject('STOPPED', this.#stopReason)
     let spec: Spec<Init<F>, ResponseOf<F>, T>
@@ -218,14 +225,20 @@ export class FetchPlanner<F extends Transport> implements Planner<Init<F>, Respo
     } catch (cause) {
       return reject('INVALID_ARGUMENT', cause)
     }
-    if (!Number.isSafeInteger(this.#nextId)) return reject('ID_EXHAUSTED')
+    if (this.idExhausted || !Number.isSafeInteger(this.nextId) || this.nextId < 1)
+      return reject('ID_EXHAUSTED')
 
     const deadline = absoluteDeadline(monotonicNow(), spec.deadlineMs ?? this.#options.deadlineMs)
     if (deadline === undefined) return reject('INVALID_ARGUMENT')
     const controller = new AbortController()
-    const state = new OperationState<T>(this.#nextId, reason => {
-      entry.cancel('ABORTED', reason)
-    })
+    const state = new OperationState<T>(
+      this.nextId,
+      reason => {
+        entry.cancel('ABORTED', reason)
+      },
+      this.observation,
+      this.#options.maxSubscribers
+    )
     const resources = new OperationResources(this.#context)
     let started = false
     let attemptDeadline: number | undefined
@@ -285,7 +298,7 @@ export class FetchPlanner<F extends Transport> implements Planner<Init<F>, Respo
       expire,
       cancel: (code, reason) => {
         if (code === 'STOPPED' && state.snapshot().dispatchEntered) return
-        if (code === 'ABORTED' && state.snapshot().resultCommitted) {
+        if (code !== 'STOPPED' && state.snapshot().resultCommitted) {
           state.succeed('pending', this.#stamp())
           this.#armTimer()
           return
@@ -342,8 +355,8 @@ export class FetchPlanner<F extends Transport> implements Planner<Init<F>, Respo
             entry.admit = () => {
               try {
                 // These sources can run user code; take them before the final checks.
-                const stamp = this.#stamp()
                 const random = Math.random()
+                const stamp = this.#stamp()
                 const now = monotonicNow()
                 expire(now)
                 if (this.#stopped) entry.cancel('STOPPED', this.#stopReason)
@@ -388,6 +401,7 @@ export class FetchPlanner<F extends Transport> implements Planner<Init<F>, Respo
           response = work
           // Read the receipt's HTTP fact once; custom Response accessors can run user code.
           const status = response.status
+          if (!Number.isInteger(status) || status < 0 || status > 599) throw invalid()
           state.transition('headers-received', { phase: 'classifying', status }, this.#stamp())
           if (state.snapshot().outcome !== 'pending') return
           if (status === 429) {
@@ -465,17 +479,9 @@ export class FetchPlanner<F extends Transport> implements Planner<Init<F>, Respo
     }
     const reservation = this.#capacity.reserve(entry)
     if (!reservation) return reject('QUEUE_FULL')
-    this.#nextId++
+    if (this.nextId === Number.MAX_SAFE_INTEGER) this.idExhausted = true
+    else this.nextId++
     this.#active.add(entry)
-    state.handle.observe(event => {
-      for (const listener of [...this.#listeners]) {
-        try {
-          listener(event)
-        } catch {
-          /* Full observer isolation follows in T47. */
-        }
-      }
-    })
     reservation.enqueue()
     state.transition('created', {}, this.#stamp())
     this.#armTimer()
@@ -485,7 +491,7 @@ export class FetchPlanner<F extends Transport> implements Planner<Init<F>, Respo
 
   snapshot(): PlannerSnapshot {
     return Object.freeze({
-      sequence: this.#sequence,
+      sequence: this.observationSequence.current,
       stopped: this.#stopped,
       guardOpen: this.#pacing.guardOpen,
       ...this.#capacity.snapshot(),
@@ -494,17 +500,7 @@ export class FetchPlanner<F extends Transport> implements Planner<Init<F>, Respo
   }
 
   observe(listener: (event: Event) => void): Attachment<PlannerSnapshot> {
-    if (typeof listener !== 'function') throw invalid()
-    const subscription = (event: Event) => {
-      listener(event)
-    }
-    this.#listeners.add(subscription)
-    return Object.freeze({
-      snapshot: this.snapshot(),
-      unsubscribe: () => {
-        this.#listeners.delete(subscription)
-      }
-    })
+    return this.observation.attach(listener, () => this.snapshot())
   }
 
   stop(reason?: unknown): void {
@@ -515,11 +511,15 @@ export class FetchPlanner<F extends Transport> implements Planner<Init<F>, Respo
   }
 
   #stamp() {
-    return {
-      sequence: ++this.#sequence,
-      epochTime: Date.now(),
-      elapsedMs: monotonicNow() - this.#startedAt
+    // Materialize user-replaceable clock calls before allocating the sequence.
+    const epochTime = Date.now()
+    const elapsedMs = monotonicNow() - this.#startedAt
+    const stamp = this.observationSequence.stamp(epochTime, elapsedMs)
+    if (stamp.emit === false && !this.#sequenceExhausted) {
+      this.#sequenceExhausted = true
+      for (const entry of this.#active) entry.cancel('SEQUENCE_EXHAUSTED')
     }
+    return stamp
   }
 
   #descriptor(raw: Descriptor<Init<F>>): Descriptor<Init<F>> {

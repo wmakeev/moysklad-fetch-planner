@@ -298,7 +298,9 @@ test('State final snapshot is bounded and subscriptions retire after both settle
   assert.equal('cause' in final, false)
   assert.equal('events' in final, false)
   // Internal retention seam; no additional public diagnostics or test exports.
-  const listeners: unknown = Reflect.get(state, 'listeners')
+  const observation: unknown = Reflect.get(state, 'observation')
+  assert.ok(observation && typeof observation === 'object')
+  const listeners: unknown = Reflect.get(observation, 'listeners')
   const committed: unknown = Reflect.get(state, 'committed')
   const abortRequest: unknown = Reflect.get(state, 'abortRequest')
   assert.ok(listeners instanceof Set)

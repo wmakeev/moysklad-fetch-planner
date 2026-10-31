@@ -19,6 +19,7 @@ const registry = new Map([
   ['context', 'context.test.ts'],
   ['resources', 'resources.test.ts'],
   ['state', 'state.test.ts'],
+  ['observation', 'observation.test.ts'],
   ['capacity', 'capacity.test.ts']
 ])
 const compilers = [

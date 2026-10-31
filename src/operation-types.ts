@@ -49,6 +49,9 @@ export type FailureCode =
   | 'ID_EXHAUSTED'
   | 'SEQUENCE_EXHAUSTED'
   | 'SUBSCRIBER_LIMIT'
+/** Closed diagnostic vocabulary; never carries observer errors or payloads. */
+export type DiagnosticCode = 'OBSERVER_FAILED' | 'INVALID_HINT' | 'LATE_COMPLETION'
+
 export interface Snapshot {
   readonly id: number
   readonly sequence: number
