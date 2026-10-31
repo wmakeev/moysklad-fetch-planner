@@ -1,0 +1,12 @@
+{
+  "extends": "../../tsconfig.json",
+  "compilerOptions": {
+    "rootDir": "../..",
+    "outDir": "../../__temp/operation-build",
+    "noEmit": false,
+    "declaration": true,
+    "strict": true,
+    "skipLibCheck": false
+  },
+  "include": ["../../src/**/*.ts", "./**/*.ts", "../helpers/runtime.ts"]
+}

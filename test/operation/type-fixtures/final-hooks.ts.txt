@@ -1,0 +1,26 @@
+import type { FinalSpec, HookContext, Decision } from './contract.js'
+import type { Init } from '../../src/operation-types.js'
+export const spec: FinalSpec<Init<typeof globalThis.fetch>, Response, number> = {
+  method: 'GET',
+  replay: { serverSafe: true, consumeSafe: true },
+  prepare: () => ({ url: '', init: { method: undefined, signal: undefined } }),
+  consume: async response => (await response.bytes()).length,
+  beforeDispatch(ctx) {
+    const signal: AbortSignal = ctx.signal
+    const sequence: number = ctx.snapshot.sequence
+    void signal
+    void sequence
+    return { type: 'allow' }
+  },
+  async beforeRetry(ctx) {
+    await Promise.resolve()
+    const status: number | undefined = ctx.status
+    void status
+    return { type: 'defer', delayMs: 1 }
+  }
+}
+export function deny(ctx: HookContext): Decision {
+  const attempt: number = ctx.attemptNumber
+  void attempt
+  return { type: 'deny', code: 'POLICY_DENIED' }
+}

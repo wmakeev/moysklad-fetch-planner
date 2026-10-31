@@ -1,0 +1,83 @@
+import { ReadableStream } from 'node:stream/web'
+import type { Completed, Handle, Planner, Init } from '../../src/operation-types.js'
+import { OperationPlanner } from './contract.js'
+const inferred = new OperationPlanner(globalThis.fetch)
+type NativeInit = Init<typeof globalThis.fetch>
+export function exercise<T>(
+  planner: Planner<NativeInit, Response>,
+  decode: (bytes: Uint8Array) => Promise<T>
+) {
+  const handle = planner.submit({
+    method: 'PUT',
+    entityKey: 'entity-1',
+    replay: { serverSafe: false, consumeSafe: false },
+    prepare(ctx) {
+      ctx.onDispose(async () => {
+        await Promise.resolve()
+      })
+      const signal: AbortSignal = ctx.signal
+      void signal
+      return {
+        url: new URL('https://offline.invalid'),
+        init: { body: new ReadableStream<Uint8Array>(), duplex: 'half' }
+      }
+    },
+    async consume(response, ctx) {
+      ctx.onDiscard(() => undefined)
+      try {
+        return await decode(await response.bytes())
+      } catch (cause) {
+        throw ctx.retryableReadFailure(cause)
+      }
+    }
+  })
+  const typed: Handle<T> = handle
+  const result: Promise<Completed<T>> = typed.result
+  const observed = typed.observe(event => {
+    const seq: number = event.sequence
+    void seq
+  })
+  const phase: string = observed.snapshot.phase
+  observed.unsubscribe()
+  void result
+  void phase
+  return typed
+}
+const generic: Handle<{ size: number }> = exercise(inferred, bytes =>
+  Promise.resolve({ size: bytes.length })
+)
+const completed: Promise<Completed<{ size: number }>> = generic.result
+void completed
+for (const planner of [inferred]) {
+  for (const body of [
+    new FormData(),
+    new File(['x'], 'file.txt'),
+    'payload',
+    new Uint8Array([1])
+  ]) {
+    const handle: Handle<number> = planner.submit({
+      method: 'POST',
+      replay: { serverSafe: false, consumeSafe: false },
+      prepare: () => ({ url: 'https://offline.invalid', init: { body } }),
+      consume: async response => (await response.bytes()).length
+    })
+    void handle
+  }
+}
+function customTransport(
+  input: Parameters<typeof globalThis.fetch>[0],
+  init?: RequestInit & { traceId?: string }
+): Promise<Response> {
+  void input
+  void init
+  return Promise.resolve(new Response('offline'))
+}
+const custom = new OperationPlanner(customTransport)
+const customResult: Handle<string> = custom.submit({
+  method: 'GET',
+  replay: { serverSafe: true, consumeSafe: true },
+  prepare: () => ({ url: '', init: { traceId: 'local' } }),
+  consume: response => response.text()
+})
+void customResult
+export const coordinatorFields: NativeInit = { method: undefined, signal: undefined }

@@ -1,0 +1,50 @@
+import { ReadableStream } from 'node:stream/web'
+import { fetch, FormData, type Response } from 'undici'
+import type { Completed, Handle, Planner, Init } from '../../src/operation-types.js'
+import { OperationPlanner } from './contract.js'
+type UndiciPrepareInit = Init<typeof fetch>
+const inferred = new OperationPlanner(fetch)
+export function exercise<T>(
+  planner: Planner<UndiciPrepareInit, Response>,
+  decode: (bytes: ArrayBuffer) => T
+) {
+  const handle = planner.submit({
+    method: 'POST',
+    replay: { serverSafe: false, consumeSafe: false },
+    prepare: async ctx => {
+      await Promise.resolve()
+      ctx.onDispose(() => undefined)
+      return {
+        url: new URL('https://offline.invalid'),
+        init: { body: new ReadableStream<Uint8Array>(), duplex: 'half' }
+      }
+    },
+    consume: async (response, ctx) => {
+      ctx.onDiscard(() => undefined)
+      return decode(await response.arrayBuffer())
+    }
+  })
+  const typed: Handle<T> = handle
+  const result: Promise<Completed<T>> = typed.result
+  void result
+  return typed
+}
+const generic: Handle<{ size: number }> = exercise(inferred, bytes => ({ size: bytes.byteLength }))
+for (const planner of [inferred]) {
+  for (const body of [
+    new FormData(),
+    new File(['x'], 'file.txt'),
+    'payload',
+    new Uint8Array([1])
+  ]) {
+    const handle: Handle<number> = planner.submit({
+      method: 'POST',
+      replay: { serverSafe: false, consumeSafe: false },
+      prepare: () => ({ url: 'https://offline.invalid', init: { body } }),
+      consume: async response => (await response.arrayBuffer()).byteLength
+    })
+    void handle
+  }
+}
+void generic
+export const coordinatorFields: UndiciPrepareInit = { method: undefined, signal: undefined }

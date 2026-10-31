@@ -1,0 +1,111 @@
+import type { Transport } from './fetch-types.js'
+
+export type { Transport } from './fetch-types.js'
+
+type IsUnion<T, Whole = T> = T extends Whole ? ([Whole] extends [T] ? false : true) : never
+export type OneTransport<F extends Transport> = true extends IsUnion<F> ? never : F
+export type Init<F extends Transport> = Omit<NonNullable<Parameters<F>[1]>, 'method' | 'signal'> & {
+  method?: never
+  signal?: never
+}
+export type ResponseOf<F extends Transport> = Awaited<ReturnType<F>>
+export interface Descriptor<I> {
+  url: string | URL
+  init: I
+}
+export interface Completed<T> {
+  readonly value: T
+  readonly status: number
+  readonly cleanup: 'released' | 'failed' | 'pending'
+}
+export type Phase =
+  | 'queued'
+  | 'preparing'
+  | 'ready'
+  | 'sending'
+  | 'classifying'
+  | 'consuming'
+  | 'cleanup'
+  | 'retry-wait'
+  | 'terminal'
+export interface Snapshot {
+  readonly id: number
+  readonly sequence: number
+  readonly phase: Phase
+  readonly outcome: 'pending' | 'succeeded' | 'failed'
+  readonly resultCommitted: boolean
+  readonly resources: 'pending' | 'released' | 'failed' | 'unknown'
+  readonly failureCode?: string
+  readonly attempts: number
+  readonly dispatchCalls: number
+  readonly dispatchEntered: boolean
+  readonly status?: number
+}
+export interface PlannerSnapshot {
+  readonly sequence: number
+  readonly stopped: boolean
+  readonly guardOpen: boolean
+  readonly queued: number
+  readonly leasedAttempts: number
+  readonly sentActive: number
+  readonly effectiveParallelism: number
+  readonly serverNotBefore: number
+}
+export type EventType =
+  | 'created'
+  | 'phase-changed'
+  | 'dispatch-deferred'
+  | 'dispatch-started'
+  | 'headers-received'
+  | 'retry-scheduled'
+  | 'operation-settled'
+  | 'resources-settled'
+  | 'late-completion'
+export interface Event extends Snapshot {
+  readonly type: EventType
+  readonly epochTime: number
+  readonly elapsedMs: number
+}
+export interface Attachment<S> {
+  readonly snapshot: S
+  unsubscribe(): void
+}
+export interface ResourceSummary {
+  readonly resources: 'released' | 'failed' | 'unknown'
+}
+export interface Handle<T> {
+  readonly id: number
+  readonly result: Promise<Completed<T>>
+  readonly resourcesDone: Promise<ResourceSummary>
+  snapshot(): Snapshot
+  observe(listener: (event: Event) => void): Attachment<Snapshot>
+  abort(reason?: unknown): void
+}
+export interface PrepareContext {
+  readonly signal: AbortSignal
+  readonly operationId: number
+  readonly attemptNumber: number
+  onDispose(fn: () => void | Promise<void>): void
+}
+export interface ConsumeContext extends PrepareContext {
+  onDiscard(fn: () => void | Promise<void>): void
+  retryableReadFailure(cause: unknown): Error
+}
+export type MethodSpec =
+  | { method: 'PUT'; entityKey: string }
+  | {
+      method: 'GET' | 'HEAD' | 'POST' | 'PATCH' | 'DELETE' | 'OPTIONS' | 'TRACE' | 'CONNECT'
+      entityKey?: never
+    }
+export type Spec<I, R, T> = MethodSpec & {
+  prepare: (ctx: PrepareContext) => Descriptor<I> | Promise<Descriptor<I>>
+  consume: (response: R, ctx: ConsumeContext) => T | Promise<T>
+  replay: { serverSafe: boolean; consumeSafe: boolean }
+  deadlineMs?: number
+}
+export interface Planner<I, R> {
+  submit<T>(spec: Spec<I, R, T>): Handle<T>
+  snapshot(): PlannerSnapshot
+  observe(listener: (event: Event) => void): Attachment<PlannerSnapshot>
+  stop(reason?: unknown): void
+}

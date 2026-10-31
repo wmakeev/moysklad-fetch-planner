@@ -1,0 +1,40 @@
+import { fetch } from 'undici'
+import type { Init, Descriptor, Spec, Snapshot, PlannerSnapshot, Event, ResourceSummary, Completed } from '../../src/operation-types.js'
+import type { HookContext, Decision } from './contract.js'
+import { OperationPlanner } from './contract.js'
+const native = new OperationPlanner(globalThis.fetch)
+const undici = new OperationPlanner(fetch)
+const replay = { serverSafe: false, consumeSafe: false }
+export const nativeBody: Init<typeof globalThis.fetch> = { body: 42 }
+export const undiciBody: Init<typeof fetch> = { body: 42 }
+export const method: Init<typeof globalThis.fetch> = { method: 'GET' }
+export const signal: Init<typeof globalThis.fetch> = { signal: new AbortController().signal }
+const variable = { method: 'POST', body: 'payload' }
+export const hiddenMethod: Init<typeof globalThis.fetch> = variable
+export const request: Descriptor<Init<typeof globalThis.fetch>> = { url: new Request('https://offline.invalid'), init: {} }
+export const lower: Spec<Init<typeof globalThis.fetch>, Response, number> = { method: 'post', replay, prepare: () => ({ url: '', init: {} }), consume: () => 1 }
+export const put: Spec<Init<typeof globalThis.fetch>, Response, number> = { method: 'PUT', replay, prepare: () => ({ url: '', init: {} }), consume: () => 1 }
+const handle = native.submit({ method: 'GET', replay, prepare: () => ({ url: '', init: {} }), consume: response => response.bytes() })
+handle.then(() => undefined)
+void handle.snapshot().value
+handle.snapshot().phase = 'terminal'
+undici.submit({ method: 'GET', replay, prepare: () => ({ url: '', init: {} }), consume: (response: Response) => response.text() })
+undici.submit({ method: 'GET', replay, prepare: () => ({ url: '', init: {} }), consume: response => response.bytes() })
+new OperationPlanner(() => Promise.resolve(42))
+declare const unknownFamily: typeof globalThis.fetch | typeof fetch
+new OperationPlanner(unknownFamily)
+export const hooks: Spec<Init<typeof globalThis.fetch>, Response, number> = { method: 'GET', replay, prepare: () => ({ url: '', init: {} }), consume: () => 1, beforeDispatch: () => ({ type: 'allow' }) }
+export const invalidDecision: Decision = { type: 'override' }
+declare const context: HookContext
+context.attemptNumber = 2
+void context.snapshot.value
+declare const snapshot: Snapshot
+declare const aggregate: PlannerSnapshot
+declare const event: Event
+declare const resources: ResourceSummary
+declare const completed: Completed<number>
+snapshot.status = 200
+aggregate.queued = 1
+event.epochTime = 1
+resources.resources = 'released'
+completed.status = 200
