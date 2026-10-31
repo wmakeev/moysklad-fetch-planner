@@ -1082,3 +1082,324 @@ for (const [entry, Constructor] of [
     }
   }
 }
+
+// T22 circle-three reproducer: the second (subclass: third) read starts a
+// pending outer return assimilation. Only the fixture counts reads.
+for (const form of ['thenable', 'promise-subclass'] as const) {
+  for (const mode of ['normal', 'invalid', 'timeout', 'abort', 'stop', 'deadline'] as const) {
+    test(`T89 full chain beforeDispatch ${form} ${mode} retains owning lifetime`, async t => {
+      const clock = createRuntime(t)
+      const timers = trackTimeouts(t)
+      const entered = deferred<undefined>()
+      const gate = deferred<undefined>()
+      const steps = Array.from({ length: 12 }, () => ({
+        entered: deferred<undefined>(),
+        release: deferred<undefined>()
+      }))
+      const materialized = deferred<undefined>()
+      let context: HookContext | undefined
+      let reads = 0
+      let hooks = 0
+      let prepares = 0
+      let childPrepares = 0
+      let siblingPrepares = 0
+      let disposals = 0
+      let deliveries = 0
+      let settlements = 0
+      let resourceSettlements = 0
+      const sends: string[] = []
+      const events: unknown[] = []
+      const jobs: Promise<void>[] = []
+      const planner = new FetchPlanner<typeof fetch>(
+        url => {
+          assert.equal(typeof url, 'string')
+          if (typeof url !== 'string') throw new Error('T89 expects materialized string URL')
+          sends.push(url)
+          return Promise.resolve(new Response('T89-private-value'))
+        },
+        { maxParallelLimit: 1 }
+      )
+      const children: ReturnType<typeof planner.submit>[] = []
+      const probes: {
+        stage: string
+        id: number
+        outcome: Promise<string>
+        lease: number
+        sent: number
+        resources: number
+        sibling: number
+      }[] = []
+      // Assertions stay outside callbacks: a callback assertion would be wrapped
+      // as HOOK_FAILED and could conceal the actual accepted nested submit.
+      const inspect = (stage: string) => {
+        const child = planner.submit({
+          method: 'GET',
+          replay,
+          prepare: () => {
+            childPrepares++
+            return { url: 'T89-private-child', init: {} }
+          },
+          consume: () => 2
+        })
+        children.push(child)
+        const outcome = child.result.then(
+          () => 'accepted',
+          (error: unknown) => (error instanceof OperationError ? error.code : 'unexpected-error')
+        )
+        const snapshot = planner.snapshot()
+        probes.push({
+          stage,
+          id: child.id,
+          outcome,
+          lease: snapshot.leasedAttempts,
+          sent: snapshot.sentActive,
+          resources: resourceSettlements,
+          sibling: siblingPrepares
+        })
+      }
+      const final: Decision = {
+        get type() {
+          inspect('final materialization')
+          materialized.resolve(undefined)
+          return 'allow' as const
+        },
+        ...(mode === 'invalid' ? { extra: 'T89-private-invalid' } : {})
+      }
+      const chain = (index: number): Decision => {
+        const step = steps[index]
+        if (!step) return final
+        const value: Decision = { type: 'allow' }
+        Object.setPrototypeOf(value, {
+          get then() {
+            inspect(`chain getter ${index}`)
+            return (resolve: (value: Decision) => void) => {
+              inspect(`chain job ${index}`)
+              step.entered.resolve(undefined)
+              jobs.push(
+                step.release.promise.then(() => {
+                  resolve(chain(index + 1))
+                })
+              )
+            }
+          }
+        })
+        return value
+      }
+      const stateful: Decision = { type: 'allow' }
+      Object.setPrototypeOf(stateful, {
+        get then() {
+          inspect(`stateful getter ${++reads}`)
+          if (reads !== (form === 'thenable' ? 2 : 3)) return undefined
+          return (resolve: (value: Decision) => void) => {
+            inspect('pending outer assimilation')
+            entered.resolve(undefined)
+            jobs.push(
+              gate.promise.then(() => {
+                resolve(chain(0))
+              })
+            )
+          }
+        }
+      })
+      const handle = planner.submit({
+        method: 'POST',
+        replay,
+        ...(mode === 'deadline' ? { deadlineMs: 800 } : {}),
+        prepare: ctx => {
+          prepares++
+          ctx.onDispose(() => {
+            disposals++
+          })
+          return { url: 'T89-private-target', init: { body: 'T89-private-body' } }
+        },
+        beforeDispatch: ctx => {
+          hooks++
+          context = ctx
+          inspect('hook body')
+          if (form === 'promise-subclass') {
+            class HookPromise extends Promise<Decision> {}
+            return new HookPromise(resolve => {
+              resolve(stateful)
+            })
+          }
+          const wrapper: Decision = { type: 'allow' }
+          Object.defineProperty(wrapper, 'then', {
+            value: (resolve: (value: Decision) => void) => {
+              inspect('initial resolving thenable')
+              resolve(stateful)
+            }
+          })
+          return wrapper
+        },
+        consume: response => {
+          deliveries++
+          return response.text()
+        }
+      })
+      const result = handle.result.then(
+        value => value,
+        (error: unknown) => {
+          assert.ok(error instanceof OperationError)
+          return error
+        }
+      )
+      const resources = handle.resourcesDone.then(value => {
+        resourceSettlements++
+        return value
+      })
+      handle.observe(event => {
+        events.push(event)
+        if (event.type === 'operation-settled') settlements++
+      })
+      const sibling = planner.submit({
+        method: 'GET',
+        replay,
+        prepare: () => {
+          siblingPrepares++
+          return { url: 'T89-private-sibling', init: {} }
+        },
+        consume: () => 3
+      })
+      const siblingResult = sibling.result.then(
+        value => value,
+        (error: unknown) => {
+          assert.ok(error instanceof OperationError)
+          return error
+        }
+      )
+      const assertProbes = async () => {
+        for (const probe of probes) {
+          assert.equal(probe.id, 0, `T89_NESTED_ACCEPTED: ${probe.stage}`)
+          assert.equal(await probe.outcome, 'REENTRANT_OPERATION', probe.stage)
+          assert.equal(probe.lease, 1, probe.stage)
+          assert.equal(probe.sent, 0, probe.stage)
+          assert.equal(probe.resources, 0, probe.stage)
+          assert.equal(probe.sibling, 0, probe.stage)
+        }
+        assert.equal(childPrepares, 0)
+      }
+      const assertPending = () => {
+        assert.equal(planner.snapshot().leasedAttempts, 1)
+        assert.equal(planner.snapshot().sentActive, 0)
+        assert.equal(handle.snapshot().resources, 'pending')
+        assert.equal(resourceSettlements, 0)
+        assert.equal(siblingPrepares, 0)
+        assert.equal(disposals, 0)
+        assert.equal(sends.length, 0)
+      }
+      try {
+        await entered.promise
+        assert.equal(reads, form === 'thenable' ? 2 : 3, 'ORIGINAL_PENDING_STEP_ENTERED')
+        assert.equal(handle.snapshot().outcome, 'pending')
+        assert.equal(timers.delays.at(-1), mode === 'deadline' ? 800 : 1000)
+        assertPending()
+        await assertProbes()
+        const code =
+          mode === 'timeout'
+            ? 'HOOK_FAILED'
+            : mode === 'abort'
+              ? 'ABORTED'
+              : mode === 'stop'
+                ? 'STOPPED'
+                : mode === 'deadline'
+                  ? 'DEADLINE'
+                  : undefined
+        if (mode === 'abort') handle.abort('T89-private-abort')
+        else if (mode === 'stop') planner.stop('T89-private-stop')
+        else if (mode === 'timeout' || mode === 'deadline') {
+          await clock.advance(mode === 'timeout' ? 999 : 799)
+          assert.equal(handle.snapshot().outcome, 'pending')
+          assert.equal(context?.signal.aborted, false)
+          await clock.advance(1)
+        }
+        let primary: unknown
+        if (code) {
+          primary = await result
+          assert.ok(primary instanceof OperationError)
+          assert.equal(primary.code, code)
+          assert.equal(primary.dispatchEntered, false)
+          assert.equal(primary.serverOutcome, 'not-dispatched')
+          assert.equal(primary.status, undefined)
+          assert.equal(context?.signal.aborted, true)
+        }
+        assertPending()
+        gate.resolve(undefined)
+        for (const step of steps) {
+          await step.entered.promise
+          assertPending()
+          await assertProbes()
+          step.release.resolve(undefined)
+        }
+        await materialized.promise
+        const completed = await result
+        if (primary) assert.equal(completed, primary, 'LATE_ALLOW_PRESERVES_PRIMARY_FAILURE')
+        else if (mode === 'invalid') {
+          assert.ok(completed instanceof OperationError)
+          assert.equal(completed.code, 'HOOK_FAILED')
+          assert.equal(completed.serverOutcome, 'not-dispatched')
+          assert.ok(completed.cause instanceof OperationError)
+          assert.ok(completed.cause.cause instanceof TypeError)
+        } else {
+          assert.ok(!(completed instanceof Error))
+          assert.equal(completed.value, 'T89-private-value')
+          assert.equal(completed.status, 200)
+        }
+        await resources
+        await assertProbes()
+        const peer = await siblingResult
+        if (mode === 'stop') {
+          assert.ok(peer instanceof OperationError)
+          assert.equal(peer.code, 'STOPPED')
+        } else {
+          assert.ok(!(peer instanceof Error))
+          assert.equal(peer.value, 3)
+        }
+        await sibling.resourcesDone
+        assert.equal(siblingPrepares, mode === 'stop' ? 0 : 1)
+        assert.deepEqual(sends, [
+          ...(mode === 'normal' ? ['T89-private-target'] : []),
+          ...(mode === 'stop' ? [] : ['T89-private-sibling'])
+        ])
+        assert.equal(handle.snapshot().dispatchCalls, mode === 'normal' ? 1 : 0)
+        assert.equal(handle.snapshot().attempts, 1)
+        assert.equal(deliveries, mode === 'normal' ? 1 : 0)
+        assert.equal(hooks, 1)
+        assert.equal(prepares, 1)
+        assert.equal(disposals, 1)
+        assert.equal(settlements, 1)
+        assert.equal(resourceSettlements, 1)
+        assert.equal((await resources).resources, 'released')
+        assert.equal(planner.snapshot().stopped, mode === 'stop')
+        assert.equal(JSON.stringify(events).includes('T89-private'), false)
+        assert.equal(probes.filter(probe => probe.stage.startsWith('chain getter')).length, 12)
+        assert.equal(probes.filter(probe => probe.stage.startsWith('chain job')).length, 12)
+        assert.equal(probes.filter(probe => probe.stage === 'final materialization').length, 1)
+        console.log(
+          'T89_CAUSAL',
+          JSON.stringify({
+            form,
+            mode,
+            reads,
+            stages: probes.map(probe => probe.stage),
+            sends,
+            settlements,
+            resourceSettlements
+          })
+        )
+      } finally {
+        gate.resolve(undefined)
+        for (const step of steps) step.release.resolve(undefined)
+        handle.abort()
+        sibling.abort()
+        for (const child of children) child.abort()
+        await Promise.allSettled([result, resources, siblingResult, sibling.resourcesDone])
+        await Promise.all(jobs)
+        await Promise.allSettled(children.flatMap(child => [child.result, child.resourcesDone]))
+        assert.equal(planner.snapshot().leasedAttempts, 0)
+        assert.equal(planner.snapshot().sentActive, 0)
+        assert.equal(timers.active.size, 0)
+        assert.ok(timers.maximum() <= 1)
+      }
+    })
+  }
+}
