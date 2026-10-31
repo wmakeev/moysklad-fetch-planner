@@ -12,7 +12,8 @@ const registry = new Map([
   ['pacing-formula', 'pacing-formula.test.ts'],
   ['context', 'context.test.ts'],
   ['resources', 'resources.test.ts'],
-  ['state', 'state.test.ts']
+  ['state', 'state.test.ts'],
+  ['capacity', 'capacity.test.ts']
 ])
 const compilers = [
   ['5.7.3', 'node_modules/.pnpm/typescript@5.7.3/node_modules/typescript/bin/tsc'],
