@@ -13,6 +13,7 @@ const registry = new Map([
   ['admission', 'admission.test.ts'],
   ['ownership', 'ownership.test.ts'],
   ['commit', 'commit.test.ts'],
+  ['cancellation', 'cancellation.test.ts'],
   ['pacing-formula', 'pacing-formula.test.ts'],
   ['context', 'context.test.ts'],
   ['resources', 'resources.test.ts'],

@@ -3,7 +3,7 @@ import { CallbackContext } from './callback-context.js'
 import { OperationCapacity } from './operation-capacity.js'
 import { OperationResources } from './operation-resources.js'
 import { OperationState } from './operation-state.js'
-import { MAX_TIMEOUT_MS, monotonicNow } from './runtime.js'
+import { absoluteDeadline, MAX_TIMEOUT_MS, monotonicNow } from './runtime.js'
 import type {
   Attachment,
   Descriptor,
@@ -196,8 +196,8 @@ export class FetchPlanner<F extends Transport> implements Planner<Init<F>, Respo
     }
     if (!Number.isSafeInteger(this.#nextId)) return reject('ID_EXHAUSTED')
 
-    const deadline = monotonicNow() + (spec.deadlineMs ?? this.#options.deadlineMs)
-    if (!Number.isSafeInteger(deadline)) return reject('INVALID_ARGUMENT')
+    const deadline = absoluteDeadline(monotonicNow(), spec.deadlineMs ?? this.#options.deadlineMs)
+    if (deadline === undefined) return reject('INVALID_ARGUMENT')
     const controller = new AbortController()
     const state = new OperationState<T>(this.#nextId, reason => {
       entry.cancel('ABORTED', reason)
@@ -280,7 +280,11 @@ export class FetchPlanner<F extends Transport> implements Planner<Init<F>, Respo
         try {
           expire(monotonicNow())
           if (state.snapshot().outcome !== 'pending') return
-          attemptDeadline = monotonicNow() + this.#options.attemptTimeoutMs
+          attemptDeadline = absoluteDeadline(monotonicNow(), this.#options.attemptTimeoutMs)
+          if (attemptDeadline === undefined) {
+            fail('INVALID_ARGUMENT')
+            return
+          }
           this.#armTimer()
           state.transition('phase-changed', { phase: 'preparing', attempts: 1 }, this.#stamp())
           const descriptor = await resources.runOwner(
@@ -349,7 +353,7 @@ export class FetchPlanner<F extends Transport> implements Planner<Init<F>, Respo
           const now = monotonicNow()
           expire(now)
           if (state.snapshot().outcome === 'pending') {
-            cleanupDeadline = Math.min(deadline, now + this.#options.cleanupGraceMs)
+            cleanupDeadline = now + Math.min(deadline - now, this.#options.cleanupGraceMs)
             state.commit(value, status, stamp)
             this.#armTimer()
           }
