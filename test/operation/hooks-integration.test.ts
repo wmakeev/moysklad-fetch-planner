@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
+import { fetch as undiciFetch, Response as UndiciResponse } from 'undici'
 import { FetchPlanner } from '../../src/planner.js'
 import { FetchPlanner as RootPlanner } from '../../src/index.js'
 import {
@@ -1414,4 +1415,689 @@ for (const site of sites) {
       })
     }
   }
+}
+
+// Hold only delivery of the coordinator's queued pump, as in T72. The ready
+// phase proves the actual hook's full assimilation/extraction has finished.
+// No await or callback is inserted into final gate -> charge -> transport.
+function holdResolvedWake(t: import('node:test').TestContext) {
+  const enqueue = globalThis.queueMicrotask
+  let armed = false
+  let held: (() => void) | undefined
+  t.mock.method(globalThis, 'queueMicrotask', (callback: () => void) => {
+    if (armed && !held) {
+      armed = false
+      held = callback
+    } else enqueue(callback)
+  })
+  return {
+    arm() {
+      armed = true
+    },
+    get pending() {
+      return held !== undefined
+    },
+    change(callback: () => void) {
+      enqueue(callback)
+    },
+    release() {
+      const callback = held
+      held = undefined
+      if (callback) enqueue(callback)
+    }
+  }
+}
+
+for (const [entry, Constructor] of [
+  ['root', RootPlanner],
+  ['deep', FetchPlanner]
+] as const) {
+  for (const family of ['native', 'undici'] as const) {
+    for (const site of sites) {
+      for (const safety of [
+        'stop',
+        'abort',
+        'deadline',
+        'attempt',
+        'pause',
+        'pacing',
+        'effective',
+        'guard'
+      ] as const) {
+        test(`T93 resolved wait ${site} ${entry} ${family} microtask rechecks ${safety} before actual admission`, async t => {
+          const clock = createRuntime(t)
+          const timers = trackTimeouts(t)
+          const wake = holdResolvedWake(t)
+          const hook = deferred<Decision>()
+          const receipt = deferred<Response>()
+          const undiciReceipt = deferred<UndiciResponse>()
+          const ownerResponse = deferred<Response>()
+          const undiciOwnerResponse = deferred<UndiciResponse>()
+          const trace: string[] = []
+          const eventTimes: number[] = []
+          const mark = (event: string) => {
+            trace.push(event)
+            eventTimes.push(performance.now())
+          }
+          const sends: string[] = []
+          const noReplay = { serverSafe: false, consumeSafe: false }
+          const overflow = '{"errors":[{"code":1073}]}'
+          const options = {
+            maxParallelLimit: 3,
+            attemptTimeoutMs: safety === 'attempt' ? 100 : 30000,
+            jitter: 0,
+            throttlingCoefficient: 1,
+            maxRequestDelayTimeMs: 200
+          }
+          const nativeTransport: typeof fetch = url => {
+            assert.equal(typeof url, 'string')
+            if (typeof url !== 'string')
+              throw new Error('T93 descriptor must materialize a string URL')
+            const name = url
+            sends.push(name)
+            mark(`send:${name}`)
+            if (name === 'receipt') return receipt.promise
+            if (name === 'owner') return ownerResponse.promise
+            return Promise.resolve(
+              new Response(name === 'correction-seed' ? overflow : null, {
+                status: name === 'correction-seed' ? 429 : name === 'guard-seed' ? 500 : 200,
+                headers: name === 'correction-seed' ? { 'content-type': 'application/json' } : {}
+              })
+            )
+          }
+          const undiciTransport: typeof undiciFetch = url => {
+            assert.equal(typeof url, 'string')
+            if (typeof url !== 'string')
+              throw new Error('T93 descriptor must materialize a string URL')
+            const name = url
+            sends.push(name)
+            mark(`send:${name}`)
+            if (name === 'receipt') return undiciReceipt.promise
+            if (name === 'owner') return undiciOwnerResponse.promise
+            return Promise.resolve(
+              new UndiciResponse(name === 'correction-seed' ? overflow : null, {
+                status: name === 'correction-seed' ? 429 : name === 'guard-seed' ? 500 : 200,
+                headers: name === 'correction-seed' ? { 'content-type': 'application/json' } : {}
+              })
+            )
+          }
+          const planner =
+            family === 'native'
+              ? new Constructor<typeof fetch>(nativeTransport, options)
+              : new Constructor<typeof undiciFetch>(undiciTransport, options)
+          // Real receipts establish the first correction, or 99/100 guard history.
+          // The correction seed releases fully before the two sent peers start.
+          for (let i = 0; i < (safety === 'guard' ? 99 : safety === 'effective' ? 1 : 0); i++) {
+            const seed = planner.submit({
+              method: 'GET',
+              replay: noReplay,
+              prepare: () => ({
+                url: safety === 'guard' ? 'guard-seed' : 'correction-seed',
+                init: {}
+              }),
+              consume: () => 0
+            })
+            await Promise.allSettled([seed.result, seed.resourcesDone])
+            assert.equal(seed.snapshot().dispatchCalls, 1)
+          }
+          await clock.flush()
+          assert.equal(planner.snapshot().guardOpen, false)
+          if (safety === 'effective') assert.equal(planner.snapshot().effectiveParallelism, 2)
+          const peer = planner.submit({
+            method: 'GET',
+            replay: noReplay,
+            prepare: () => ({ url: 'receipt', init: {} }),
+            consume: () => 0
+          })
+          const ownerReady = deferred<undefined>()
+          const owner =
+            safety === 'effective'
+              ? planner.submit({
+                  method: 'GET',
+                  replay: noReplay,
+                  prepare: async () => {
+                    if (site === 'beforeRetry') await ownerReady.promise
+                    return { url: 'owner', init: {} }
+                  },
+                  consume: () => 0
+                })
+              : undefined
+          await clock.flush()
+          let sentBefore = sends.length
+          assert.equal(
+            sends.at(-1),
+            safety === 'effective' && site === 'beforeDispatch' ? 'owner' : 'receipt'
+          )
+          if (owner && site === 'beforeDispatch') {
+            assert.equal(owner.snapshot().dispatchCalls, 1, 'ADDITIONAL_OWNER_ACTUALLY_SENT')
+            assert.equal(planner.snapshot().sentActive, 2)
+          }
+          let hooks = 0
+          let materialized = 0
+          let disposals = 0
+          let dispatchHooks = 0
+          const bodies: object[] = []
+          const inits: object[] = []
+          const signals: AbortSignal[] = []
+          const start = performance.now()
+          const handle = planner.submit({
+            method: 'POST',
+            replay,
+            ...(safety === 'deadline' ? { deadlineMs: 100 } : {}),
+            prepare: ctx => {
+              ctx.onDispose(() => {
+                disposals++
+              })
+              const body = new Blob(['same logical payload'])
+              bodies.push(body)
+              signals.push(ctx.signal)
+              const init = {
+                get body() {
+                  materialized++
+                  return body
+                }
+              }
+              inits.push(init)
+              return { url: 'target', init }
+            },
+            [site]: () => {
+              hooks++
+              ownerReady.resolve(undefined)
+              mark('hook-entered')
+              assert.equal(materialized, 1, 'INIT_MATERIALIZED_BEFORE_HOOK')
+              return hook.promise
+            },
+            ...(site === 'beforeRetry'
+              ? {
+                  beforeDispatch: (ctx: HookContext) => {
+                    dispatchHooks++
+                    if (ctx.attemptNumber === 2) wake.arm()
+                    return { type: 'allow' } as const
+                  }
+                }
+              : {}),
+            consume: async (response, ctx) => {
+              await response.text()
+              if (site === 'beforeRetry' && ctx.attemptNumber === 1)
+                throw ctx.retryableReadFailure(new Error('T93 exact eligible read failure'))
+              return 2
+            }
+          })
+          try {
+            await clock.flush()
+            assert.equal(hooks, 1)
+            assert.equal(handle.snapshot().phase, site === 'beforeRetry' ? 'cleanup' : 'preparing')
+            if (site === 'beforeRetry') {
+              assert.deepEqual([disposals, handle.snapshot().dispatchCalls], [1, 1])
+              assert.deepEqual(
+                [planner.snapshot().sentActive, planner.snapshot().leasedAttempts],
+                [safety === 'effective' ? 2 : 1, safety === 'effective' ? 3 : 2]
+              )
+              sentBefore += safety === 'effective' ? 2 : 1
+            }
+            hook.resolve({ type: 'defer', delayMs: 50 })
+            await clock.flush()
+            assert.equal(
+              handle.snapshot().phase,
+              site === 'beforeRetry' ? 'retry-wait' : 'ready',
+              'ACTUAL_HOOK_FULLY_RESOLVED'
+            )
+            mark('hook-resolved-ready')
+            if (site === 'beforeDispatch') wake.arm()
+            clock.tick(50)
+            await clock.flush()
+            mark('wait-expired')
+            assert.equal(wake.pending, true, 'ACTUAL_RESOLVED_WAKE_HELD')
+            assert.equal(sends.length, sentBefore)
+            wake.change(() => {
+              mark(`control:${safety}`)
+              if (safety === 'stop') planner.stop()
+              else if (safety === 'abort') handle.abort()
+              else if (safety === 'deadline' || safety === 'attempt')
+                t.mock.method(
+                  performance,
+                  'now',
+                  () => start + (safety === 'attempt' && site === 'beforeRetry' ? 150 : 100)
+                )
+              else {
+                const status = safety === 'effective' ? 429 : safety === 'guard' ? 500 : 200
+                const headers =
+                  safety === 'pause'
+                    ? { 'x-lognex-reset': '400' }
+                    : safety === 'pacing'
+                      ? {
+                          'x-ratelimit-limit': '10',
+                          'x-ratelimit-remaining': '0',
+                          'x-lognex-retry-timeinterval': '1000'
+                        }
+                      : safety === 'effective'
+                        ? { 'content-type': 'application/json' }
+                        : {}
+                receipt.resolve(
+                  new Response(safety === 'effective' ? overflow : null, { status, headers })
+                )
+                undiciReceipt.resolve(
+                  new UndiciResponse(safety === 'effective' ? overflow : null, { status, headers })
+                )
+              }
+            })
+            await clock.flush()
+            mark('control-processed')
+            const changedAt = performance.now()
+            if (safety === 'pause')
+              assert.equal(planner.snapshot().serverNotBefore, changedAt + 400)
+            if (safety === 'guard')
+              assert.equal(planner.snapshot().guardOpen, true, 'ACTUAL_100TH_RECEIPT_OPENS_GUARD')
+            if (safety === 'effective') {
+              await peer.resourcesDone
+              assert.equal(planner.snapshot().effectiveParallelism, 1)
+              assert.equal(
+                planner.snapshot().sentActive,
+                1,
+                'ADDITIONAL_SENT_OWNER_ALONE_FILLS_EFFECTIVE'
+              )
+              assert.equal(owner?.snapshot().outcome, 'pending')
+            }
+            assert.equal(sends.length, sentBefore, 'CONTROL_PROCESSED_BEFORE_ADMISSION')
+            wake.release()
+            await clock.flush()
+            mark('admission-rechecked')
+            assert.equal(
+              sends.length,
+              sentBefore,
+              'T93_FINAL_RECHECK_PREVENTS_ACTUAL_EXCESS_DISPATCH'
+            )
+            assert.equal(
+              handle.snapshot().dispatchCalls,
+              site === 'beforeRetry' ? 1 : 0,
+              'BLOCKED_READY_HAS_NO_NEW_DISPATCH_CHARGE'
+            )
+            assert.equal(hooks, 1)
+            const terminal =
+              safety === 'stop' ||
+              safety === 'abort' ||
+              safety === 'deadline' ||
+              safety === 'attempt' ||
+              safety === 'guard'
+            if (terminal) {
+              await assert.rejects(handle.result, {
+                code:
+                  safety === 'stop'
+                    ? 'STOPPED'
+                    : safety === 'abort'
+                      ? 'ABORTED'
+                      : safety === 'deadline'
+                        ? 'DEADLINE'
+                        : safety === 'attempt'
+                          ? 'ATTEMPT_TIMEOUT'
+                          : 'GUARD_OPEN',
+                dispatchEntered: false
+              })
+              await handle.resourcesDone
+              await clock.advance(60001)
+              assert.equal(sends.length, sentBefore, 'PERMANENT_TERMINAL_CANNOT_RESURRECT')
+            } else {
+              // Re-deliver a real stale timer wake; the callback must stay once.
+              timers.callbacks.at(-1)?.()
+              await clock.flush()
+              assert.equal(sends.length, sentBefore)
+              if (safety === 'effective') {
+                ownerResponse.resolve(new Response())
+                undiciOwnerResponse.resolve(new UndiciResponse())
+                await owner?.resourcesDone
+                await clock.flush()
+              } else {
+                // At elapsed 0/50 the preserved linear formula yields 200/190ms.
+                const delay = safety === 'pause' ? 400 : 190
+                await clock.advance(delay - 1)
+                assert.equal(sends.length, sentBefore, 'ACTUAL_SAFETY_MINUS_ONE_BLOCKS')
+                await clock.advance(1)
+              }
+              assert.equal(sends.length, sentBefore + 1, 'RESTORED_SAFETY_REACHES_ACTUAL_TRANSPORT')
+              assert.equal(sends.at(-1), 'target')
+              assert.equal((await handle.result).value, 2)
+              await handle.resourcesDone
+              assert.equal(handle.snapshot().dispatchCalls, site === 'beforeRetry' ? 2 : 1)
+              if (site === 'beforeRetry') {
+                assert.equal(dispatchHooks, 2)
+                assert.notEqual(bodies[0], bodies[1])
+                assert.notEqual(inits[0], inits[1])
+                assert.notEqual(signals[0], signals[1])
+              }
+            }
+            assert.equal(hooks, 1, 'WAKES_NEVER_REPEAT_RESOLVED_HOOK')
+            assert.equal(materialized, site === 'beforeRetry' ? 2 : 1)
+            assert.equal(disposals, site === 'beforeRetry' ? 2 : 1)
+            assert.equal(handle.snapshot().attempts, site === 'beforeRetry' ? 2 : 1)
+            assert.ok(trace.indexOf('hook-resolved-ready') < trace.indexOf(`control:${safety}`))
+            assert.ok(trace.indexOf('control-processed') < trace.indexOf('admission-rechecked'))
+            console.log(
+              'T93_CAUSAL',
+              JSON.stringify({ site, entry, family, safety, trace, eventTimes })
+            )
+          } finally {
+            hook.resolve({ type: 'allow' })
+            ownerReady.resolve(undefined)
+            receipt.resolve(new Response())
+            undiciReceipt.resolve(new UndiciResponse())
+            ownerResponse.resolve(new Response())
+            undiciOwnerResponse.resolve(new UndiciResponse())
+            wake.release()
+            handle.abort()
+            peer.abort()
+            owner?.abort()
+            await Promise.allSettled(
+              [handle, peer, ...(owner ? [owner] : [])].flatMap(h => [h.result, h.resourcesDone])
+            )
+            await clock.flush()
+            assert.equal(planner.snapshot().leasedAttempts, 0)
+            assert.equal(planner.snapshot().sentActive, 0)
+            assert.equal(timers.active.size, 0)
+            assert.ok(timers.maximum() <= 1)
+          }
+        })
+      }
+    }
+  }
+}
+
+// Independent direct probes: callback assertions would be swallowed as HOOK_FAILED.
+for (const site of sites) {
+  for (const form of ['thenable', 'promise-subclass'] as const) {
+    test(`T93 ${site} outer token extraction and hard capacity ${form}`, async t => {
+      const clock = createRuntime(t)
+      const timers = trackTimeouts(t)
+      const outer = deferred<undefined>()
+      const release = deferred<undefined>()
+      const jobs: Promise<void>[] = []
+      const probes: { stage: string; id: number; code: string | undefined }[] = []
+      const children: Handle<number>[] = []
+      let reads = 0
+      let hooks = 0
+      let prepares = 0
+      let sends = 0
+      let siblingPrepares = 0
+      let resources = 0
+      let disposed = 0
+      const planner = new FetchPlanner<typeof fetch>(
+        () => {
+          sends++
+          return Promise.resolve(new Response('complete'))
+        },
+        { maxParallelLimit: 1 }
+      )
+      const inspect = (stage: string) => {
+        const child = planner.submit({
+          method: 'GET',
+          replay,
+          prepare: () => ({ url: 'nested', init: {} }),
+          consume: () => 0
+        })
+        void child.result.catch(() => undefined)
+        children.push(child)
+        probes.push({ stage, id: child.id, code: child.snapshot().failureCode })
+      }
+      const final: Decision = {
+        get type() {
+          inspect('decision extraction')
+          return 'allow' as const
+        }
+      }
+      const chain = (depth: number): Decision => {
+        if (!depth) return final
+        const value: Decision = { type: 'allow' }
+        Object.setPrototypeOf(value, {
+          get then() {
+            inspect(`recursive getter ${depth}`)
+            return (resolve: (value: Decision) => void) => {
+              inspect(`recursive job ${depth}`)
+              resolve(chain(depth - 1))
+            }
+          }
+        })
+        return value
+      }
+      const stateful: Decision = { type: 'allow' }
+      Object.setPrototypeOf(stateful, {
+        get then() {
+          inspect(`outer read ${++reads}`)
+          if (reads !== (form === 'thenable' ? 2 : 3)) return undefined
+          return (resolve: (value: Decision) => void) => {
+            inspect('pending outer assimilation')
+            outer.resolve(undefined)
+            jobs.push(
+              release.promise.then(() => {
+                resolve(chain(12))
+              })
+            )
+          }
+        }
+      })
+      const owner = planner.submit({
+        method: 'POST',
+        replay,
+        prepare: ctx => {
+          prepares++
+          ctx.onDispose(() => {
+            disposed++
+          })
+          return { url: 'owner', init: { body: 'same payload' } }
+        },
+        [site]: () => {
+          hooks++
+          if (form === 'promise-subclass') {
+            class HookPromise extends Promise<Decision> {}
+            return new HookPromise(resolve => {
+              resolve(stateful)
+            })
+          }
+          const wrapper: Decision = { type: 'allow' }
+          Object.defineProperty(wrapper, 'then', {
+            value: (resolve: (value: Decision) => void) => {
+              resolve(stateful)
+            }
+          })
+          return wrapper
+        },
+        consume: async (response, ctx) => {
+          await response.text()
+          if (site === 'beforeRetry' && ctx.attemptNumber === 1)
+            throw ctx.retryableReadFailure(new Error('exact active read failure'))
+          return 1
+        }
+      })
+      const result = owner.result.catch((error: unknown) => error)
+      void owner.resourcesDone.then(() => {
+        resources++
+      })
+      const sibling = planner.submit({
+        method: 'GET',
+        replay,
+        prepare: () => {
+          siblingPrepares++
+          return { url: 'sibling', init: {} }
+        },
+        consume: () => 2
+      })
+      void sibling.result.catch(() => undefined)
+      try {
+        await outer.promise
+        await clock.flush()
+        const prior = site === 'beforeRetry' ? 1 : 0
+        assert.equal(reads, form === 'thenable' ? 2 : 3, 'T93_PENDING_OUTER_ENTERED')
+        assert.deepEqual([hooks, prepares, sends, disposed], [1, 1, prior, prior])
+        for (const probe of probes) {
+          assert.equal(probe.id, 0, `T93_OUTER_TOKEN ${site} ${probe.stage}`)
+          assert.equal(probe.code, 'REENTRANT_OPERATION')
+        }
+        assert.deepEqual([planner.snapshot().leasedAttempts, planner.snapshot().sentActive], [1, 0])
+        // Local abort leaves a live sibling: a permanent stop could conceal early release.
+        owner.abort()
+        const error = await result
+        assert.ok(error instanceof OperationError)
+        assert.equal(error.code, 'ABORTED')
+        await clock.flush()
+        assert.equal(siblingPrepares, 0, `T93_PHYSICAL_LEASE ${site}`)
+        assert.equal(resources, 0, `T93_PHYSICAL_RESOURCES ${site}`)
+        assert.equal(owner.snapshot().resources, 'pending')
+        assert.equal(planner.snapshot().leasedAttempts, 1)
+        release.resolve(undefined)
+        await owner.resourcesDone
+        await clock.flush()
+        assert.ok(probes.some(probe => probe.stage === 'decision extraction'))
+        assert.equal(probes.filter(probe => probe.stage.startsWith('recursive job')).length, 12)
+        for (const probe of probes) {
+          assert.equal(probe.id, 0, `T93_EXTRACTION_TOKEN ${site} ${probe.stage}`)
+          assert.equal(probe.code, 'REENTRANT_OPERATION')
+        }
+        assert.equal((await sibling.result).value, 2)
+        await sibling.resourcesDone
+        assert.deepEqual(
+          [hooks, prepares, sends, disposed, resources, siblingPrepares],
+          [1, 1, prior + 1, 1, 1, 1]
+        )
+        assert.equal(await result, error)
+        console.log(
+          'T93_OWNER',
+          JSON.stringify({ site, form, probes, reads, resources, siblingPrepares })
+        )
+      } finally {
+        release.resolve(undefined)
+        owner.abort()
+        sibling.abort()
+        for (const child of children) child.abort()
+        await Promise.allSettled([
+          result,
+          owner.resourcesDone,
+          sibling.result,
+          sibling.resourcesDone,
+          ...jobs,
+          ...children.flatMap(child => [child.result, child.resourcesDone])
+        ])
+        // Resolution can create further probes while finally awaits the owner.
+        for (const child of children) child.abort()
+        await Promise.allSettled(children.flatMap(child => [child.result, child.resourcesDone]))
+        await clock.flush()
+        assert.equal(planner.snapshot().leasedAttempts, 0)
+        assert.equal(planner.snapshot().sentActive, 0)
+        assert.equal(timers.active.size, 0)
+      }
+    })
+  }
+}
+
+for (const site of sites) {
+  test(`T93 resolved wait ${site} real hard capacity blocks queued preparation`, async t => {
+    const clock = createRuntime(t)
+    const timers = trackTimeouts(t)
+    const hook = deferred<Decision>()
+    const receipt = deferred<Response>()
+    let sends = 0
+    let prepares = 0
+    let siblingPrepares = 0
+    let dispatchHooks = 0
+    let hooks = 0
+    const planner = new FetchPlanner<typeof fetch>(
+      url => {
+        sends++
+        if (url === (site === 'beforeDispatch' ? 'target' : 'sibling')) return receipt.promise
+        return Promise.resolve(new Response('complete'))
+      },
+      { maxParallelLimit: 1 }
+    )
+    const target = planner.submit({
+      method: 'POST',
+      replay,
+      prepare: () => {
+        prepares++
+        return { url: 'target', init: { body: 'same payload' } }
+      },
+      [site]: () => {
+        hooks++
+        return hook.promise
+      },
+      ...(site === 'beforeRetry'
+        ? {
+            beforeDispatch: () => {
+              dispatchHooks++
+              return { type: 'allow' } as const
+            }
+          }
+        : {}),
+      consume: async (response, ctx) => {
+        await response.text()
+        if (site === 'beforeRetry' && ctx.attemptNumber === 1)
+          throw ctx.retryableReadFailure(new Error('eligible after full read'))
+        return 1
+      }
+    })
+    const sibling = planner.submit({
+      method: 'GET',
+      replay,
+      prepare: () => {
+        siblingPrepares++
+        return { url: 'sibling', init: {} }
+      },
+      consume: async response => {
+        await response.text()
+        return 2
+      }
+    })
+    void target.result.catch(() => undefined)
+    void sibling.result.catch(() => undefined)
+    try {
+      await clock.flush()
+      assert.equal(hooks, 1)
+      assert.deepEqual([prepares, siblingPrepares], [1, 0])
+      hook.resolve({ type: 'defer', delayMs: 50 })
+      await clock.flush()
+      assert.equal(target.snapshot().phase, site === 'beforeDispatch' ? 'ready' : 'retry-wait')
+      if (site === 'beforeRetry') {
+        assert.equal(siblingPrepares, 1, 'RETRY_SLEEP_HAS_NO_LEASE')
+        assert.equal(sends, 2, 'REAL_SIBLING_SENT_BEFORE_RETRY_WAKE')
+      }
+      await clock.advance(50)
+      assert.deepEqual([planner.snapshot().leasedAttempts, planner.snapshot().sentActive], [1, 1])
+      assert.equal(prepares, 1, 'T93_HARD_CAPACITY_PREVENTS_RETRY_PREPARE')
+      assert.equal(
+        siblingPrepares,
+        site === 'beforeDispatch' ? 0 : 1,
+        'T93_HARD_CAPACITY_PREVENTS_SIBLING_PREPARE'
+      )
+      assert.equal(
+        sends,
+        site === 'beforeDispatch' ? 1 : 2,
+        'T93_HARD_CAPACITY_NO_EXCESS_TRANSPORT'
+      )
+      assert.equal(hooks, 1)
+      receipt.resolve(new Response('complete'))
+      assert.equal((await target.result).value, 1)
+      assert.equal((await sibling.result).value, 2)
+      await Promise.all([target.resourcesDone, sibling.resourcesDone])
+      assert.deepEqual(
+        [prepares, siblingPrepares, sends, hooks],
+        [site === 'beforeRetry' ? 2 : 1, 1, site === 'beforeRetry' ? 3 : 2, 1]
+      )
+      if (site === 'beforeRetry') assert.equal(dispatchHooks, 2)
+      console.log(
+        'T93_HARD_CAPACITY',
+        JSON.stringify({ site, prepares, siblingPrepares, sends, hooks })
+      )
+    } finally {
+      hook.resolve({ type: 'allow' })
+      receipt.resolve(new Response('complete'))
+      target.abort()
+      sibling.abort()
+      await Promise.allSettled([
+        target.result,
+        target.resourcesDone,
+        sibling.result,
+        sibling.resourcesDone
+      ])
+      await clock.flush()
+      assert.equal(planner.snapshot().leasedAttempts, 0)
+      assert.equal(planner.snapshot().sentActive, 0)
+      assert.equal(timers.active.size, 0)
+    }
+  })
 }
