@@ -1,7 +1,19 @@
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
-import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync, writeSync } from 'node:fs'
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  realpathSync,
+  rmSync,
+  writeFileSync,
+  writeSync
+} from 'node:fs'
+import { randomBytes } from 'node:crypto'
 import path from 'node:path'
+import { runHookCompilerPhase } from '../helpers/hook-compiler.mjs'
 import { fileURLToPath } from 'node:url'
 
 const directory = path.dirname(fileURLToPath(import.meta.url))
@@ -56,14 +68,15 @@ function writeDiagnostic(fd, text) {
   }
 }
 
-/** @param {string[]} args */
-function child(args) {
+/** @param {string[]} args @param {NodeJS.ProcessEnv} [env] @param {number} [timeout] */
+function child(args, env, timeout = 30_000) {
   const started = performance.now()
   const result = spawnSync(process.execPath, args, {
     cwd: root,
     encoding: 'utf8',
-    timeout: 30_000,
-    maxBuffer: 4 * 1024 * 1024
+    timeout,
+    maxBuffer: 4 * 1024 * 1024,
+    env
   })
   if (result.error) {
     writeDiagnostic(1, result.stdout)
@@ -306,16 +319,58 @@ function publicTypes() {
 
 if (selected.includes('public')) publicTypes()
 if (selected.includes('types')) types()
-const runtime = child([
-  '--unhandled-rejections=strict',
-  '--test',
-  '--test-timeout=20000',
-  ...selected.map(name => {
-    const file = registry.get(name)
-    assert.ok(file)
-    return path.join('__temp/operation-build/test/operation', file.replace(/\.ts$/, '.js'))
-  })
-])
-process.stdout.write(runtime.stdout)
-process.stderr.write(runtime.stderr)
-assert.equal(runtime.status, 0, 'Operation runtime suites failed')
+let receiptDirectory
+let failed = false
+try {
+  let runtimeEnv
+  if (selected.includes('hook-types')) {
+    const nonce = randomBytes(32).toString('hex')
+    const context = {
+      canonicalRoot: realpathSync(root),
+      selectedSelectors: selected,
+      buildDirectory: realpathSync(path.join(root, '__temp/operation-build'))
+    }
+    receiptDirectory = mkdtempSync(path.join(root, '__temp/hook-phase-'))
+    const file = path.join(receiptDirectory, 'receipt.json')
+    const receipt = runHookCompilerPhase(context, nonce)
+    writeFileSync(file, JSON.stringify(receipt), { flag: 'wx' })
+    runtimeEnv = {
+      ...process.env,
+      FETCH_PLANNER_HOOK_PHASE_NONCE: nonce,
+      FETCH_PLANNER_HOOK_PHASE_FILE: file,
+      FETCH_PLANNER_HOOK_PHASE_CONTEXT: JSON.stringify(context)
+    }
+  }
+  const runtime = child(
+    [
+      '--unhandled-rejections=strict',
+      '--test',
+      '--test-timeout=20000',
+      ...selected.map(name => {
+        const file = registry.get(name)
+        assert.ok(file)
+        return path.join('__temp/operation-build/test/operation', file.replace(/\.ts$/, '.js'))
+      })
+    ],
+    runtimeEnv,
+    120_000
+  )
+  process.stdout.write(runtime.stdout)
+  process.stderr.write(runtime.stderr)
+  assert.equal(runtime.status, 0, 'Operation runtime suites failed')
+} catch (error) {
+  failed = true
+  throw error
+} finally {
+  if (receiptDirectory) removeReceipt(receiptDirectory, failed)
+}
+
+/** @param {string} folder @param {boolean} failed */
+function removeReceipt(folder, failed) {
+  try {
+    rmSync(folder, { recursive: true, force: true })
+  } catch (error) {
+    if (!failed) throw error
+    writeDiagnostic(2, 'Hook receipt cleanup failed after primary failure\n')
+  }
+}
