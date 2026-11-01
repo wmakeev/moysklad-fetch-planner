@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
+import { spawnSync } from 'node:child_process'
+import { readFileSync } from 'node:fs'
 import { fetch as undiciFetch, Response as UndiciResponse } from 'undici'
 import { FetchPlanner } from '../../src/planner.js'
 import { FetchPlanner as RootPlanner } from '../../src/index.js'
@@ -2099,5 +2101,307 @@ for (const site of sites) {
       assert.equal(planner.snapshot().sentActive, 0)
       assert.equal(timers.active.size, 0)
     }
+  })
+}
+
+for (const [entry, Planner] of [
+  ['root', RootPlanner],
+  ['deep', FetchPlanner]
+] as const) {
+  test(`T94 composite ${entry} cleanup hook barrier FIFO and fresh dispatch`, async t => {
+    const clock = createRuntime(t)
+    const timers = trackTimeouts(t)
+    const cleanup = deferred<undefined>()
+    const hook = deferred<Decision>()
+    const order: string[] = []
+    const inits: RequestInit[] = []
+    const bodies: ReadableStream<Uint8Array>[] = []
+    const contexts: HookContext[] = []
+    const events: Event[] = []
+    let nextPrepare = 0
+    let resources = 0
+    let disposals = 0
+    let discards = 0
+    let deliveries = 0
+    let retryHooks = 0
+    const planner = new Planner<typeof fetch>(
+      async (url, init) => {
+        assert.equal(typeof url, 'string')
+        order.push(`send:${typeof url === 'string' ? url : 'unexpected URL'}`)
+        if (url === 'PRIVATE_target') {
+          assert.ok(init)
+          inits.push(init)
+          assert.equal(await new Response(init.body).text(), 'PRIVATE_payload')
+        }
+        return new Response('complete')
+      },
+      { maxParallelLimit: 1, maxQueuedOperations: 2 }
+    )
+    const attachment = planner.observe(event => {
+      events.push(event)
+    })
+    const owner = planner.submit({
+      method: 'POST',
+      replay,
+      prepare: ctx => {
+        order.push(`prepare:${ctx.attemptNumber}`)
+        const body = new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(new TextEncoder().encode('PRIVATE_payload'))
+            controller.close()
+          }
+        })
+        bodies.push(body)
+        ctx.onDispose(async () => {
+          disposals++
+          if (ctx.attemptNumber === 1) await cleanup.promise
+        })
+        return { url: 'PRIVATE_target', init: { body, duplex: 'half' } }
+      },
+      beforeDispatch: ctx => {
+        contexts.push(ctx)
+        order.push(`dispatch-hook:${ctx.attemptNumber}`)
+        return { type: 'allow' }
+      },
+      beforeRetry: ctx => {
+        contexts.push(ctx)
+        retryHooks++
+        return hook.promise
+      },
+      consume: async (response, ctx) => {
+        await response.text()
+        ctx.onDiscard(() => {
+          discards++
+        })
+        if (ctx.attemptNumber === 1) throw ctx.retryableReadFailure(new Error('PRIVATE_read'))
+        return 'PRIVATE_value'
+      }
+    })
+    void owner.result.then(() => {
+      deliveries++
+    })
+    void owner.resourcesDone.then(() => {
+      resources++
+    })
+    const sibling = planner.submit({
+      method: 'GET',
+      replay,
+      prepare: () => {
+        nextPrepare++
+        order.push('sibling')
+        return { url: 'sibling', init: {} }
+      },
+      consume: response => response.text()
+    })
+    try {
+      await clock.flush()
+      assert.deepEqual([disposals, discards, retryHooks, nextPrepare], [1, 1, 0, 0])
+      assert.deepEqual([planner.snapshot().leasedAttempts, planner.snapshot().sentActive], [1, 1])
+      cleanup.resolve(undefined)
+      await clock.flush()
+      assert.equal(retryHooks, 1, 'T94_ACTUAL_CLEANUP_THEN_RETRY_HOOK')
+      assert.equal(nextPrepare, 0, 'T94_COMPOSITE_NEXT_PREPARE_PENDING_HOOK')
+      assert.equal(resources, 0, 'T94_COMPOSITE_RESOURCES_PENDING_HOOK')
+      assert.deepEqual(
+        [
+          planner.snapshot().queued,
+          planner.snapshot().leasedAttempts,
+          planner.snapshot().sentActive
+        ],
+        [1, 1, 0]
+      )
+      hook.resolve({ type: 'defer', delayMs: 40 })
+      await clock.flush()
+      assert.equal(owner.snapshot().phase, 'retry-wait')
+      assert.equal(nextPrepare, 1, 'T94_FIFO_SIBLING_BEFORE_RETRY')
+      assert.equal(bodies.length, 1)
+      await clock.advance(39)
+      assert.equal(bodies.length, 1, 'T94_HOOK_FLOOR_NO_EARLY_PREPARE')
+      await clock.advance(1)
+      assert.equal((await owner.result).value, 'PRIVATE_value')
+      assert.equal((await sibling.result).value, 'complete')
+      await Promise.all([owner.resourcesDone, sibling.resourcesDone])
+      await clock.flush()
+      assert.equal(inits.length, 2)
+      assert.notEqual(inits[0], inits[1])
+      assert.notEqual(bodies[0], bodies[1])
+      assert.deepEqual(order, [
+        'prepare:1',
+        'dispatch-hook:1',
+        'send:PRIVATE_target',
+        'sibling',
+        'send:sibling',
+        'prepare:2',
+        'dispatch-hook:2',
+        'send:PRIVATE_target'
+      ])
+      assert.deepEqual([disposals, discards, retryHooks, deliveries, resources], [2, 1, 1, 1, 1])
+      assert.equal(contexts.length, 3)
+      for (const ctx of contexts) {
+        assert.ok(Object.isFrozen(ctx) && Object.isFrozen(ctx.snapshot))
+        assert.deepEqual(
+          Object.keys(ctx).sort(),
+          (ctx.status === undefined
+            ? ['snapshot', 'signal', 'attemptNumber', 'dispatchCalls']
+            : ['snapshot', 'signal', 'attemptNumber', 'dispatchCalls', 'status']
+          ).sort()
+        )
+        assert.ok(!('signal' in ctx.snapshot))
+      }
+      for (const handle of [owner, sibling]) {
+        assert.equal(
+          events.filter(e => e.id === handle.id && e.type === 'operation-settled').length,
+          1
+        )
+        assert.equal(
+          events.filter(e => e.id === handle.id && e.type === 'resources-settled').length,
+          1
+        )
+      }
+      assert.ok(!JSON.stringify(events).includes('PRIVATE_'))
+      assert.deepEqual(
+        [
+          planner.snapshot().queued,
+          planner.snapshot().leasedAttempts,
+          planner.snapshot().sentActive,
+          timers.active.size
+        ],
+        [0, 0, 0, 0]
+      )
+      assert.ok(timers.maximum() <= 1)
+    } finally {
+      cleanup.resolve(undefined)
+      hook.resolve({ type: 'allow' })
+      owner.abort()
+      sibling.abort()
+      attachment.unsubscribe()
+      await Promise.allSettled([
+        owner.result,
+        owner.resourcesDone,
+        sibling.result,
+        sibling.resourcesDone
+      ])
+    }
+  })
+}
+
+// Read-only emitted probes expose registry sizes without changing admission or ownership.
+// Data URLs avoid leaving an additional acceptance artifact or runtime sibling on disk.
+for (const entry of ['index', 'planner']) {
+  test(`T94 finite strict ${entry} both hooks commit discard late receipt and retirement`, () => {
+    const directory = new URL('../../src/', import.meta.url)
+    let emitted = readFileSync(new URL('planner.js', directory), 'utf8')
+    const replace = (before: string, after: string) => {
+      assert.equal(emitted.split(before).length, 2, `T94_UNIQUE_PROBE ${before}`)
+      emitted = emitted.replace(before, after)
+    }
+    replace('    commands = [];', '    t94States = [];\n    commands = [];')
+    replace(
+      '        Object.assign(entry, materialized);',
+      '        Object.assign(entry, materialized); this.t94States.push(state);'
+    )
+    replace(
+      '    snapshot() {',
+      `    t94() { return {active:this.#active.size,ready:this.#ready.size,commands:this.commands.length,timer:this.#timer!==undefined,pump:this.#pumpScheduled,subscribers:this.observation.listeners.size,operationSubscribers:this.t94States.reduce((n,s)=>n+s.observation.listeners.size,0),retained:this.t94States.filter(s=>s.committed!==undefined||s.abortRequest!==undefined||s.plannerObservation!==undefined).length,deliveries:this.observation.pendingDeliveries?.length??0}; }\n    snapshot() {`
+    )
+    const absolute = (source: string) =>
+      source.replaceAll(
+        /from '(\.\/[^']+)'/g,
+        (_match, relative: string) => `from '${new URL(relative, directory).href}'`
+      )
+    const plannerURL = `data:text/javascript;base64,${Buffer.from(absolute(emitted)).toString('base64')}`
+    const root = readFileSync(new URL('index.js', directory), 'utf8').replace(
+      "from './planner.js'",
+      `from '${plannerURL}'`
+    )
+    const moduleURL =
+      entry === 'index'
+        ? `data:text/javascript;base64,${Buffer.from(absolute(root)).toString('base64')}`
+        : plannerURL
+    const source = `
+import assert from 'node:assert/strict';
+import {setImmediate} from 'node:timers/promises';
+import {FetchPlanner} from ${JSON.stringify(moduleURL)};
+const deferred=()=>{let resolve;const promise=new Promise(r=>{resolve=r});return {promise,resolve}};
+const replay={serverSafe:true,consumeSafe:true};
+const originalSet=globalThis.setTimeout,originalClear=globalThis.clearTimeout,timers=new Set();let maximum=0;
+globalThis.setTimeout=(fn,ms,...args)=>{const h=originalSet(()=>{timers.delete(h);fn(...args)},ms);timers.add(h);maximum=Math.max(maximum,timers.size);return h};
+globalThis.clearTimeout=h=>{timers.delete(h);originalClear(h)};
+const reports=[];
+try {
+ // A finite normal retry uses both actual owning sites and fresh request objects.
+ {
+  const bodies=[],inits=[],payloads=[],order=[];let prepares=0,dispatchHooks=0,retryHooks=0,disposals=0,discards=0,results=0;
+  const p=new FetchPlanner(async(url,init)=>{inits.push(init);payloads.push(await new Response(init.body).text());order.push('send:'+url);return new Response('complete')},{maxParallelLimit:1});
+  const h=p.submit({method:'POST',replay,prepare:ctx=>{prepares++;const body=new ReadableStream({start(c){c.enqueue(new TextEncoder().encode('same payload'));c.close()}});bodies.push(body);ctx.onDispose(()=>{disposals++});return {url:'owner',init:{body,duplex:'half'}}},beforeDispatch:()=>{dispatchHooks++;return {type:'allow'}},beforeRetry:()=>{retryHooks++;return {type:'defer',delayMs:1}},consume:async(r,ctx)=>{await r.text();ctx.onDiscard(()=>{discards++});if(ctx.attemptNumber===1)throw ctx.retryableReadFailure(new Error('exact read'));return 'done'}});
+  const result=h.result.then(v=>{results++;return v});
+  try {assert.equal((await result).value,'done');await h.resourcesDone;await setImmediate();assert.deepEqual([prepares,dispatchHooks,retryHooks,disposals,discards,results],[2,2,1,2,1,1]);assert.notEqual(inits[0],inits[1]);assert.notEqual(bodies[0],bodies[1]);assert.deepEqual(payloads,['same payload','same payload']);assert.equal(p.t94().active,0);assert.equal(p.t94().retained,0);reports.push({normal:true,prepares,dispatchHooks,retryHooks,disposals,discards,results})}
+  finally {h.abort();p.stop();await Promise.allSettled([result,h.resourcesDone])}
+ }
+ for(const site of ['beforeDispatch','beforeRetry']) {
+  const gate=deferred(),entered=deferred(),children=[],a=[],b=[],samples=[];
+  let sends=0,prepares=0,nextPrepare=0,disposed=0,resources=0,rejected=0,hookContext;
+  const reason={private:'PRIVATE_ABORT'};
+  const p=new FetchPlanner(()=>{sends++;return Promise.resolve(new Response('complete'))},{maxParallelLimit:1,maxQueuedOperations:2});
+  const spec=()=>({method:'GET',replay,prepare:()=>{nextPrepare++;return {url:'sibling',init:{}}},consume:r=>r.text()});
+  let burst=false;
+  const measure=()=>samples.push({...p.snapshot(),...p.t94()});
+  const aa=p.observe(e=>{a.push(e);measure();if(e.phase===(site==='beforeDispatch'?'preparing':'cleanup')&&!burst){burst=true;for(let i=0;i<20;i++)children.push(p.submit(spec()));measure()}return {type:'deny',code:'POLICY_DENIED'}});
+  const bb=p.observe(e=>{b.push(e);return {type:'defer',delayMs:100000}});
+  const owner=p.submit({method:'POST',replay,prepare:ctx=>{prepares++;ctx.onDispose(()=>{disposed++});return {url:'PRIVATE_url',init:{body:'PRIVATE_payload'}}},[site]:async ctx=>{hookContext=ctx;entered.resolve();await gate.promise;children.push(p.submit(spec()));return {type:'allow'}},consume:async(r,ctx)=>{await r.text();throw ctx.retryableReadFailure(new Error('PRIVATE_READ'))}});
+  const result=owner.result.catch(e=>{rejected++;return e});void owner.resourcesDone.then(()=>{resources++});
+  owner.observe(()=>undefined);
+  try {
+   await entered.promise;await setImmediate();
+   assert.equal(children.filter(h=>h.id!==0).length,2,'OBSERVER_ACCEPTED_BOUND');assert.equal(children.filter(h=>h.snapshot().failureCode==='QUEUE_FULL').length,18);
+   assert.equal(nextPrepare,0);assert.equal(prepares,1);assert.equal(sends,site==='beforeRetry'?1:0);
+   owner.abort(reason);const error=await result;await setImmediate();measure();
+   assert.equal(error.code,'ABORTED');assert.equal(error.cause,reason);assert.equal(error.status,site==='beforeRetry'?200:undefined);assert.equal(hookContext.signal.aborted,true);
+   assert.equal(nextPrepare,0,'T94_CHILD_NEXT_PREPARE_PENDING_HOOK');assert.equal(resources,0,'T94_CHILD_RESOURCES_PENDING_HOOK');
+   assert.equal(p.snapshot().leasedAttempts,1);assert.equal(p.snapshot().sentActive,0);assert.equal(p.snapshot().queued,2);
+   gate.resolve();await owner.resourcesDone;await Promise.allSettled(children.flatMap(h=>[h.result,h.resourcesDone]));await setImmediate();
+   assert.equal(children.at(-1).snapshot().failureCode,'REENTRANT_OPERATION','LATE_HOOK_STILL_OWNS_CONTEXT');assert.equal(nextPrepare,2);assert.equal(prepares,1);assert.equal(disposed,1);assert.equal(resources,1);assert.equal(rejected,1);assert.equal(await result,error);
+   assert.equal(a.filter(e=>e.id===owner.id&&e.type==='operation-settled').length,1);assert.equal(a.filter(e=>e.id===owner.id&&e.type==='resources-settled').length,1);
+   assert.deepEqual(a,b);assert.ok(!JSON.stringify(a).includes('PRIVATE_'));
+   for(const s of samples){assert.ok(s.active<=s.queued+s.leasedAttempts,'ACTIVE_BOUND');assert.ok(s.sentActive<=s.leasedAttempts&&s.leasedAttempts<=1);assert.ok(s.queued<=2);assert.ok(s.commands<=s.queued+s.active+1)}
+   aa.unsubscribe();bb.unsubscribe();await setImmediate();
+   assert.deepEqual(p.t94(),{active:0,ready:0,commands:0,timer:false,pump:false,subscribers:0,operationSubscribers:0,retained:0,deliveries:0},'FINAL_REGISTRIES_ZERO');
+   reports.push({site,prepares,sends,nextPrepare,disposed,resources,rejected,final:p.t94()});
+  } finally {gate.resolve();owner.abort();p.stop();aa.unsubscribe();bb.unsubscribe();await Promise.allSettled([owner.result,owner.resourcesDone,...children.flatMap(h=>[h.result,h.resourcesDone])])}
+ }
+ for(const committed of [false,true]) {
+  const consume=deferred(),entered=deferred(),cleanup=deferred(),disposing=deferred();let discarded=0,delivered=0,disposed=0;
+  const value={private:'PRIVATE_VALUE'},reason={private:'PRIVATE_CANCEL'};
+  const p=new FetchPlanner(()=>Promise.resolve(new Response('ok')),{maxParallelLimit:1});
+  const h=p.submit({method:'POST',replay,beforeDispatch:()=>({type:'allow'}),beforeRetry:()=>{throw new Error('UNEXPECTED_RETRY')},prepare:()=>({url:'',init:{}}),consume:async(r,ctx)=>{await r.text();ctx.onDiscard(()=>{discarded++});ctx.onDispose(async()=>{disposed++;disposing.resolve();await cleanup.promise});entered.resolve();await consume.promise;return value}});
+  const observed=h.result.then(r=>{delivered++;return r},e=>e);
+  try {
+   await entered.promise;if(committed){consume.resolve();await disposing.promise;assert.equal(h.snapshot().resultCommitted,true)}
+   h.abort(reason);const result=await observed;
+   if(committed){assert.equal(result.value,value);assert.equal(result.cleanup,'pending')}else{assert.equal(result.code,'ABORTED');assert.equal(result.cause,reason);assert.equal(result.status,200);consume.resolve();await disposing.promise}
+   assert.equal(p.snapshot().leasedAttempts,1);assert.equal(p.snapshot().sentActive,1);
+   cleanup.resolve();await h.resourcesDone;await setImmediate();assert.equal(delivered,committed?1:0);assert.equal(discarded,committed?0:1);assert.equal(delivered+discarded,1,'NEVER_LOSE_VALUE');assert.equal(disposed,1);assert.equal(p.t94().active,0);assert.equal(p.t94().retained,0);
+   reports.push({committed,delivered,discarded,disposed});
+  } finally {consume.resolve();cleanup.resolve();h.abort();p.stop();await Promise.allSettled([h.result,h.resourcesDone])}
+ }
+ const receipt=deferred(),entered=deferred();let calls=0,consumes=0;
+ const late=new FetchPlanner(()=>{calls++;entered.resolve();return receipt.promise},{maxParallelLimit:1});
+ const h=late.submit({method:'POST',replay,prepare:()=>({url:'',init:{}}),beforeDispatch:()=>({type:'allow'}),consume:()=>{consumes++;return 1}});
+ const observed=h.result.catch(e=>e);
+ try {await entered.promise;h.abort('primary');const error=await observed;receipt.resolve(new Response(null,{status:429,headers:{'X-Lognex-Retry-After':'1'}}));await h.resourcesDone;await setImmediate();assert.equal(await observed,error);assert.equal(error.code,'ABORTED');assert.equal(error.cause,'primary');assert.equal(h.snapshot().status,429);assert.equal(calls,1);assert.equal(consumes,0);assert.equal(late.t94().active,0);assert.equal(late.t94().retained,0);reports.push({lateStatus:h.snapshot().status,calls,consumes})}
+ finally {receipt.resolve(new Response());h.abort();late.stop();await Promise.allSettled([h.result,h.resourcesDone])}
+ await setImmediate();assert.equal(timers.size,0,'FINAL_TIMERS_ZERO');assert.ok(maximum<=1,'ONE_COORDINATOR_TIMER');
+ console.log('T94_FINITE',JSON.stringify({entry:${JSON.stringify(entry)},reports,timers:timers.size,maximum}));
+} finally {globalThis.setTimeout=originalSet;globalThis.clearTimeout=originalClear}
+`
+    const child = spawnSync(
+      process.execPath,
+      ['--unhandled-rejections=strict', '--input-type=module', '-e', source],
+      { encoding: 'utf8', timeout: 10000 }
+    )
+    assert.ifError(child.error)
+    assert.equal(child.signal, null)
+    assert.equal(child.status, 0, child.stdout + child.stderr)
+    console.log(child.stdout.trim())
   })
 }
