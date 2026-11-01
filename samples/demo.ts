@@ -1,132 +1,90 @@
-/* oxlint-disable */
-// @ts-nocheck
-// node -r dotenv/config ./build/test/demo.test.js -p 1
-
-import fs from 'fs'
-import Moysklad from 'moysklad'
-import path from 'path'
-import undici from 'undici'
-import { FetchPlanner, type FetchPlannerOptions } from '../src/index.js'
+// Compile-only example. The owner supplies a token explicitly; no automatic execution.
+import { mkdir, writeFile } from 'node:fs/promises'
+import path from 'node:path'
+import { fetch } from 'undici'
+import { FetchPlanner } from '../src/index.js'
+import { consumeDocuments, finishedDocuments } from './types.js'
 
 const TEST_REQUESTS_COUNT = 100
+const PAGE_SIZE = 1000
+const WINDOW = 6
 
-export const generateRequest = () => {
-  return {
-    // url: 'entity/project/metadata',
-    url: 'entity/invoiceout',
-    query: {}
+export const generateRequest = (page: number) => ({
+  url: 'https://api.moysklad.ru/api/remap/1.2/entity/invoiceout',
+  query: { limit: String(PAGE_SIZE), offset: String(page * PAGE_SIZE), order: 'id,asc' }
+})
+
+export async function stage(accessToken: string, procNum = 1, reqCount = TEST_REQUESTS_COUNT) {
+  if (!Number.isSafeInteger(reqCount) || reqCount < 1 || reqCount * PAGE_SIZE > 2147483647) {
+    throw new Error('Invalid request count')
   }
-}
+  if (!Number.isSafeInteger(procNum) || procNum < 1) throw new Error('Invalid process number')
 
-async function stage(procNum: number, reqCount: number) {
-  const eventObjects: Record<string, any>[] = []
-
-  let curEventObject: any = {}
-
-  const eventHandler: FetchPlannerOptions['eventHandler'] = {
-    emit(eventName, data) {
-      curEventObject = {
-        ...curEventObject,
-        ...fetchPlanner.getInternalState(),
-        ...(typeof data === 'object' ? data : data != null ? { [eventName]: data } : {}),
-        time: Date.now() - startTime
-      }
-
-      eventObjects.push(curEventObject)
-    }
-  }
-
-  const fetchPlanner = new FetchPlanner(undici.fetch, {
-    eventHandler,
+  const planner = new FetchPlanner(fetch, {
     maxParallelLimit: 5,
+    maxQueuedOperations: WINDOW,
     maxRequestDelayTimeMs: 3000,
     parallelLimitCorrectionPeriodMs: 1000,
     throttlingCoefficient: 5
   })
-
-  const fetch = fetchPlanner.getFetch()
-  const trigger = fetchPlanner.waitForFreeRequestSlot()
-
-  const ms = Moysklad({
-    apiVersion: '1.2',
-    fetch
+  const startTime = performance.now()
+  const events: (string | number)[][] = []
+  const observation = planner.observe(event => {
+    const state = planner.snapshot()
+    // Only scalar lifecycle facts; no URL, body, headers, token, value or Error.
+    events.push([
+      event.sequence,
+      event.id,
+      event.type,
+      event.phase,
+      event.status ?? '',
+      state.queued,
+      state.sentActive,
+      Math.round(performance.now() - startTime)
+    ])
   })
 
-  const promises = []
-
-  const startTime = Date.now()
-
-  for (let i = 1; i <= reqCount; i++) {
-    const req = generateRequest()
-
-    await trigger()
-
-    const promise = ms.GET(req.url, req.query).then(() => {
-      console.log(`Запрос ${i}`)
-    })
-
-    promises.push(promise)
+  try {
+    // Finite windows provide producer backpressure; planner alone schedules wire sends.
+    for (let first = 0; first < reqCount; first += WINDOW) {
+      const pending = Array.from({ length: Math.min(WINDOW, reqCount - first) }, (_, index) => {
+        // Capture one logical page before prepare; every replay uses the same query.
+        const request = generateRequest(first + index)
+        return finishedDocuments(
+          planner.submit({
+            method: 'GET',
+            replay: { serverSafe: true, consumeSafe: true },
+            prepare: () => ({
+              url: new URL(`${request.url}?${new URLSearchParams(request.query)}`),
+              // Fresh init and headers each attempt. GET has no body/upload producer;
+              // method and fresh attempt controller/signal belong to the coordinator.
+              init: {
+                headers: { 'Authorization': `Bearer ${accessToken}`, 'Accept-Encoding': 'gzip' },
+                redirect: 'error'
+              }
+            }),
+            consume: consumeDocuments
+          })
+        )
+      })
+      // Drain the entire window on failure before stopping; do not lose sibling rejections.
+      const outcomes = await Promise.allSettled(pending)
+      for (const outcome of outcomes) {
+        if (outcome.status === 'rejected') throw outcome.reason
+      }
+    }
+  } finally {
+    planner.stop()
+    observation.unsubscribe()
   }
 
-  await Promise.all(promises)
-
-  const endTime = Date.now()
-
-  const reportHeaders = [
-    ...eventObjects
-      .reduce<Set<any>>((res, it) => {
-        Object.keys(it).forEach(key => res.add(key))
-        return res
-      }, new Set())
-      .values()
-  ].sort()
-
-  const reportLines = [reportHeaders]
-
-  for (const event of eventObjects) {
-    const line = reportHeaders.reduce((line, header) => {
-      line.push(event[header])
-      return line
-    }, [] as string[])
-
-    reportLines.push(line)
-  }
-
-  fs.writeFileSync(
-    path.join(process.cwd(), `__temp/fetch-planner/report-proc${procNum}.csv`),
-    reportLines.map(l => l.join()).join('\n') + '\n'
+  const headers = ['sequence', 'id', 'type', 'phase', 'status', 'queued', 'sentActive', 'time']
+  const directory = path.join(process.cwd(), '__temp/fetch-planner')
+  await mkdir(directory, { recursive: true })
+  await writeFile(
+    path.join(directory, `report-proc${procNum}.csv`),
+    [headers, ...events].map(line => line.join(',')).join('\n') + '\n'
   )
-
-  const duration = Math.round(endTime - startTime)
-  const avgRequestDuration = Math.round(duration / reqCount)
-
-  console.log(`DONE (${duration}ms, ${avgRequestDuration}ms/req).`)
+  const duration = Math.round(performance.now() - startTime)
+  console.log(`DONE (${duration}ms, ${Math.round(duration / reqCount)}ms/req).`)
 }
-
-const procParamIndex = process.argv.indexOf('-p')
-
-let proc = 1
-
-if (procParamIndex !== -1) {
-  proc = Number(process.argv[procParamIndex + 1] ?? '1')
-}
-
-if (Number.isNaN(proc)) {
-  throw new Error('Process arg is not number')
-}
-
-const rCountParamIndex = process.argv.indexOf('-r')
-
-let rCount = TEST_REQUESTS_COUNT
-
-if (rCountParamIndex !== -1) {
-  rCount = Number(process.argv[rCountParamIndex + 1] ?? '100')
-}
-
-if (Number.isNaN(rCount)) {
-  throw new Error('Requests count arg is not number')
-}
-
-stage(proc, rCount).catch(err => {
-  console.log(err)
-})

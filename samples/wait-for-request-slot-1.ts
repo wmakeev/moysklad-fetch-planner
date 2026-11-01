@@ -1,207 +1,138 @@
-import Moysklad from 'moysklad'
+// Compile-only document pipeline; the historical filename does not imply a slot API.
 import { fetch } from 'undici'
-import { FetchPlanner } from '../src/index.js'
+import { FetchPlanner, type Completed } from '../src/index.js'
 import _H from 'highland'
 import {
   orderlessParallel,
   promiseToStream,
   throughputProbe,
-  ThroughputProbeEvent,
-  ThroughputProbeHandler,
-  isNil
+  type ThroughputProbeEvent,
+  type ThroughputProbeHandler
 } from '@wmakeev/highland-tools'
-import assert from 'node:assert'
+import assert from 'node:assert/strict'
 import * as csv from 'csv-stringify/sync'
 import { writeFile, mkdir } from 'node:fs/promises'
 import path from 'node:path'
-import { Document, DocumentRef, DocumentCollection } from './types.js'
+import {
+  consumeDocuments,
+  finishedDocuments,
+  type Document,
+  type DocumentRef,
+  type DocumentCollection
+} from './types.js'
 
-/** Кол-во идентификаторов в источнике данных */
 const SAMPLE_DOCS_SIZE = 1000
-
-/** Кол-во элементов по которым формируется отчет по пропускной способности */
 const SAMPLE_BATCH_SIZE = 100
-
-/** Номер текущего примера */
 const CASE_NUM = 1
-
-/** Группировка при массовой загрузке */
 const MAX_BATCH_SIZE = 20
-
-/** Задержка на 1 элемент в источнике */
 const SOURCE_DELAY_MS = 5
-
-/** Лимит на кол-во параллельных запросов */
 const PARALLEL_LIMIT = 4
+const WINDOW = PARALLEL_LIMIT + 1
 
-const fetchPlanner = new FetchPlanner(fetch, {
-  maxParallelLimit: PARALLEL_LIMIT
-})
-
-const ms = Moysklad({ fetch: fetchPlanner.getFetch() })
-
-//#region Подготовка данных для теста
-
-const extractDocumentInfo = (doc: Document): DocumentRef => ({
-  type: doc.meta.type,
-  id: doc.id
-})
-
-console.log('Loading sample docs..')
-
-// Получим 1000 заказов и возьмем у них идентификаторы
-const ordersColl = (await ms.GET('entity/customerorder', {
-  limit: SAMPLE_DOCS_SIZE
-})) as DocumentCollection
-
-const ordersInfo = ordersColl.rows.map(extractDocumentInfo)
-
-//#endregion
-
-async function sample1(items: DocumentRef[]) {
-  const throughputEvents = [] as ThroughputProbeEvent[]
-
-  const throughputHandler: ThroughputProbeHandler = ev => {
-    const throughput = (ev.timeEnd - ev.timeStart) / ev.size
-
-    console.log(
-      `${ev.type === 'inbound' ? '🔽' : '🔼'} ${ev.label} ${ev.type} throughput ${throughput.toFixed(3)} ms/it`
-    )
-
-    throughputEvents.push(ev)
-  }
-
-  /**
-   * Общий поток с идентификаторами документов
-   */
-  const docs$ = _H(items)
-
-  /**
-   * Формируем отдельный поток только для заказов.
-   * > В нашем примере это не важно, т.к. есть только один тип документа.
-   */
-  const orderIds$ = docs$.fork().filter(it => it.type === 'customerorder')
-
-  /**
-   * Группы документов сформированные по принципу:
-   * - в группе не больше 50 элементов (для большего кол-ва будет слишком
-   * большой url фильтра)
-   * - ожидание наполнения группы не дольше 1 секунды (если ждать слишком
-   * долго мы теряем время на выполнение запроса)
-   */
-  const ordersBatches$ = orderIds$
-    .fork()
-    .ratelimit(1, SOURCE_DELAY_MS)
-    .consume<DocumentRef[]>(
-      (() => {
-        let consumeBuffer = [] as DocumentRef[]
-        let isWaiting = false
-
-        return (err, it, push, next) => {
-          // error
-          if (err instanceof Error) {
-            push(err)
-            next()
-          }
-
-          // end of stream
-          else if (isNil(it)) {
-            if (consumeBuffer.length > 0) {
-              push(null, consumeBuffer)
-            }
-            consumeBuffer = []
-            push(null, it)
-          }
-
-          // push data
-          else {
-            consumeBuffer.push(it)
-
-            if (consumeBuffer.length >= MAX_BATCH_SIZE) {
-              push(null, consumeBuffer)
-              consumeBuffer = []
-            }
-
-            next()
-
-            if (!isWaiting) {
-              isWaiting = true
-
-              fetchPlanner
-                .waitForFreeRequestSlot()
-                .then(() => {
-                  isWaiting = false
-
-                  const bufferLen = consumeBuffer.length
-
-                  if (bufferLen > 0) {
-                    push(null, consumeBuffer)
-                    consumeBuffer = []
-                  }
-                })
-                .catch((err: unknown) => {
-                  console.log(err)
-                })
-            }
-          }
+export async function sample1(accessToken: string) {
+  const planner = new FetchPlanner(fetch, {
+    maxParallelLimit: PARALLEL_LIMIT,
+    maxQueuedOperations: WINDOW,
+    // Local bulk-read recipe: five-minute attempt, two attempts within eleven minutes.
+    // Finite choices for this workload, not new defaults or a server latency guarantee.
+    attemptTimeoutMs: 300000,
+    deadlineMs: 660000,
+    maxAttempts: 2,
+    cleanupGraceMs: 5000
+  })
+  const active = new Set<Promise<Completed<DocumentCollection>>>()
+  const loadOrders = async (query: Record<string, string>) => {
+    // Logical page/filter is fixed outside prepare; replay repeats only a read with
+    // side-effect-free consume. Never infer safety for a future POST/PUT replacement.
+    const handle = planner.submit({
+      method: 'GET',
+      replay: { serverSafe: true, consumeSafe: true },
+      deadlineMs: 660000,
+      prepare: () => ({
+        url: new URL(
+          `https://api.moysklad.ru/api/remap/1.2/entity/customerorder?${new URLSearchParams(query)}`
+        ),
+        init: {
+          headers: { 'Authorization': `Bearer ${accessToken}`, 'Accept-Encoding': 'gzip' },
+          redirect: 'error'
         }
-      })()
-    )
-
-  /**
-   * Поток содержащий статистику по массовой загрузке документов:
-   * - кол-во загруженных документов за один запрос
-   * - время начала запроса
-   * - время окончания запроса
-   *
-   * > Время может не отражать реальную длительность запроса, т.к. запрос
-   * может находится какое-то время в очереди планировщика.
-   */
-  const fetchedOrders$ = ordersBatches$
-    .map(async batch => {
-      assert.ok(batch[0])
-
-      const type = batch[0].type
-
-      console.log(`fetching batch of ${batch.length} items`)
-
-      await fetchPlanner.waitForFreeRequestSlot()
-
-      const docsColl = (await ms.GET(`entity/${type}`, {
-        filter: {
-          id: batch.map(it => it.id)
-        }
-      })) as DocumentCollection
-
-      return docsColl.rows
+      }),
+      consume: consumeDocuments
     })
-    .map(promiseToStream)
+    // No upload body/resources. Coordinator owns a fresh controller each attempt;
+    // finishedDocuments waits for response cleanup separately from result settlement.
+    const work = finishedDocuments(handle)
+    active.add(work)
+    try {
+      return (await work).value
+    } finally {
+      active.delete(work)
+    }
+  }
+  let pipeline: Highland.Stream<Document> | undefined
+  try {
+    const initial = await loadOrders({
+      limit: String(SAMPLE_DOCS_SIZE),
+      offset: '0',
+      order: 'id,asc'
+    })
+    const extractDocumentInfo = (doc: Document): DocumentRef => ({
+      type: doc.meta.type,
+      id: doc.id
+    })
+    const items = initial.rows.map(extractDocumentInfo)
+    const throughputEvents: ThroughputProbeEvent[] = []
+    const throughputHandler: ThroughputProbeHandler = event => {
+      const throughput = (event.timeEnd - event.timeStart) / event.size
+      console.log(`${event.type} throughput ${throughput.toFixed(3)} ms/it`)
+      throughputEvents.push(event)
+    }
 
-    // Запросы делаем параллельно с максимально установленным лимитом + 1, чтобы
-    // в очереди планировщика всегда был один доступный для выполнения запрос
-    .through(orderlessParallel(PARALLEL_LIMIT + 1))
-    .sequence()
-    .through(throughputProbe('fetchedOrders$', 0, SAMPLE_BATCH_SIZE, throughputHandler))
+    // 5ms models arrival from the source, not a second HTTP/rate scheduler.
+    // Flush on 20 refs or 1s. Downstream demand bounds submissions to WINDOW.
+    const batches = _H(items)
+      .filter(item => item.type === 'customerorder')
+      .ratelimit(1, SOURCE_DELAY_MS)
+      .batchWithTimeOrCount(1000, MAX_BATCH_SIZE)
 
-  const ids = await fetchedOrders$
-    .map(it => it.id)
-    .collect()
-    .toPromise(Promise)
+    pipeline = batches
+      .map(async batch => {
+        assert.ok(batch[0])
+        const collection = await loadOrders({
+          // Repeated id equality conditions are OR; URLSearchParams encodes the filter.
+          filter: batch.map(item => `id=${item.id}`).join(';'),
+          limit: String(MAX_BATCH_SIZE),
+          offset: '0',
+          order: 'id,asc'
+        })
+        return collection.rows
+      })
+      .map(promiseToStream)
+      .through(orderlessParallel(WINDOW))
+      .sequence()
+      .through(throughputProbe('fetchedOrders$', 0, SAMPLE_BATCH_SIZE, throughputHandler))
 
-  assert.equal(ids.length, items.length)
+    console.time(`Case ${CASE_NUM}`)
+    const ids = await pipeline
+      .map(item => item.id)
+      .collect()
+      .toPromise(Promise)
+    console.timeEnd(`Case ${CASE_NUM}`)
+    assert.equal(ids.length, items.length)
+    // Count alone could miss a duplicated/missing document in a batch.
+    assert.deepEqual([...ids].sort(), items.map(item => item.id).sort())
 
-  return throughputEvents
+    const directory = path.join(
+      process.cwd(),
+      `__temp/samples/waitForRequestSlot/PARALLEL_LIMIT=${PARALLEL_LIMIT}/BATCH_SIZE=${MAX_BATCH_SIZE}/`
+    )
+    await mkdir(directory, { recursive: true })
+    await writeFile(path.join(directory, 'fetched-docs.csv'), csv.stringify(throughputEvents))
+    return throughputEvents
+  } finally {
+    // Stop further production and dispatch, then drain already owned finite work.
+    pipeline?.destroy()
+    planner.stop()
+    await Promise.allSettled([...active])
+  }
 }
-
-console.time(`Case ${CASE_NUM}`)
-const stat = await sample1(ordersInfo)
-console.timeEnd(`Case ${CASE_NUM}`)
-
-const STAT_FOLDER_PATH = path.join(
-  process.cwd(),
-  `__temp/samples/waitForRequestSlot/PARALLEL_LIMIT=${PARALLEL_LIMIT}/BATCH_SIZE=${MAX_BATCH_SIZE}/`
-)
-
-await mkdir(STAT_FOLDER_PATH, { recursive: true })
-
-await writeFile(path.join(STAT_FOLDER_PATH, 'fetched-docs.csv'), csv.stringify(stat))
