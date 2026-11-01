@@ -118,7 +118,10 @@ try {
     },
     consume: response => response.text()
   })
-  assert.deepEqual(await handle.result, { value: 'finished', status: 200, cleanup: 'released' })
+  assert.deepEqual(
+    { ...(await handle.result) },
+    { value: 'finished', status: 200, cleanup: 'released' }
+  )
   assert.deepEqual(await handle.resourcesDone, { resources: 'released' })
   assert.equal(prepared, 2)
   assert.equal(dispatched, 2)
@@ -301,11 +304,14 @@ if (family === 'undici') {
         ),
         handle.resourcesDone
       )
-      assert.deepEqual(await handle.result, {
-        value: { text: `${method}:${method === 'POST' ? 'wire payload' : ''}`, undici: true },
-        status: 201,
-        cleanup: 'released'
-      })
+      assert.deepEqual(
+        { ...(await handle.result) },
+        {
+          value: { text: `${method}:${method === 'POST' ? 'wire payload' : ''}`, undici: true },
+          status: 201,
+          cleanup: 'released'
+        }
+      )
       assert.deepEqual(await handle.resourcesDone, { resources: 'released' })
       assert.equal(handle.snapshot().dispatchCalls, 1)
       assert.equal(disposed, 1)
