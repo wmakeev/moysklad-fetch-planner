@@ -1,291 +1,347 @@
 import assert from 'node:assert/strict'
+import { OperationObservation } from '../src/operation-observation.js'
 import { spawn } from 'node:child_process'
-import { EventEmitter } from 'node:events'
+import { fileURLToPath } from 'node:url'
 import { test } from 'node:test'
 import { Response } from 'undici'
-import { FetchPlanner, type FetchPlannerEventMap } from '../src/index.js'
+import { FetchPlanner, OperationError, type Handle } from '../src/index.js'
 import { createRuntime } from './helpers/runtime.js'
+import { deferred } from './operation/helpers.js'
 
+const replay = { serverSafe: false, consumeSafe: false }
+const url = 'http://offline.test/'
 for (const scenario of ['invalid-header', 'response-observer']) {
-  test(`${scenario === 'invalid-header' ? 'D01' : 'D02'} terminal action never restarts after ${scenario}`, async t => {
-    const runtime = createRuntime(t)
+  test(`D01 D02 ${scenario} preserves terminal status and isolated observation`, async t => {
+    const clock = createRuntime(t)
     let starts = 0
     let settlements = 0
-    const original = new Error('response observer failed')
-    const events = new EventEmitter<FetchPlannerEventMap<typeof import('undici').fetch>>()
-    events.on('response', () => {
-      if (scenario === 'response-observer') throw original
-    })
+    let consumes = 0
     const planner = new FetchPlanner<typeof import('undici').fetch>(
       () => {
         starts++
         return Promise.resolve(
           new Response(null, {
             status: 429,
-            headers: { 'X-Lognex-Retry-After': scenario === 'invalid-header' ? 'invalid' : '1' }
+            headers: {
+              'X-Lognex-Retry-After': scenario === 'invalid-header' ? 'invalid' : '0'
+            }
           })
         )
       },
-      { jitter: 0, eventHandler: events }
+      { jitter: 0 }
     )
-    const result = planner
-      .getFetch()('http://offline.test/')
-      .then(
-        () => {
-          settlements++
-          assert.fail('Failed action resolved')
-        },
-        (error: unknown) => {
-          settlements++
-          return error
-        }
-      )
-    await runtime.advance(0)
-    const error = await result
-    assert.ok(error instanceof Error)
-    if (scenario === 'response-observer') assert.equal(error, original)
-    await runtime.advance(100)
-    await runtime.advance(100)
-    assert.equal(starts, 1, 'Rejected action must never start again')
-    assert.equal(settlements, 1)
-    assert.equal(planner.getActionsQueueLength(), 0)
-    assert.equal(planner.getCurInflightRequestsCount(), 0)
-  })
-}
-
-for (const scenario of ['error-observer', 'sync-transport', 'request-observer']) {
-  test(`${scenario === 'error-observer' ? 'D03' : 'D04'} ${scenario} settles without uncaught or unhandled errors`, async () => {
-    const child = spawn(
-      process.execPath,
-      ['--unhandled-rejections=strict', '__temp/test-build/test/helpers/child.mjs', scenario],
-      {
-        stdio: ['ignore', 'pipe', 'pipe']
+    planner.observe(event => {
+      if (event.type === 'headers-received' && scenario === 'response-observer')
+        throw new Error('observer')
+    })
+    const handle = planner.submit({
+      method: 'GET',
+      replay,
+      prepare: () => ({ url, init: {} }),
+      consume: () => {
+        consumes++
+        return 'unused'
+      }
+    })
+    void handle.result.then(
+      () => {
+        settlements++
+      },
+      () => {
+        settlements++
       }
     )
+    const rejected = assert.rejects(handle.result, { code: 'HTTP_FAILED', status: 429 })
+    await clock.advance(0)
+    await rejected
+    await handle.resourcesDone
+    await clock.advance(100)
+    await clock.advance(100)
+    assert.equal(starts, 1, 'TERMINAL_NEVER_RESTARTS')
+    assert.equal(consumes, 0, '429_CLASSIFICATION_OWNS_RESPONSE')
+    assert.equal(settlements, 1, 'SINGLE_SETTLEMENT')
+    assert.equal(
+      diagnostics(planner)[scenario === 'invalid-header' ? 'INVALID_HINT' : 'OBSERVER_FAILED'],
+      1
+    )
+    assert.equal(planner.snapshot().queued, 0)
+    assert.equal(planner.snapshot().sentActive, 0)
+  })
+}
+for (const scenario of ['error-observer', 'sync-transport', 'request-observer']) {
+  test(`D03 D04 ${scenario} settles naturally under strict rejections`, async () => {
+    const child = spawn(process.execPath, [
+      '--unhandled-rejections=strict',
+      fileURLToPath(new URL('./helpers/child.mjs', import.meta.url)),
+      scenario
+    ])
     let stdout = ''
     let stderr = ''
-    child.stdout.setEncoding('utf8').on('data', (chunk: string) => {
-      stdout += chunk
+    let expired = false
+    child.stdout.setEncoding('utf8').on('data', (s: string) => {
+      stdout += s
     })
-    child.stderr.setEncoding('utf8').on('data', (chunk: string) => {
-      stderr += chunk
+    child.stderr.setEncoding('utf8').on('data', (s: string) => {
+      stderr += s
     })
-    const watchdog = setTimeout(() => child.kill(), 5000)
+    const watchdog = setTimeout(() => {
+      expired = true
+      child.kill()
+    }, 5000)
     try {
       const code = await new Promise<number | null>((resolve, reject) => {
         child.on('error', reject)
         child.on('close', resolve)
       })
-      assert.equal(code, 0, `Finite child must exit naturally: ${stderr}`)
-      assert.match(stdout, /settled once/)
-      if (scenario === 'error-observer') {
-        assert.match(stderr, /FetchPlanner observer failed/)
-        assert.doesNotMatch(stderr, /original failure|secondary failure|offline.test/)
-      } else assert.equal(stderr, '')
+      assert.equal(expired, false, 'WATCHDOG_IS_FAILURE')
+      assert.equal(code, 0, stderr)
+      assert.equal(stderr, '')
+      assert.match(stdout, /settled once; queue and inflight empty/)
     } finally {
       clearTimeout(watchdog)
       if (child.exitCode === null) child.kill()
     }
   })
 }
-
-for (const event of ['request', 'response', 'fetch-error'] as const) {
+for (const event of ['dispatch-started', 'headers-received', 'operation-settled'] as const) {
   for (const throws of [false, true]) {
-    test(`Reentrant ${event} enqueue with throw ${throws} preserves queue and slot ownership`, async t => {
-      const runtime = createRuntime(t)
+    test(`Reentrant observer ${event} enqueue with throw ${throws} preserves ownership`, async t => {
+      const clock = createRuntime(t)
       const original = new Error('original transport failure')
-      const observerError = new Error('observer failure')
-      const events = new EventEmitter<FetchPlannerEventMap<typeof import('undici').fetch>>()
       const starts: string[] = []
-      const failures: Error[] = []
       let settlements = 0
-      let releases = 0
-      class ObservedPlanner extends FetchPlanner {
-        protected override checkFreeRequestSlotTrigger() {
-          releases++
-          super.checkFreeRequestSlotTrigger()
-        }
-      }
-      const planner = new ObservedPlanner(
-        url => {
-          assert.ok(typeof url === 'string')
-          starts.push(url)
-          if (starts.length === 1 && event === 'fetch-error') return Promise.reject(original)
+      let resourceSettlements = 0
+      let failureSettlements = 0
+      const planner = new FetchPlanner<typeof import('undici').fetch>(
+        input => {
+          assert.ok(typeof input === 'string')
+          starts.push(input)
+          if (starts.length === 1 && event === 'operation-settled') return Promise.reject(original)
           return Promise.resolve(new Response(null))
         },
-        { maxParallelLimit: 1, jitter: 0, eventHandler: events }
+        { maxParallelLimit: 1, jitter: 0 }
       )
-      const warning = t.mock.method(process, 'emitWarning', () => {
-        // Record the diagnostic without writing test warnings.
+      let nested: Handle<string> | undefined
+      planner.observe(record => {
+        if (record.type === 'resources-settled') resourceSettlements++
+        if (record.type === 'operation-settled' && record.outcome === 'failed') failureSettlements++
+        if (record.type !== event || nested) return
+        nested = planner.submit({
+          method: 'GET',
+          replay,
+          prepare: () => ({ url: url + 'nested', init: {} }),
+          consume: () => 'nested'
+        })
+        if (throws) throw new Error('observer failure')
       })
-      events.on('fetch-error', data => failures.push(data.error))
-      let nested: Promise<Response> | undefined
-      events.once(event, () => {
-        nested = planner.getFetch()('http://offline.test/nested')
-        if (throws) throw observerError
+      const first = planner.submit({
+        method: 'GET',
+        replay,
+        prepare: () => ({ url: url + 'first', init: {} }),
+        consume: () => 'first'
       })
-      const first = planner
-        .getFetch()('http://offline.test/first')
-        .then(
-          response => {
-            settlements++
-            return response
-          },
-          (error: unknown) => {
-            settlements++
-            return error
-          }
-        )
-      await runtime.advance(0)
-      const result = await first
-      if (event === 'fetch-error') assert.equal(result, original)
-      else if (throws) assert.equal(result, observerError)
-      else assert.ok(result instanceof Response)
-      await runtime.advance(0)
+      const outcome = first.result.then(
+        result => {
+          settlements++
+          return result.value
+        },
+        (error: unknown) => {
+          settlements++
+          assert.ok(error instanceof Error)
+          return error
+        }
+      )
+      await clock.advance(0)
+      if (event === 'operation-settled') {
+        const failure = await outcome
+        assert.ok(failure instanceof OperationError)
+        assert.equal(failure.cause, original)
+      } else assert.equal(await outcome, 'first', 'OBSERVER_THROW_CANNOT_REJECT_DELIVERY')
+      await first.resourcesDone
+      await clock.advance(0)
       assert.ok(nested)
-      assert.ok((await nested) instanceof Response)
-      await runtime.advance(100)
-      assert.deepEqual(starts, ['http://offline.test/first', 'http://offline.test/nested'])
+      assert.equal((await nested.result).value, 'nested')
+      await nested.resourcesDone
+      await clock.advance(100)
+      assert.deepEqual(starts, [url + 'first', url + 'nested'])
       assert.equal(settlements, 1)
-      assert.equal(releases, 2, 'Each completed transport releases exactly one slot')
-      assert.equal(failures.length, event === 'fetch-error' || throws ? 1 : 0)
-      assert.equal(warning.mock.callCount(), event === 'fetch-error' && throws ? 1 : 0)
-      assert.equal(planner.getActionsQueueLength(), 0)
-      assert.equal(planner.getCurInflightRequestsCount(), 0)
+      assert.equal(resourceSettlements, 2, 'ONCE_RESOURCE_SETTLEMENT_PER_OPERATION')
+      assert.equal(
+        failureSettlements,
+        event === 'operation-settled' ? 1 : 0,
+        'OBSERVER_THROW_IS_NOT_OPERATION_FAILURE'
+      )
+      assert.equal(diagnostics(planner).OBSERVER_FAILED, throws ? 1 : 0)
+      assert.equal(planner.snapshot().queued, 0)
+      assert.equal(planner.snapshot().leasedAttempts, 0)
+      assert.equal(planner.snapshot().sentActive, 0)
     })
   }
 }
-
 for (const late of ['response', 'rejection'] as const) {
-  test(`Request observer rejection keeps inflight until late ${late} without a second settlement`, async t => {
-    const runtime = createRuntime(t)
-    const original = new Error('request observer failed')
-    const events = new EventEmitter<FetchPlannerEventMap<typeof import('undici').fetch>>()
-    let resolve!: (response: Response) => void
-    let reject!: (error: Error) => void
-    const transport = new Promise<Response>((res, rej) => {
-      resolve = res
-      reject = rej
-    })
-    const starts: string[] = []
-    const failures: Error[] = []
-    let responses = 0
+  test(`Request observer throw retains pending transport until late ${late}`, async t => {
+    const clock = createRuntime(t)
+    const transport = deferred<Response>()
+    let starts = 0
     let cancellations = 0
+    let settlements = 0
+    let receipts = 0
+    let failures = 0
     const response = new Response('unconsumed')
     assert.ok(response.body)
     t.mock.method(response.body, 'cancel', () => {
       cancellations++
       return Promise.resolve()
     })
+    const original = new Error('late transport error')
     const planner = new FetchPlanner<typeof import('undici').fetch>(
-      url => {
-        assert.ok(typeof url === 'string')
-        starts.push(url)
-        return starts.length === 1 ? transport : Promise.resolve(new Response(null))
-      },
-      { maxParallelLimit: 1, jitter: 0, eventHandler: events }
+      () => (++starts === 1 ? transport.promise : Promise.resolve(new Response(null))),
+      { maxParallelLimit: 1 }
     )
-    let nested: Promise<Response> | undefined
-    events.once('request', () => {
-      nested = planner.getFetch()('http://offline.test/nested')
-      throw original
+    let nested: Handle<string> | undefined
+    planner.observe(event => {
+      if (event.type === 'headers-received') receipts++
+      if (event.type === 'operation-settled' && event.outcome === 'failed') failures++
+      if (event.type === 'dispatch-started' && !nested) {
+        nested = planner.submit({
+          method: 'GET',
+          replay,
+          prepare: () => ({ url, init: {} }),
+          consume: () => 'nested'
+        })
+        throw new Error('request observer')
+      }
     })
-    events.on('response', () => {
-      responses++
+    const first = planner.submit({
+      method: 'GET',
+      replay,
+      prepare: () => ({ url, init: {} }),
+      consume: borrowed => {
+        assert.equal(borrowed, response)
+        return 'finished'
+      }
     })
-    events.on('fetch-error', data => failures.push(data.error))
-    const first = planner
-      .getFetch()('http://offline.test/first')
-      .catch((error: unknown) => error)
-    await runtime.advance(0)
-    assert.equal(await first, original)
-    assert.equal(planner.getCurInflightRequestsCount(), 1)
-    await runtime.advance(100)
-    assert.equal(starts.length, 1, 'A rejected action still owns its sent transport slot')
-    if (late === 'response') resolve(response)
-    else reject(new Error('late transport error'))
-    await runtime.flush()
-    assert.equal(planner.getCurInflightRequestsCount(), 0)
-    await runtime.advance(0)
-    assert.ok(nested)
-    await nested
-    assert.equal(starts.length, 2)
-    assert.deepEqual(failures, [original])
-    assert.equal(responses, 1, 'Late result of terminal action emits no response')
-    assert.equal(cancellations, late === 'response' ? 1 : 0)
-    assert.equal(planner.getCurInflightRequestsCount(), 0)
+    const outcome = first.result.then(
+      value => {
+        settlements++
+        return value
+      },
+      (error: unknown) => {
+        settlements++
+        assert.ok(error instanceof Error)
+        return error
+      }
+    )
+    try {
+      await clock.advance(0)
+      assert.equal(settlements, 0, 'OBSERVER_DOES_NOT_TERMINATE_PENDING_TRANSPORT')
+      assert.equal(planner.snapshot().sentActive, 1)
+      await clock.advance(100)
+      assert.equal(starts, 1, 'PENDING_TRANSPORT_RETAINS_SLOT')
+      if (late === 'response') transport.resolve(response)
+      else transport.reject(original)
+      await clock.advance(0)
+      const value = await outcome
+      if (late === 'rejection') {
+        assert.ok(value instanceof OperationError)
+        assert.equal(value.cause, original)
+      } else {
+        assert.ok(!(value instanceof Error))
+        assert.equal(value.value, 'finished')
+      }
+      await first.resourcesDone
+      await clock.advance(0)
+      assert.ok(nested)
+      await nested.result
+      await nested.resourcesDone
+      assert.equal(starts, 2)
+      assert.equal(settlements, 1)
+      assert.equal(cancellations, late === 'response' ? 1 : 0)
+      assert.equal(receipts, late === 'response' ? 2 : 1, 'LATE_TRANSPORT_RECEIPT_DELIVERED')
+      assert.equal(failures, late === 'rejection' ? 1 : 0, 'LATE_TRANSPORT_FAILURE_ONLY')
+      assert.equal(diagnostics(planner).OBSERVER_FAILED, 1)
+      assert.equal(planner.snapshot().sentActive, 0)
+    } finally {
+      transport.resolve(response)
+      await Promise.allSettled([first.result, first.resourcesDone])
+    }
   })
 }
-
 for (const failure of ['header', 'observer', 'none'] as const) {
-  test(`Non429 response ownership after ${failure} failure`, async t => {
-    const runtime = createRuntime(t)
-    const events = new EventEmitter<FetchPlannerEventMap<typeof import('undici').fetch>>()
-    const original = new Error('observer failed')
+  test(`Non429 ${failure} preserves unread consume and finished value identity`, async t => {
+    const clock = createRuntime(t)
     const response = new Response('consumer body', {
       headers: failure === 'header' ? { 'X-RateLimit-Limit': 'invalid' } : {}
     })
     assert.ok(response.body)
-    const cancel = t.mock.method(response.body, 'cancel', () => Promise.resolve())
-    if (failure === 'observer')
-      events.on('response', () => {
-        throw original
-      })
-    const planner = new FetchPlanner<typeof import('undici').fetch>(
-      () => Promise.resolve(response),
-      { eventHandler: events }
-    )
-    const result = planner
-      .getFetch()('http://offline.test/')
-      .catch((error: unknown) => error)
-    await runtime.advance(0)
-    const value = await result
-    if (failure === 'none') {
-      assert.equal(value, response)
-      assert.equal(cancel.mock.callCount(), 0)
-      assert.equal(await response.text(), 'consumer body')
-    } else {
-      assert.ok(value instanceof Error)
-      if (failure === 'observer') assert.equal(value, original)
-      assert.equal(cancel.mock.callCount(), 1, 'Undelivered response belongs to the cleanup path')
-    }
-    assert.equal(planner.getCurInflightRequestsCount(), 0)
+    const cancel = t.mock.method(response.body, 'cancel')
+    const planner = new FetchPlanner<typeof import('undici').fetch>(() => Promise.resolve(response))
+    planner.observe(event => {
+      if (failure === 'observer' && event.type === 'headers-received') throw new Error('observer')
+    })
+    const value = { text: '' }
+    const handle = planner.submit({
+      method: 'GET',
+      replay,
+      prepare: () => ({ url, init: {} }),
+      consume: async borrowed => {
+        assert.equal(borrowed, response, 'BORROW_IDENTITY')
+        assert.equal(borrowed.bodyUsed, false, 'UNREAD_AT_CONSUME')
+        assert.equal(cancel.mock.callCount(), 0, 'NO_CANCEL_BEFORE_CONSUME')
+        value.text = await borrowed.text()
+        return value
+      }
+    })
+    await clock.advance(0)
+    assert.equal((await handle.result).value, value, 'COMPLETED_VALUE_IDENTITY')
+    await handle.resourcesDone
+    assert.equal(value.text, 'consumer body')
+    assert.equal(diagnostics(planner).INVALID_HINT, failure === 'header' ? 1 : 0)
+    assert.equal(diagnostics(planner).OBSERVER_FAILED, failure === 'observer' ? 1 : 0)
+    assert.equal(planner.snapshot().sentActive, 0)
   })
 }
-
-test('Diagnostic failure preserves original error and queue progress', async t => {
-  const runtime = createRuntime(t)
+test('Diagnostic isolation preserves original transport error and queue progress', async t => {
+  const clock = createRuntime(t)
   const original = new Error('transport failed')
-  const events = new EventEmitter<FetchPlannerEventMap<typeof import('undici').fetch>>()
-  events.on('fetch-error', () => {
-    throw new Error('secondary')
-  })
-  const warning = t.mock.method(process, 'emitWarning', () => {
-    throw new Error('diagnostic failed')
-  })
   let starts = 0
   const planner = new FetchPlanner<typeof import('undici').fetch>(
-    () => {
-      starts++
-      if (starts === 1)
-        return new Promise<Response>((_resolve, reject) => {
-          reject(original)
-        })
-      return Promise.resolve(new Response(null))
-    },
-    { eventHandler: events, maxParallelLimit: 1 }
+    () => (++starts === 1 ? Promise.reject(original) : Promise.resolve(new Response(null))),
+    { maxParallelLimit: 1 }
   )
-  const failed = planner
-    .getFetch()('http://offline.test/first')
-    .catch((error: unknown) => error)
-  const next = planner.getFetch()('http://offline.test/next')
-  await runtime.advance(0)
-  const error = await failed
-  assert.ok(error instanceof Error)
-  assert.equal(error, original)
-  await runtime.advance(0)
-  await next
-  assert.equal(warning.mock.callCount(), 1)
-  assert.equal(planner.getCurInflightRequestsCount(), 0)
+  planner.observe(event => {
+    if (event.type === 'operation-settled' && event.outcome === 'failed')
+      throw new Error('secondary')
+  })
+  const failed = planner.submit({
+    method: 'GET',
+    replay,
+    prepare: () => ({ url, init: {} }),
+    consume: () => 'unused'
+  })
+  const rejected = assert.rejects(
+    failed.result,
+    error => error instanceof OperationError && error.cause === original
+  )
+  const next = planner.submit({
+    method: 'GET',
+    replay,
+    prepare: () => ({ url, init: {} }),
+    consume: () => 'next'
+  })
+  await clock.advance(0)
+  await rejected
+  await failed.resourcesDone
+  await clock.advance(0)
+  assert.equal((await next.result).value, 'next')
+  await next.resourcesDone
+  assert.equal(diagnostics(planner).OBSERVER_FAILED, 1)
   assert.equal(starts, 2)
+  assert.equal(planner.snapshot().sentActive, 0)
 })
+
+function diagnostics(target: object) {
+  const observation: unknown = Reflect.get(target, 'observation')
+  assert.ok(observation instanceof OperationObservation)
+  return observation.diagnostics.snapshot()
+}

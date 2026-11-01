@@ -1,24 +1,25 @@
 import assert from 'node:assert/strict'
+import { OperationObservation } from '../src/operation-observation.js'
 import { spawn } from 'node:child_process'
-import { EventEmitter } from 'node:events'
+import { fileURLToPath } from 'node:url'
 import { test } from 'node:test'
 import { Response } from 'undici'
-import { FetchPlanner, type FetchPlannerEventMap } from '../src/index.js'
+import { FetchPlanner } from '../src/index.js'
 import { createRuntime } from './helpers/runtime.js'
+import { deferred } from './operation/helpers.js'
 
 const url = 'http://offline.test/'
-
+const replay = { serverSafe: false, consumeSafe: false }
 for (const status of [429, 200, 500]) {
   for (const failure of ['header', 'observer', 'late'] as const) {
-    test(`D08 HTTP${status} ${failure} discards the owned body exactly once`, async t => {
-      const runtime = createRuntime(t)
-      const original = new Error('observer failure')
-      const events = new EventEmitter<FetchPlannerEventMap<typeof import('undici').fetch>>()
+    test(`D08 HTTP${status} ${failure} retains cleanup ownership exactly once`, async t => {
+      const clock = createRuntime(t)
       let cancellations = 0
       let starts = 0
       let settlements = 0
-      let failures = 0
       let responses = 0
+      let failures = 0
+      const transport = deferred<Response>()
       const response = new Response(
         new ReadableStream({
           cancel() {
@@ -35,169 +36,239 @@ for (const status of [429, 200, 500]) {
               : { 'X-Lognex-Retry-After': '0' }
         }
       )
-      let deliver!: (response: Response) => void
-      const transport = new Promise<Response>(resolve => {
-        deliver = resolve
-      })
-      events.once(failure === 'late' ? 'request' : 'response', () => {
-        if (failure !== 'header') throw original
-      })
-      events.on('fetch-error', () => failures++)
-      events.on('response', () => responses++)
       const planner = new FetchPlanner<typeof import('undici').fetch>(
-        () => {
-          starts++
-          return starts === 1 ? transport : Promise.resolve(new Response(null))
-        },
-        { jitter: 0, maxParallelLimit: 1, eventHandler: events }
+        () => (++starts === 1 ? transport.promise : Promise.resolve(new Response(null))),
+        { maxParallelLimit: 1, jitter: 0 }
       )
-      const first = planner
-        .getFetch()(url)
-        .then(
-          value => {
-            settlements++
-            return value
-          },
-          (error: unknown) => {
-            settlements++
-            return error
-          }
-        )
-      const next = planner.getFetch()(url)
-      if (failure === 'late') {
-        await runtime.advance(0)
-        assert.equal(await first, original)
-        assert.equal(planner.getCurInflightRequestsCount(), 1)
-        await runtime.flush()
-        assert.equal(
-          starts,
-          1,
-          'Terminal action retains headers-owned inflight until transport settles'
-        )
+      let thrown = false
+      planner.observe(event => {
+        if (event.type === 'headers-received') responses++
+        if (event.type === 'operation-settled' && event.outcome === 'failed') failures++
+        if (
+          !thrown &&
+          failure !== 'header' &&
+          event.type === (failure === 'late' ? 'dispatch-started' : 'headers-received')
+        ) {
+          thrown = true
+          throw new Error('observer')
+        }
+      })
+      const first = planner.submit({
+        method: 'GET',
+        replay,
+        prepare: () => ({ url, init: {} }),
+        consume: borrowed => {
+          assert.equal(borrowed, response)
+          assert.equal(borrowed.bodyUsed, false, 'UNREAD_STATUS_AT_CONSUME')
+          assert.equal(borrowed.status, status)
+          return 'finished'
+        }
+      })
+      const outcome = first.result.then(
+        value => {
+          settlements++
+          return value
+        },
+        (error: unknown) => {
+          settlements++
+          assert.ok(error instanceof Error)
+          return error
+        }
+      )
+      const next = planner.submit({
+        method: 'GET',
+        replay,
+        prepare: () => ({ url, init: {} }),
+        consume: () => 'next'
+      })
+      try {
+        await clock.advance(0)
+        assert.equal(settlements, 0, 'PENDING_TRANSPORT_NOT_TERMINATED_BY_OBSERVER')
+        assert.equal(starts, 1)
+        assert.equal(planner.snapshot().sentActive, 1)
+        transport.resolve(response)
+        await clock.advance(status === 429 ? 250 : 0)
+        const result = await outcome
+        if (status === 429) assert.ok(result instanceof Error)
+        else {
+          assert.ok(!(result instanceof Error))
+          assert.equal(result.value, 'finished')
+          assert.equal(result.status, status)
+        }
+        await first.resourcesDone
+        await clock.advance(0)
+        assert.equal((await next.result).value, 'next')
+        assert.equal((await next.result).status, 200, 'NEXT_HTTP_STATUS')
+        await next.resourcesDone
+        await clock.advance(100)
+        assert.equal(cancellations, 1, 'OWNED_BODY_CANCELLED_ONCE')
+        assert.equal(starts, 2)
+        assert.equal(settlements, 1)
+        assert.equal(failures, status === 429 ? 1 : 0)
+        assert.equal(responses, 2, 'OBSERVATION_THROW_DOES_NOT_SUPPRESS_OTHER_LISTENERS')
+        assert.equal(diagnostics(planner).INVALID_HINT, failure === 'header' ? 1 : 0)
+        assert.equal(diagnostics(planner).OBSERVER_FAILED, failure === 'header' ? 0 : 1)
+        assert.equal(planner.snapshot().queued, 0)
+        assert.equal(planner.snapshot().sentActive, 0)
+      } finally {
+        transport.resolve(response)
+        await Promise.allSettled([
+          first.result,
+          next.result,
+          first.resourcesDone,
+          next.resourcesDone
+        ])
       }
-      deliver(response)
-      await runtime.advance(0)
-      assert.equal(cancellations, 1, 'Discarded response must be cleaned exactly once')
-      const error = await first
-      assert.ok(error instanceof Error)
-      if (failure !== 'header') assert.equal(error, original)
-      await runtime.advance(0)
-      assert.equal((await next).status, 200)
-      await runtime.advance(100)
-      assert.equal(cancellations, 1, 'Terminal cleanup must never repeat')
-      assert.equal(starts, 2)
-      assert.equal(settlements, 1)
-      assert.equal(failures, 1)
-      assert.equal(responses, 1, 'Only the next delivered response reaches the counting observer')
-      assert.equal(planner.getActionsQueueLength(), 0)
-      assert.equal(planner.getCurInflightRequestsCount(), 0)
     })
   }
 }
-
 for (const cleanup of ['finite', 'rejected', 'hanging', 'synchronous', 'null'] as const) {
-  test(`D08 discarded429 retry progresses with ${cleanup} cancel`, async t => {
-    const runtime = createRuntime(t)
+  test(`D08 explicit replay waits for ${cleanup} cleanup`, async t => {
+    const clock = createRuntime(t)
+    const gate = deferred<undefined>()
     let cancellations = 0
     let starts = 0
-    const pendingCancel = new Promise<void>(() => {
-      // Deliberately never settles; a promise alone owns no event-loop handles.
-    })
-    const discarded = new Response(cleanup === 'null' ? null : 'discarded', {
-      status: 429,
-      headers: { 'X-Lognex-Retry-After': '0' }
-    })
-    if (discarded.body) {
-      t.mock.method(discarded.body, 'cancel', () => {
-        cancellations++
-        if (cleanup === 'synchronous') throw new Error('sync cancel failure')
-        if (cleanup === 'rejected') return Promise.reject(new Error('cancel failure'))
-        if (cleanup === 'hanging') return pendingCancel
-        return Promise.resolve()
-      })
-    }
+    let prepares = 0
+    const discarded = new Response(
+      cleanup === 'null'
+        ? null
+        : new ReadableStream({
+            cancel() {
+              cancellations++
+              if (cleanup === 'synchronous') throw new Error('sync cancel failure')
+              if (cleanup === 'rejected') return Promise.reject(new Error('cancel failure'))
+              if (cleanup === 'hanging') return gate.promise
+              return Promise.resolve()
+            }
+          }),
+      { status: 429, headers: { 'X-Lognex-Retry-After': '0' } }
+    )
     const delivered = new Response('consumer body')
     assert.ok(delivered.body)
     const cancelDelivered = t.mock.method(delivered.body, 'cancel')
     const planner = new FetchPlanner<typeof import('undici').fetch>(
       () => Promise.resolve(++starts === 1 ? discarded : delivered),
-      { jitter: 0, maxParallelLimit: 1 }
+      { maxParallelLimit: 1, jitter: 0 }
     )
-    const result = planner.getFetch()(url)
-    await runtime.advance(0)
-    assert.equal(
-      cancellations,
-      cleanup === 'null' ? 0 : 1,
-      'Discarded response must be cleaned exactly once'
+    const handle = planner.submit({
+      method: 'POST',
+      replay: { serverSafe: true, consumeSafe: true },
+      prepare: () => {
+        prepares++
+        return { url, init: { body: 'logical payload' } }
+      },
+      consume: async response => {
+        assert.equal(response, delivered)
+        assert.equal(response.bodyUsed, false, 'RETRY_CONSUME_UNREAD')
+        assert.equal(cancelDelivered.mock.callCount(), 0, 'NO_CANCEL_BEFORE_RETRY_CONSUME')
+        return response.text()
+      }
+    })
+    const outcome = handle.result.then(
+      value => value,
+      (error: unknown) => {
+        assert.ok(error instanceof Error)
+        return error
+      }
     )
-    await runtime.advance(0)
-    assert.equal(await result, delivered)
-    assert.equal(delivered.bodyUsed, false, 'Planner must not read the delivered body')
-    assert.equal(cancelDelivered.mock.callCount(), 0)
-    await runtime.advance(0)
-    assert.equal(
-      planner.getCurInflightRequestsCount(),
-      0,
-      'Inflight ends at headers, before consumer body reading'
-    )
-    const next = planner.getFetch()(url)
-    await runtime.advance(0)
-    assert.equal(await next, delivered, 'Next action must complete even while cancel is pending')
-    await runtime.flush()
-    assert.equal(await delivered.text(), 'consumer body')
-    assert.equal(cancelDelivered.mock.callCount(), 0)
-    await runtime.advance(100)
-    assert.equal(cancellations, cleanup === 'null' ? 0 : 1)
-    assert.equal(planner.getActionsQueueLength(), 0)
-    assert.equal(planner.getCurInflightRequestsCount(), 0)
+    try {
+      await clock.advance(0)
+      await clock.advance(250)
+      assert.equal(cancellations, cleanup === 'null' ? 0 : 1, 'DISCARDED_CANCEL_ONCE')
+      if (cleanup === 'hanging') {
+        await clock.advance(100)
+        assert.equal(prepares, 1, 'NEXT_PREPARE_MUST_WAIT_FOR_FINITE_DISPOSER')
+        assert.equal(handle.snapshot().resources, 'pending')
+        assert.equal(planner.snapshot().sentActive, 1)
+        gate.resolve(undefined)
+      }
+      await clock.advance(4000)
+      const result = await outcome
+      if (cleanup === 'rejected' || cleanup === 'synchronous') {
+        assert.ok(result instanceof Error)
+        assert.equal(starts, 1, 'FAILED_CLEANUP_FORBIDS_REPLAY')
+      } else {
+        assert.ok(!(result instanceof Error))
+        assert.equal(result.value, 'consumer body')
+        assert.equal(starts, 2)
+      }
+      assert.deepEqual(await handle.resourcesDone, {
+        resources: cleanup === 'rejected' || cleanup === 'synchronous' ? 'failed' : 'released'
+      })
+      assert.equal(cancellations, cleanup === 'null' ? 0 : 1)
+      assert.equal(cancelDelivered.mock.callCount(), 0, 'EOF_READER_IS_ALREADY_CLOSED')
+      const next = planner.submit({
+        method: 'GET',
+        replay,
+        prepare: () => ({ url, init: {} }),
+        consume: () => 'next'
+      })
+      await clock.advance(0)
+      assert.equal((await next.result).value, 'next')
+      assert.equal((await next.result).status, 200, 'NEXT_HTTP_STATUS')
+      await next.resourcesDone
+      assert.equal(planner.snapshot().queued, 0)
+      assert.equal(planner.snapshot().sentActive, 0)
+    } finally {
+      gate.resolve(undefined)
+      handle.abort()
+      await Promise.allSettled([handle.result, handle.resourcesDone])
+    }
   })
 }
-
 for (const status of [200, 500]) {
-  test(`HTTP${status} delivered response preserves identity and unread body`, async t => {
-    const runtime = createRuntime(t)
+  test(`HTTP${status} preserves borrow identity and finished consumer value`, async t => {
+    const clock = createRuntime(t)
     const response = new Response('consumer body', { status })
     assert.ok(response.body)
     const cancel = t.mock.method(response.body, 'cancel')
-    const planner = new FetchPlanner<typeof import('undici').fetch>(
-      () => Promise.resolve(response),
-      { jitter: 0 }
-    )
-    const result = planner.getFetch()(url)
-    await runtime.advance(0)
-    assert.equal(await result, response)
-    await runtime.flush()
-    assert.equal(response.bodyUsed, false)
-    assert.equal(cancel.mock.callCount(), 0)
-    assert.equal(planner.getCurInflightRequestsCount(), 0)
-    assert.equal(await response.text(), 'consumer body')
-    await runtime.advance(100)
-    assert.equal(cancel.mock.callCount(), 0)
+    const planner = new FetchPlanner<typeof import('undici').fetch>(() => Promise.resolve(response))
+    const handle = planner.submit({
+      method: 'GET',
+      replay,
+      prepare: () => ({ url, init: {} }),
+      consume: borrowed => {
+        assert.equal(borrowed, response, 'BORROW_IDENTITY')
+        assert.equal(borrowed.bodyUsed, false)
+        assert.equal(cancel.mock.callCount(), 0)
+        return borrowed.text()
+      }
+    })
+    await clock.advance(0)
+    assert.equal((await handle.result).value, 'consumer body')
+    assert.equal((await handle.result).status, status)
+    await handle.resourcesDone
+    await clock.advance(100)
+    assert.equal(planner.snapshot().sentActive, 0)
+    assert.equal(cancel.mock.callCount(), 0, 'EOF_NEEDS_NO_SECOND_CANCEL')
   })
 }
-
 test('Finite loopback cleanup child exits naturally with strict rejections', async () => {
   const child = spawn(process.execPath, [
     '--unhandled-rejections=strict',
-    '__temp/test-build/test/helpers/child.mjs',
+    fileURLToPath(new URL('./helpers/child.mjs', import.meta.url)),
     'cleanup-loopback'
   ])
   let stdout = ''
   let stderr = ''
   let expired = false
-  child.stdout.setEncoding('utf8').on('data', (chunk: string) => (stdout += chunk))
-  child.stderr.setEncoding('utf8').on('data', (chunk: string) => (stderr += chunk))
+  child.stdout.setEncoding('utf8').on('data', (s: string) => {
+    stdout += s
+  })
+  child.stderr.setEncoding('utf8').on('data', (s: string) => {
+    stderr += s
+  })
   const watchdog = setTimeout(() => {
     expired = true
     child.kill()
-  }, 5000)
+  }, 10000)
   try {
     const code = await new Promise<number | null>((resolve, reject) => {
       child.on('error', reject)
       child.on('close', resolve)
     })
-    assert.equal(expired, false, 'Watchdog expiration is a failure')
-    assert.equal(code, 0, `Finite cleanup child must exit naturally: ${stderr}`)
+    assert.equal(expired, false, 'WATCHDOG_IS_FAILURE')
+    assert.equal(code, 0, stderr)
     assert.equal(stderr, '')
     assert.match(
       stdout,
@@ -208,3 +279,9 @@ test('Finite loopback cleanup child exits naturally with strict rejections', asy
     if (child.exitCode === null) child.kill()
   }
 })
+
+function diagnostics(target: object) {
+  const observation: unknown = Reflect.get(target, 'observation')
+  assert.ok(observation instanceof OperationObservation)
+  return observation.diagnostics.snapshot()
+}

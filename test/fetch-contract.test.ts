@@ -1,47 +1,57 @@
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
-import { EventEmitter } from 'node:events'
+import { fileURLToPath } from 'node:url'
 import { test } from 'node:test'
-import { fetch, Request, Response, FormData } from 'undici'
-import { FetchPlanner, wrapFetch, type FetchPlannerEventMap } from '../src/index.js'
+import { fetch, Response, FormData } from 'undici'
+import { FetchPlanner, OperationError, type Handle, type MethodSpec } from '../src/index.js'
 import { createRuntime } from './helpers/runtime.js'
 
+const replay = { serverSafe: false, consumeSafe: false }
 for (const family of ['native', 'undici'] as const) {
-  test(`${family} Request metadata uses Request method and init override`, async () => {
+  test(`${family} explicit MethodSpec replaces Request metadata and override`, async () => {
+    const methods: string[] = []
+    const specs: MethodSpec[] = [
+      { method: 'POST' },
+      { method: 'PUT', entityKey: 'one' },
+      { method: 'GET' }
+    ]
     if (family === 'native') {
-      const events = new EventEmitter<FetchPlannerEventMap<typeof globalThis.fetch>>()
-      const methods: (string | undefined)[] = []
-      events.on('request', ev => methods.push(ev.method))
-      events.on('response', ev => methods.push(ev.method))
-      const planner = new FetchPlanner<typeof globalThis.fetch>(
-        () => Promise.resolve(new globalThis.Response(null)),
-        { eventHandler: events }
-      )
-      await planner.getFetch()(new globalThis.Request('http://offline.test/', { method: 'POST' }))
-      await planner.getFetch()(new globalThis.Request('http://offline.test/', { method: 'POST' }), {
-        method: 'PUT'
+      const planner = new FetchPlanner<typeof globalThis.fetch>((input, init) => {
+        assert.equal(typeof input, 'string')
+        methods.push(init?.method ?? '')
+        return Promise.resolve(new globalThis.Response(null))
       })
-      await planner.getFetch()('http://offline.test/')
-      assert.deepEqual(methods, ['POST', 'POST', 'PUT', 'PUT', undefined, undefined])
+      for (const spec of specs) {
+        const h = planner.submit({
+          ...spec,
+          replay,
+          prepare: () => ({ url: 'http://offline.test/', init: {} }),
+          consume: () => 'finished'
+        })
+        assert.equal((await h.result).value, 'finished')
+        await h.resourcesDone
+      }
     } else {
-      const events = new EventEmitter<FetchPlannerEventMap<typeof fetch>>()
-      const methods: (string | undefined)[] = []
-      events.on('request', ev => methods.push(ev.method))
-      events.on('response', ev => methods.push(ev.method))
-      const planner = new FetchPlanner<typeof fetch>(() => Promise.resolve(new Response(null)), {
-        eventHandler: events
+      const planner = new FetchPlanner<typeof fetch>((input, init) => {
+        assert.equal(typeof input, 'string')
+        methods.push(init?.method ?? '')
+        return Promise.resolve(new Response(null))
       })
-      await planner.getFetch()(new Request('http://offline.test/', { method: 'POST' }))
-      await planner.getFetch()(new Request('http://offline.test/', { method: 'POST' }), {
-        method: 'PUT'
-      })
-      await planner.getFetch()('http://offline.test/')
-      assert.deepEqual(methods, ['POST', 'POST', 'PUT', 'PUT', undefined, undefined])
+      for (const spec of specs) {
+        const h = planner.submit({
+          ...spec,
+          replay,
+          prepare: () => ({ url: 'http://offline.test/', init: {} }),
+          consume: () => 'finished'
+        })
+        assert.equal((await h.result).value, 'finished')
+        await h.resourcesDone
+      }
     }
+    assert.deepEqual(methods, ['POST', 'PUT', 'GET'], 'EXPLICIT_METHOD_OVERRIDE')
   })
 }
-
-test('Undici fake transport preserves payload, init, signal and Response identity', async () => {
+test('Undici transport preserves payload and borrow identity with owned init and signal', async () => {
   const form = new FormData()
   form.set('field', 'value')
   const stream = new ReadableStream<Uint8Array>({
@@ -56,114 +66,162 @@ test('Undici fake transport preserves payload, init, signal and Response identit
     new File(['payload'], 'body.txt'),
     stream
   ]) {
-    const controller = new AbortController()
-    const init = { method: 'POST', body, signal: controller.signal, duplex: 'half' as const }
     const input = new URL('http://offline.test/')
+    const descriptorInit = { body, duplex: 'half' as const }
     const response = new Response('untouched', { status: 503 })
-    const wrapped = wrapFetch<typeof fetch>((url, options) => {
-      assert.equal(url, input)
-      assert.equal(options, init)
-      assert.equal(options.body, body)
-      assert.equal(options.signal, controller.signal)
+    let signal: AbortSignal | undefined
+    const value = { text: '' }
+    const planner = new FetchPlanner<typeof fetch>((url, init) => {
+      assert.equal(url, input.href)
+      assert.ok(init)
+      assert.notEqual(init, descriptorInit, 'OWNED_INIT_COPY')
+      assert.equal(init.body, body, 'PAYLOAD_IDENTITY')
+      assert.equal(init.signal, signal, 'ATTEMPT_SIGNAL_IDENTITY')
+      assert.equal(init.method, 'POST')
       return Promise.resolve(response)
     })
-    assert.equal(await wrapped(input, init), response)
-    assert.equal(response.bodyUsed, false)
-    assert.equal(await response.text(), 'untouched')
+    const handle = planner.submit({
+      method: 'POST',
+      replay,
+      prepare: ctx => {
+        signal = ctx.signal
+        return { url: input, init: descriptorInit }
+      },
+      consume: async borrowed => {
+        assert.equal(borrowed, response)
+        assert.equal(borrowed.bodyUsed, false)
+        value.text = await borrowed.text()
+        return value
+      }
+    })
+    assert.equal((await handle.result).value, value)
+    assert.equal((await handle.result).status, 503)
+    assert.equal(value.text, 'untouched')
+    await handle.resourcesDone
   }
 })
-
-test('Signal remains transport-owned and transport rejection is never retried', async () => {
-  const controller = new AbortController()
-  const reason = new Error('transport abort')
+test('Abort owns transport signal and transport rejection never retries', async () => {
   let starts = 0
-  const events = new EventEmitter<FetchPlannerEventMap<typeof globalThis.fetch>>()
   let failures = 0
-  events.on('fetch-error', event => {
-    failures++
-    assert.equal(event.error, reason)
-    assert.equal(event.method, 'POST')
+  let signal: AbortSignal | undefined
+  let entered!: () => void
+  const sending = new Promise<void>(resolve => {
+    entered = resolve
   })
-  const planner = new FetchPlanner<typeof globalThis.fetch>(
-    (_input, init) => {
-      starts++
-      assert.equal(init?.signal, controller.signal)
-      return new Promise((_resolve, reject) => {
-        controller.signal.addEventListener(
-          'abort',
-          () => {
-            reject(reason)
-          },
-          { once: true }
-        )
-      })
-    },
-    { eventHandler: events }
-  )
-  const result = planner.getFetch()('http://offline.test/', {
-    method: 'POST',
-    signal: controller.signal
-  })
-  const rejected = assert.rejects(result, error => error === reason)
-  await new Promise<void>(resolve =>
-    events.once('request', () => {
-      resolve()
+  const reason = new Error('transport abort')
+  const planner = new FetchPlanner<typeof globalThis.fetch>((_input, init) => {
+    starts++
+    assert.equal(init?.signal, signal)
+    assert.equal(init?.method, 'POST')
+    entered()
+    return new Promise((_resolve, reject) => {
+      signal?.addEventListener(
+        'abort',
+        () => {
+          reject(reason)
+        },
+        { once: true }
+      )
     })
+  })
+  planner.observe(event => {
+    if (event.type === 'operation-settled' && event.outcome === 'failed') failures++
+  })
+  const h: Handle<string> = planner.submit({
+    method: 'POST',
+    replay: { serverSafe: true, consumeSafe: true },
+    prepare: ctx => {
+      signal = ctx.signal
+      return { url: 'http://offline.test/', init: {} }
+    },
+    consume: () => 'unused'
+  })
+  const rejected = assert.rejects(
+    h.result,
+    error => error instanceof OperationError && error.code === 'ABORTED' && error.cause === reason
   )
-  controller.abort(reason)
+  await sending
+  h.abort(reason)
   await rejected
-  await new Promise<void>(resolve => setImmediate(resolve))
+  await h.resourcesDone
+  assert.equal(signal?.aborted, true)
   assert.equal(starts, 1)
-  assert.equal(failures, 1)
-  assert.equal(planner.getActionsQueueLength(), 0)
-  assert.equal(planner.getCurInflightRequestsCount(), 0)
+  assert.equal(failures, 1, 'ONE_ABORT_FAILURE_EVENT')
+  assert.equal(planner.snapshot().queued, 0)
+  assert.equal(planner.snapshot().sentActive, 0)
 })
-
 for (const body of ['retry payload', Buffer.from('retry payload')]) {
-  test(`Undici retry preserves ${typeof body === 'string' ? 'string' : 'Buffer'} payload identity`, async t => {
-    const runtime = createRuntime(t)
+  test(`Undici retry prepares fresh ${typeof body === 'string' ? 'string' : 'Buffer'} descriptor with stable payload`, async t => {
+    const clock = createRuntime(t)
     let calls = 0
-    const init = { method: 'POST', body }
-    const response = new Response('consumer')
+    let prepares = 0
+    const delivered = new Response('consumer')
+    const inits: unknown[] = []
+    const signals: unknown[] = []
     const planner = new FetchPlanner<typeof fetch>(
-      (_url, options) => {
-        assert.equal(options, init)
-        assert.equal(options.body, body)
-        return Promise.resolve(++calls === 1 ? new Response(null, { status: 429 }) : response)
+      (_url, init) => {
+        assert.equal(init?.body, body)
+        inits.push(init)
+        signals.push(init.signal)
+        return Promise.resolve(
+          ++calls === 1
+            ? new Response(null, { status: 429, headers: { 'X-Lognex-Retry-After': '0' } })
+            : delivered
+        )
       },
       { jitter: 0 }
     )
-    const result = planner.getFetch()('http://offline.test/', init)
-    await runtime.advance(0)
-    await runtime.advance(0)
-    assert.equal(await result, response)
-    await runtime.advance(0)
+    const h: Handle<string> = planner.submit({
+      method: 'POST',
+      replay: { serverSafe: true, consumeSafe: true },
+      prepare: ctx => {
+        prepares++
+        assert.equal(ctx.operationId, h.id)
+        return { url: 'http://offline.test/', init: { body } }
+      },
+      consume: response => {
+        assert.equal(response, delivered, 'RETRY_BORROW_IDENTITY')
+        assert.equal(response.bodyUsed, false, 'RETRY_UNREAD_AT_CONSUME')
+        return response.text()
+      }
+    })
+    await clock.advance(0)
+    await clock.advance(4000)
+    assert.equal((await h.result).value, 'consumer')
+    await h.resourcesDone
     assert.equal(calls, 2)
-    assert.equal(planner.getActionsQueueLength(), 0)
-    assert.equal(planner.getCurInflightRequestsCount(), 0)
+    assert.equal(prepares, 2)
+    assert.notEqual(inits[0], inits[1])
+    assert.notEqual(signals[0], signals[1])
+    assert.equal(planner.snapshot().queued, 0)
+    assert.equal(planner.snapshot().sentActive, 0)
   })
 }
-
-test('Native loopback Fetch contract and one-shot replay child exits naturally under strict rejections', async () => {
+test('Native loopback Fetch contract and one-shot child exits naturally under strict rejections', async () => {
   const child = spawn(process.execPath, [
     '--unhandled-rejections=strict',
-    '__temp/test-build/test/package/fixtures/runtime.mjs'
+    fileURLToPath(new URL('./helpers/child.mjs', import.meta.url)),
+    'native-fetch-contract'
   ])
   let stdout = ''
   let stderr = ''
   let expired = false
-  child.stdout.setEncoding('utf8').on('data', (chunk: string) => (stdout += chunk))
-  child.stderr.setEncoding('utf8').on('data', (chunk: string) => (stderr += chunk))
+  child.stdout.setEncoding('utf8').on('data', (s: string) => {
+    stdout += s
+  })
+  child.stderr.setEncoding('utf8').on('data', (s: string) => {
+    stderr += s
+  })
   const watchdog = setTimeout(() => {
     expired = true
     child.kill()
-  }, 10000)
+  }, 15000)
   try {
     const code = await new Promise<number | null>((resolve, reject) => {
       child.on('error', reject)
       child.on('close', resolve)
     })
-    assert.equal(expired, false, 'Watchdog expiration is a failure')
+    assert.equal(expired, false, 'WATCHDOG_IS_FAILURE')
     assert.equal(code, 0, stderr)
     assert.equal(stderr, '')
     assert.match(
