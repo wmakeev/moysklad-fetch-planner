@@ -1,15 +1,5 @@
 import assert from 'node:assert'
 
-/** Internal numeric policy; durations remain independent of Node's timer chunk limit. */
-export function roundPositiveOption(value: number, minimum: number, name: string) {
-  const rounded = Math.round(value)
-  assert.ok(
-    typeof value === 'number' && Number.isSafeInteger(rounded) && rounded >= minimum,
-    `Опция "${name}" должна округляться в безопасное целое число не меньше ${minimum}`
-  )
-  return rounded
-}
-
 export function createAttenuationSteps(coefficient: number) {
   return Array.from({ length: 101 }, (_, i) => Math.pow(1 - i / 100, coefficient))
 }

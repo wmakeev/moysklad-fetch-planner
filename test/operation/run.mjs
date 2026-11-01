@@ -48,10 +48,10 @@ const registry = new Map([
   ['guard', 'guard.test.ts'],
   ['retry', 'retry.test.ts']
 ])
-const compilers = [
+const compilers = /** @type {const} */ ([
   ['5.7.3', 'node_modules/.pnpm/typescript@5.7.3/node_modules/typescript/bin/tsc'],
   ['7.0.2', 'node_modules/typescript/bin/tsc']
-]
+])
 
 /** @param {number} fd @param {string} text */
 function writeDiagnostic(fd, text) {
@@ -134,7 +134,7 @@ const build = child(['node_modules/typescript/bin/tsc', '-p', 'test/operation/ts
 assert.equal(build.status, 0, build.stdout + build.stderr)
 
 // Expected diagnostic positions are fixed assertions, never inferred from compiler output.
-const expected = [
+const expected = /** @type {const} */ ([
   [8, 60, 2322],
   [9, 49, 2322],
   [10, 56, 2322],
@@ -159,7 +159,7 @@ const expected = [
   [38, 7, 2540],
   [39, 11, 2540],
   [40, 11, 2540]
-]
+])
 
 function types() {
   mkdirSync(scratch, { recursive: true })
@@ -183,8 +183,9 @@ function types() {
     noUncheckedIndexedAccess: true,
     exactOptionalPropertyTypes: false
   }
+  /** @type {{version: string, name: string, command: string[], status: number | null, diagnostics: [string, number, number, number][]}[]} */
   const results = []
-  /** @param {string} version @param {string} compiler @param {string} name @param {number[][]} diagnostics */
+  /** @param {string} version @param {string} compiler @param {string} name @param {readonly (readonly [number, number, number])[]} diagnostics */
   function compile(version, compiler, name, diagnostics) {
     const config = path.join(scratch, `${name}.json`)
     writeFileSync(
@@ -195,8 +196,9 @@ function types() {
     const result = child(args)
     const raw = result.stdout + result.stderr
     writeFileSync(path.join(scratch, `${version}-${name}.log`), raw)
+    /** @type {[string, number, number, number][]} */
     const actual = [...raw.matchAll(/^(.+?)\((\d+),(\d+)\): error TS(\d+):/gm)].map(match => [
-      match[1],
+      /** @type {RegExpMatchArray & {1: string}} */ (match)[1],
       Number(match[2]),
       Number(match[3]),
       Number(match[4])

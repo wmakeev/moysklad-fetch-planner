@@ -73,8 +73,6 @@
     "csv-stringify": "6.5.2",
     "dotenv": "16.4.7",
     "highland": "2.13.5",
-    "moysklad": "0.20.0",
-    "p-retry": "6.2.1",
     "piscina": "5.0.0-alpha.0",
     "typescript": "7.0.2",
     "undici": "7.3.0",
