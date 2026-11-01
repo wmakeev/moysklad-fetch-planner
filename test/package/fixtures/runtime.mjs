@@ -1,11 +1,17 @@
 /// <reference types="node" />
 
 import assert from 'node:assert/strict'
+import { createServer } from 'node:http'
 import { FetchPlanner, OperationError } from '../../../src/index.js'
 import * as deep from '../../../src/index.js'
+import { FetchPlanner as DeepPlanner } from '../../../src/planner.js'
+
+const family = process.argv[2]
+assert.ok(process.argv.length === 3 && (family === 'bare' || family === 'undici'), 'Runtime family')
 
 // SOURCE PREPARATION ONLY in T107. Artifact/Node runtime acceptance belongs to T119–T121.
 assert.equal(FetchPlanner, deep.FetchPlanner)
+assert.equal(FetchPlanner, DeepPlanner)
 assert.equal(OperationError, deep.OperationError)
 assert.deepEqual(Object.keys(deep).sort(), ['FetchPlanner', 'OperationError'])
 
@@ -205,3 +211,132 @@ try {
   await sent.resourcesDone
 }
 console.log('Runtime source: root/deep, GET/POST, fresh safe retry, finished consume and stop')
+
+// Buffered loopback smoke only; cooperative upload/retry barriers remain in T71.
+// Bare consumers never resolve or import the optional runtime transport.
+if (family === 'undici') {
+  const { fetch: undiciFetch, Response: UndiciResponse, Agent } = await import('undici')
+  const agent = new Agent({ connections: 1, pipelining: 1 })
+  /** @type {Set<import('node:net').Socket>} */
+  const sockets = new Set()
+  /** @type {{method: string | undefined, url: string | undefined, body: string}[]} */
+  const received = []
+  /** @type {unknown[]} */
+  const serverErrors = []
+  const server = createServer((request, response) => {
+    let body = ''
+    request.setEncoding('utf8')
+    response.on('error', error => {
+      serverErrors.push(error)
+    })
+    request.on('error', error => {
+      serverErrors.push(error)
+    })
+    request.on('data', (/** @type {string} */ chunk) => {
+      body += chunk
+      if (body.length > 1024) request.destroy(new Error('Loopback payload exceeded bound'))
+    })
+    request.on('end', () => {
+      received.push({ method: request.method, url: request.url, body })
+      response.writeHead(201, { 'content-type': 'text/plain' })
+      response.end(`${request.method}:${body}`)
+    })
+  })
+  server.on('connection', socket => {
+    sockets.add(socket)
+    socket.on('close', () => {
+      sockets.delete(socket)
+    })
+  })
+  server.on('error', error => {
+    serverErrors.push(error)
+  })
+  /** @type {typeof undiciFetch} */
+  const wireTransport = (input, init) => undiciFetch(input, { ...init, dispatcher: agent })
+  const wirePlanners = [
+    new FetchPlanner(wireTransport, options),
+    new DeepPlanner(wireTransport, options)
+  ]
+  /** @type {import('../../../src/index.js').Handle<{text: string, undici: boolean}>[]} */
+  const handles = []
+  /** @type {Promise<unknown>[]} */
+  const settlements = []
+  try {
+    await new Promise((resolve, reject) => {
+      server.once('error', reject)
+      server.listen(0, '127.0.0.1', () => {
+        server.off('error', reject)
+        resolve(undefined)
+      })
+    })
+    const address = server.address()
+    assert.ok(address && typeof address !== 'string')
+    for (const [index, method] of /** @type {const} */ (['GET', 'POST']).entries()) {
+      const wirePlanner = wirePlanners[index]
+      assert.ok(wirePlanner)
+      let disposed = 0
+      /** @type {import('../../../src/index.js').Handle<{text: string, undici: boolean}>} */
+      const handle = wirePlanner.submit({
+        method,
+        replay: { serverSafe: false, consumeSafe: false },
+        prepare(ctx) {
+          ctx.onDispose(() => {
+            disposed++
+          })
+          return {
+            url: `http://127.0.0.1:${address.port}/${method.toLowerCase()}`,
+            init: method === 'POST' ? { body: 'wire payload' } : {}
+          }
+        },
+        async consume(response) {
+          return { text: await response.text(), undici: response instanceof UndiciResponse }
+        }
+      })
+      handles.push(handle)
+      // Attach before any assertion can leave either promise rejected and unobserved.
+      settlements.push(
+        handle.result.then(
+          () => undefined,
+          () => undefined
+        ),
+        handle.resourcesDone
+      )
+      assert.deepEqual(await handle.result, {
+        value: { text: `${method}:${method === 'POST' ? 'wire payload' : ''}`, undici: true },
+        status: 201,
+        cleanup: 'released'
+      })
+      assert.deepEqual(await handle.resourcesDone, { resources: 'released' })
+      assert.equal(handle.snapshot().dispatchCalls, 1)
+      assert.equal(disposed, 1)
+    }
+    assert.deepEqual(received, [
+      { method: 'GET', url: '/get', body: '' },
+      { method: 'POST', url: '/post', body: 'wire payload' }
+    ])
+    assert.deepEqual(serverErrors, [])
+    await agent.close()
+  } finally {
+    for (const wirePlanner of wirePlanners) wirePlanner.stop('wire fixture finally')
+    for (const handle of handles) handle.abort('wire fixture finally')
+    try {
+      await agent.destroy()
+    } finally {
+      for (const socket of sockets) socket.destroy()
+      server.closeAllConnections()
+      try {
+        if (server.listening) {
+          await new Promise((resolve, reject) => {
+            server.close(error => {
+              if (error) reject(error)
+              else resolve(undefined)
+            })
+          })
+        }
+      } finally {
+        await Promise.allSettled(settlements)
+      }
+    }
+  }
+  console.log('Runtime undici: owned Agent, root/deep planner GET/POST loopback released')
+}
