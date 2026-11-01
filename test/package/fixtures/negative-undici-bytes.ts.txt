@@ -1,3 +1,8 @@
-import { wrapFetch } from '../../../src/index.js'
+import { FetchPlanner } from '../../../src/index.js'
 import { fetch } from 'undici'
-void wrapFetch(fetch)('https://local.invalid/').then(response => response.bytes())
+new FetchPlanner(fetch).submit({
+  method: 'GET',
+  replay: { serverSafe: true, consumeSafe: true },
+  prepare: () => ({ url: 'https://local.invalid/', init: {} }),
+  consume: response => response.bytes()
+})

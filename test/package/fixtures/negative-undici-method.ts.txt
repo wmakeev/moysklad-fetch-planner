@@ -1,3 +1,4 @@
-import { wrapFetch } from '../../../src/index.js'
+import type { Init } from '../../../src/index.js'
 import { fetch } from 'undici'
-wrapFetch(fetch)('https://local.invalid/', { method: 42 })
+export const method: Init<typeof fetch> = { method: 'POST' }
+export const signal: Init<typeof fetch> = { signal: new AbortController().signal }

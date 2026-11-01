@@ -1,2 +1,10 @@
 import { FetchPlanner } from '../../../src/index.js'
-new FetchPlanner(globalThis.fetch).getFetch()('https://local.invalid/', { body: 42 })
+import type { Descriptor, Init } from '../../../src/index.js'
+new FetchPlanner(globalThis.fetch).submit({
+  method: 'POST',
+  replay: { serverSafe: false, consumeSafe: false },
+  prepare(): Descriptor<Init<typeof globalThis.fetch>> {
+    return { url: 'https://local.invalid/', init: { body: 42 } }
+  },
+  consume: response => response.text()
+})

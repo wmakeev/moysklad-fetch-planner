@@ -1,3 +1,5 @@
-import { wrapFetch } from '../../../src/index.js'
+import { FetchPlanner } from '../../../src/index.js'
 const marked = Object.assign(globalThis.fetch, { marker: true })
-void wrapFetch(marked).marker
+const planner = new FetchPlanner(marked)
+void marked.marker
+void planner.marker

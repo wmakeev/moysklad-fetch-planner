@@ -1,254 +1,207 @@
 /// <reference types="node" />
 
 import assert from 'node:assert/strict'
-import { createServer } from 'node:http'
-import { once, EventEmitter } from 'node:events'
-import { setImmediate as immediate } from 'node:timers/promises'
-import { FetchPlanner, wrapFetch } from '../../../src/index.js'
+import { FetchPlanner, OperationError } from '../../../src/index.js'
 import * as deep from '../../../src/index.js'
 
+// SOURCE PREPARATION ONLY in T107. Artifact/Node runtime acceptance belongs to T119–T121.
 assert.equal(FetchPlanner, deep.FetchPlanner)
-assert.equal(wrapFetch, deep.wrapFetch)
-/** @type {{input: unknown, init: unknown}[]} */
+assert.equal(OperationError, deep.OperationError)
+assert.deepEqual(Object.keys(deep).sort(), ['FetchPlanner', 'OperationError'])
+
+/** @type {{input: unknown, method: string | undefined, body: unknown, signal: AbortSignal | null | undefined}[]} */
 const calls = []
-const response = new Response('local response', { status: 200 })
-// Fake transport checks exact forwarding without consuming the delivered response.
-/** @param {unknown} input @param {unknown} [init] */
+/** @type {typeof globalThis.fetch} */
 const transport = (input, init) => {
-  calls.push({ input, init })
-  return Promise.resolve(response)
+  calls.push({ input, method: init?.method, body: init?.body, signal: init?.signal })
+  return Promise.resolve(new Response('finished response'))
 }
-const get = new FetchPlanner(transport).getFetch()
-assert.equal(await get('https://local.invalid/get'), response)
-const post = wrapFetch(transport)
-const init = { method: 'POST', body: 'payload' }
-assert.equal(await post('https://local.invalid/post', init), response)
-assert.deepEqual(calls, [
-  { input: 'https://local.invalid/get', init: undefined },
-  { input: 'https://local.invalid/post', init }
-])
-assert.equal(await response.text(), 'local response')
-console.log('Runtime smoke: root/deep imports, GET/POST, original Response identity')
-
-// This finite scenario also runs as a strict child in the unit suite.
-/** @type {{method: string | undefined, body: Buffer, contentType: string | undefined}[]} */
-const received = []
-const server = createServer((req, res) => {
-  void receive(req, res).catch(
-    /** @param {unknown} error */ error => {
-      res.destroy(error instanceof Error ? error : new Error('Loopback receive failed'))
-    }
-  )
+const options = {
+  jitter: 0,
+  deadlineMs: 10_000,
+  attemptTimeoutMs: 5_000,
+  cleanupGraceMs: 1_000,
+  maxAttempts: 2
+}
+const planner = new FetchPlanner(transport, options)
+/** @type {import('../../../src/index.js').Event[]} */
+const events = []
+const observation = planner.observe(event => {
+  events.push(event)
 })
-/** @param {import('node:http').IncomingMessage} req @param {import('node:http').ServerResponse} res */
-async function receive(req, res) {
-  const chunks = []
-  for await (const chunk of req) chunks.push(Buffer.from(chunk))
-  received.push({
-    method: req.method,
-    body: Buffer.concat(chunks),
-    contentType: req.headers['content-type']
-  })
-  const retry =
-    req.url?.startsWith('/retry') && received.filter((_, i) => i >= retryStart).length === 1
-  res.writeHead(retry ? 429 : req.url === '/404' ? 404 : req.url === '/503' ? 503 : 200, {
-    'X-Lognex-Retry-After': '0'
-  })
-  res.end('consumer response')
-}
-let retryStart = 0
 try {
-  server.listen(0, '127.0.0.1')
-  await once(server, 'listening')
-  const address = server.address()
-  assert.ok(address && typeof address !== 'string')
-  const base = `http://127.0.0.1:${address.port}`
-  /** @type {EventEmitter<import('../../../src/index.js').FetchPlannerEventMap<typeof globalThis.fetch>>} */
-  const events = new EventEmitter()
-  /** @type {(string | undefined)[]} */
-  const methods = []
-  /** @type {string[]} */
-  const types = []
-  events.on('request', ev => methods.push(ev.method))
-  events.on('response', ev => types.push(ev.responseType))
-  /** @type {Response | undefined} */
-  let originalResponse
-  /** @type {typeof globalThis.fetch} */
-  const nativeTransport = async (input, options) => {
-    originalResponse = await globalThis.fetch(input, options)
-    return originalResponse
-  }
-  const planner = new FetchPlanner(nativeTransport, { jitter: 0, eventHandler: events })
-  const scheduled = planner.getFetch()
-  /** @param {Parameters<typeof globalThis.fetch>[0]} input @param {RequestInit} [options] */
-  async function send(input, options) {
-    const response = await scheduled(input, options)
-    assert.equal(response, originalResponse)
-    assert.equal(response.bodyUsed, false)
-    assert.equal(await response.text(), 'consumer response')
-    return response
-  }
-  await send(new URL(base + '/url'))
-  await send(new Request(base + '/request', { method: 'POST', body: 'request body' }))
-  await send(new Request(base + '/override', { method: 'POST', body: 'old body' }), {
-    method: 'PUT',
-    body: 'override body'
-  })
-  await send(base + '/string')
-  assert.deepEqual(methods, [undefined, 'POST', 'PUT', undefined])
-  assert.deepEqual(
-    received.map(r => r.method),
-    ['GET', 'POST', 'PUT', 'GET']
-  )
-  assert.equal(received[1]?.body.toString(), 'request body')
-  assert.equal(received[2]?.body.toString(), 'override body')
-  const form = new FormData()
-  form.set('field', 'form value')
-  form.set('file', new File(['form file'], 'form.txt'))
-  const stream = new ReadableStream({
-    start(controller) {
-      controller.enqueue(new TextEncoder().encode('stream payload'))
-      controller.close()
-    }
-  })
-  for (const body of [
-    'string payload',
-    Buffer.from('buffer payload'),
-    form,
-    new File(['file payload'], 'body.txt'),
-    stream
-  ]) {
-    await send(base + '/payload', { method: 'POST', body, duplex: 'half' })
-    const payload = received.at(-1)
-    assert.ok(payload)
-    if (body === form) {
-      assert.match(payload.contentType ?? '', /^multipart\/form-data; boundary=/)
-      assert.match(payload.body.toString(), /form value/)
-      assert.match(payload.body.toString(), /filename="form.txt"/)
-      assert.match(payload.body.toString(), /form file/)
-    } else {
-      assert.equal(
-        payload.body.toString(),
-        typeof body === 'string'
-          ? body
-          : Buffer.isBuffer(body)
-            ? body.toString()
-            : body instanceof File
-              ? 'file payload'
-              : 'stream payload'
-      )
-    }
-  }
-  for (const status of [404, 503]) {
-    const response = await send(`${base}/${status}`)
-    assert.equal(response.status, status)
-    assert.equal(types.at(-1), 'OK')
-  }
-  for (const body of ['replay string', Buffer.from('replay buffer')]) {
-    retryStart = received.length
-    await send(base + '/retry', { method: 'POST', body })
-    assert.equal(received.length - retryStart, 2)
-    assert.deepEqual(received[retryStart]?.body, received[retryStart + 1]?.body)
-    assert.equal(received[retryStart]?.body.toString(), body.toString())
-  }
-
-  // No clone, buffering or body factory: a consumed Request/stream cannot be replayed.
-  for (const mode of [
-    'request-retry',
-    'stream-retry',
-    'disturbed-request',
-    'locked-request',
-    'disturbed-stream',
-    'locked-stream'
-  ]) {
-    let attempts = 0
-    let errors = 0
-    let settlements = 0
-    /** @type {Error | undefined} */
-    let transportError
-    const oneShot = new ReadableStream({
-      start(controller) {
-        controller.enqueue(new TextEncoder().encode('one shot'))
-        controller.close()
-      }
-    })
-    const request = new Request(base + '/retry-one-shot', { method: 'POST', body: 'one shot' })
-    const isRequest = mode.includes('request')
-    if (mode === 'disturbed-request') await request.text()
-    if (mode === 'disturbed-stream') await new Response(oneShot).text()
-    const reader =
-      mode === 'locked-request'
-        ? request.body?.getReader()
-        : mode === 'locked-stream'
-          ? oneShot.getReader()
-          : undefined
-    retryStart = received.length
-    /** @type {typeof globalThis.fetch} */
-    const transport = async (input, options) => {
-      if (input === base + '/next') return globalThis.fetch(input, options)
-      attempts++
-      assert.equal(input, isRequest ? request : base + '/retry-one-shot')
-      if (!isRequest) assert.equal(options?.body, oneShot)
-      try {
-        return await globalThis.fetch(input, options)
-      } catch (error) {
-        assert.ok(error instanceof Error)
-        transportError = error
-        throw error
-      }
-    }
-    const one = new FetchPlanner(transport, {
-      jitter: 0,
-      eventHandler: {
-        emit(...[name, event]) {
-          if (name === 'fetch-error') {
-            errors++
-            assert.equal(event.error, transportError)
-            assert.equal(event.method, 'POST')
-          }
+  for (const method of /** @type {const} */ (['GET', 'POST'])) {
+    let disposed = 0
+    const handle = planner.submit({
+      method,
+      replay: { serverSafe: false, consumeSafe: false },
+      prepare(ctx) {
+        ctx.onDispose(() => {
+          disposed++
+        })
+        return {
+          url: new URL(`https://local.invalid/${method.toLowerCase()}`),
+          init: method === 'POST' ? { body: 'payload' } : {}
         }
-      }
+      },
+      consume: response => response.bytes()
     })
-    try {
-      await assert.rejects(
-        one
-          .getFetch()(
-            isRequest ? request : base + '/retry-one-shot',
-            isRequest ? undefined : { method: 'POST', body: oneShot, duplex: 'half' }
-          )
-          .then(
-            value => {
-              settlements++
-              return value
-            },
-            /** @param {unknown} error */
-            error => {
-              settlements++
-              throw error
-            }
-          ),
-        error => error === transportError
-      )
-      await immediate()
-      assert.equal(attempts, mode.endsWith('retry') ? 2 : 1)
-      assert.equal(errors, 1)
-      assert.equal(settlements, 1)
-      assert.equal(one.getActionsQueueLength(), 0)
-      assert.equal(one.getCurInflightRequestsCount(), 0)
-      const next = await one.getFetch()(base + '/next')
-      await next.text()
-    } finally {
-      reader?.releaseLock()
-    }
+    const completed = await handle.result
+    assert.deepEqual(completed.value, new TextEncoder().encode('finished response'))
+    assert.equal(completed.status, 200)
+    assert.equal(completed.cleanup, 'released')
+    assert.deepEqual(await handle.resourcesDone, { resources: 'released' })
+    assert.equal(disposed, 1)
+    assert.equal(handle.snapshot().dispatchCalls, 1)
   }
-  console.log('Native loopback: payloads, metadata, HTTP OK, retry and one-shot boundaries')
+  assert.deepEqual(
+    calls.map(call => call.method),
+    ['GET', 'POST']
+  )
+  assert.deepEqual(
+    calls.map(call => call.body),
+    [undefined, 'payload']
+  )
+  assert.ok(calls.every(call => call.signal instanceof AbortSignal))
+  assert.ok(events.some(event => event.type === 'operation-settled'))
+  assert.ok(events.every(event => !('value' in event) && !('body' in event) && !('url' in event)))
 } finally {
-  server.closeAllConnections()
-  if (server.listening)
-    await new Promise((resolve, reject) =>
-      server.close(error => {
-        if (error) reject(error)
-        else resolve(undefined)
-      })
-    )
+  observation.unsubscribe()
+  planner.stop('fixture finished')
 }
+
+// Retry recreates a request body for the SAME operation, with an explicit logical identity.
+// FormData owns no ongoing upload producer in this fake; stream stop-and-wait is tested in T100/T71.
+let prepared = 0
+let dispatched = 0
+/** @type {unknown[]} */
+const bodies = []
+/** @type {number[]} */
+const cleanupAtDispatch = []
+/** @type {number[]} */
+const operationIds = []
+/** @type {number[]} */
+const cleanupOrder = []
+/** @type {typeof globalThis.fetch} */
+const retryTransport = (_input, init) => {
+  dispatched++
+  cleanupAtDispatch.push(cleanupOrder.length)
+  bodies.push(init?.body)
+  return Promise.resolve(
+    new Response(dispatched === 1 ? 'retry' : 'finished', {
+      status: dispatched === 1 ? 429 : 200,
+      headers: { 'X-Lognex-Retry-After': '1' }
+    })
+  )
+}
+const retryPlanner = new deep.FetchPlanner(retryTransport, options)
+try {
+  const handle = retryPlanner.submit({
+    method: 'POST',
+    replay: { serverSafe: true, consumeSafe: true },
+    prepare(ctx) {
+      const attempt = ++prepared
+      operationIds.push(ctx.operationId)
+      ctx.onDispose(() => {
+        cleanupOrder.push(attempt)
+      })
+      const body = new FormData()
+      body.set('identity', 'fixture-operation')
+      body.set('payload', 'same logical payload')
+      return { url: 'https://local.invalid/retry', init: { body } }
+    },
+    consume: response => response.text()
+  })
+  assert.deepEqual(await handle.result, { value: 'finished', status: 200, cleanup: 'released' })
+  assert.deepEqual(await handle.resourcesDone, { resources: 'released' })
+  assert.equal(prepared, 2)
+  assert.equal(dispatched, 2)
+  assert.deepEqual(operationIds, [handle.id, handle.id])
+  assert.deepEqual(cleanupOrder, [1, 2])
+  assert.equal(bodies.length, 2)
+  assert.notEqual(bodies[0], bodies[1])
+  assert.deepEqual(cleanupAtDispatch, [0, 1])
+  for (const body of bodies) {
+    assert.ok(body instanceof FormData)
+    assert.equal(body.get('identity'), 'fixture-operation')
+    assert.equal(body.get('payload'), 'same logical payload')
+  }
+} finally {
+  retryPlanner.stop('retry fixture finished')
+}
+
+// stop during a sent consume preserves that attempt; it rejects subsequent submissions.
+function gate() {
+  /** @type {() => void} */
+  let resolve = () => {
+    throw new Error('Uninitialized gate')
+  }
+  const promise = new Promise(
+    /** @param {(value: void) => void} done */ done => {
+      resolve = () => {
+        done()
+      }
+    }
+  )
+  return { promise, resolve }
+}
+const entered = gate()
+const release = gate()
+let disposed = 0
+const stopPlanner = new FetchPlanner(transport, { ...options, maxParallelLimit: 1 })
+const sent = stopPlanner.submit({
+  method: 'POST',
+  replay: { serverSafe: false, consumeSafe: false },
+  prepare(ctx) {
+    ctx.onDispose(() => {
+      disposed++
+    })
+    return { url: 'https://local.invalid/sent', init: { body: 'sent payload' } }
+  },
+  async consume(response) {
+    entered.resolve()
+    await release.promise
+    return response.text()
+  }
+})
+// Observe every result immediately so assertion/finally paths never leave a rejection unhandled.
+const sentOutcome = sent.result.then(
+  value => ({ value }),
+  /** @param {unknown} error */ error => ({ error })
+)
+try {
+  await Promise.race([
+    entered.promise,
+    sentOutcome.then(() => {
+      throw new Error('Consume was not entered')
+    })
+  ])
+  stopPlanner.stop('stop during consume')
+  assert.equal(sent.snapshot().phase, 'consuming')
+  assert.equal(stopPlanner.snapshot().sentActive, 1)
+  const rejected = stopPlanner.submit({
+    method: 'GET',
+    replay: { serverSafe: true, consumeSafe: true },
+    prepare: () => ({ url: 'https://local.invalid/never', init: {} }),
+    consume: response => response.text()
+  })
+  await assert.rejects(
+    rejected.result,
+    error => error instanceof OperationError && error.code === 'STOPPED' && !error.dispatchEntered
+  )
+  assert.deepEqual(await rejected.resourcesDone, { resources: 'released' })
+  release.resolve()
+  const outcome = await sentOutcome
+  assert.ok('value' in outcome)
+  assert.equal(outcome.value.value, 'finished response')
+  assert.deepEqual(await sent.resourcesDone, { resources: 'released' })
+  assert.equal(disposed, 1)
+  assert.equal(sent.snapshot().dispatchCalls, 1)
+  assert.equal(stopPlanner.snapshot().sentActive, 0)
+} finally {
+  release.resolve()
+  stopPlanner.stop('fixture finally')
+  await sentOutcome
+  await sent.resourcesDone
+}
+console.log('Runtime source: root/deep, GET/POST, fresh safe retry, finished consume and stop')

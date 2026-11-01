@@ -1,3 +1,4 @@
 import { FetchPlanner } from '../../../src/index.js'
 const invalid = () => Promise.resolve(1)
 new FetchPlanner(invalid)
+new FetchPlanner(globalThis.fetch)

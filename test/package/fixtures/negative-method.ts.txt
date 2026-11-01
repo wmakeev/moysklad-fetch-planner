@@ -1,2 +1,2 @@
-import { wrapFetch } from '../../../src/index.js'
-wrapFetch(globalThis.fetch)('https://local.invalid/', { method: 42 })
+import type { MethodSpec } from '../../../src/index.js'
+export const method: MethodSpec = { method: 42 }

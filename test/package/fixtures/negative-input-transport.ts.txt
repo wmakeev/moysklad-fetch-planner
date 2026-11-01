@@ -1,2 +1,5 @@
-import { wrapFetch } from '../../../src/index.js'
-wrapFetch((input: number) => globalThis.fetch(String(input)))
+import { FetchPlanner } from '../../../src/index.js'
+const invalid = (input: number) => globalThis.fetch(String(input))
+new FetchPlanner(invalid)
+import type { Descriptor, Init } from '../../../src/index.js'
+export const descriptor: Descriptor<Init<typeof globalThis.fetch>> = { url: new Request('https://local.invalid/'), init: {} }

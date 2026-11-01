@@ -1,3 +1,5 @@
-import type { RequestEvent } from '../../../src/index.js'
-const event: RequestEvent = { actionId: 1, requestId: 1, url: 42, method: 'GET', startTime: 0 }
-void event
+import type { Event } from '../../../src/index.js'
+declare const event: Event
+void event.url
+void event.value
+void event.signal

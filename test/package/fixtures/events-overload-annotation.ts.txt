@@ -1,24 +1,14 @@
-import type {
-  FetchPlannerEventHandler,
-  RequestEvent,
-  ResponseEvent,
-  FetchErrorEvent,
-  FetchPlanner
-} from '../../../src/index.js'
-interface OldHandler {
-  emit(name: 'request', event: RequestEvent<NativeFetch>, planner: FetchPlanner<NativeFetch>): void
-  emit(
-    name: 'response',
-    event: ResponseEvent<NativeFetch>,
-    planner: FetchPlanner<NativeFetch>
-  ): void
-  emit(
-    name: 'fetch-error',
-    event: FetchErrorEvent<NativeFetch>,
-    planner: FetchPlanner<NativeFetch>
-  ): void
-}
-declare const old: OldHandler
-export const handler: FetchPlannerEventHandler<NativeFetch> = old
-
-type NativeFetch = typeof globalThis.fetch
+import { FetchPlanner } from '../../../src/index.js'
+import type { HookContext } from '../../../src/index.js'
+import type { fetch } from 'undici-types'
+declare const transport: typeof fetch
+const planner = new FetchPlanner(transport)
+const control = (context: HookContext) => ({ type: 'allow' as const, status: context.status })
+planner.observe(control)
+planner.submit({
+  method: 'GET',
+  replay: { serverSafe: true, consumeSafe: true },
+  prepare: () => ({ url: 'https://local.invalid/', init: {} }),
+  consume: (response: Response) => response.bytes(),
+  beforeDispatch: 42
+})

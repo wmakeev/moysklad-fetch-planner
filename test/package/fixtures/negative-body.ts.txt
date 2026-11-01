@@ -1,2 +1,2 @@
-import { wrapFetch } from '../../../src/index.js'
-wrapFetch(globalThis.fetch)('https://local.invalid/', { body: 42 })
+import type { Init } from '../../../src/index.js'
+export const init: Init<typeof globalThis.fetch> = { body: 42 }

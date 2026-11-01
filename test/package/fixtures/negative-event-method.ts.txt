@@ -1,9 +1,4 @@
-import type { RequestEvent } from '../../../src/index.js'
-const event: RequestEvent = {
-  actionId: 1,
-  requestId: 1,
-  url: 'https://local.invalid/',
-  method: 42,
-  startTime: 0
-}
-void event
+import type { Event, MethodSpec } from '../../../src/index.js'
+declare const event: Event
+event.status = 200
+export const lowercase: MethodSpec = { method: 'get' }
