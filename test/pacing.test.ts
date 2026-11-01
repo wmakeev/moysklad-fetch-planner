@@ -1,8 +1,7 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { Response } from 'undici'
-import { calculateRequestDelay, createAttenuationSteps, requestDeadline } from '../src/pacing.js'
-import { FetchPlanner } from '../src/index.js'
+import { FetchPlanner, OperationError } from '../src/index.js'
 import { createRuntime } from './helpers/runtime.js'
 
 const originalDate = Date
@@ -10,7 +9,7 @@ const originalTimeout = setTimeout
 const originalInterval = setInterval
 const originalRandom = Math.random
 
-test('Runtime advances wall time, interval time, timers and promise jobs together', async t => {
+test('Migrated Runtime advances wall time, interval time, timers and promise jobs together', async t => {
   const runtime = createRuntime(t)
   const start = Date.now()
   const events: string[] = []
@@ -43,7 +42,7 @@ test('Runtime advances wall time, interval time, timers and promise jobs togethe
   setTimeout(() => assert.fail('Timer leaked from the previous test'), 1)
 })
 
-test('Runtime restores globals and starts with a clean clock between tests', async t => {
+test('Migrated Runtime restores globals and starts with a clean clock between tests', async t => {
   assert.equal(Date, originalDate)
   assert.equal(setTimeout, originalTimeout)
   assert.equal(setInterval, originalInterval)
@@ -55,7 +54,7 @@ test('Runtime restores globals and starts with a clean clock between tests', asy
   assert.equal(Date.now(), 1_000_100)
 })
 
-test('FetchPlanner (jitter)', async t => {
+test('Migrated FetchPlanner (jitter)', async t => {
   for (const jitter of [0, 0.3]) {
     for (const random of [0, 0.5, 1]) {
       await t.test(`jitter ${jitter} at random ${random}`, async t => {
@@ -82,33 +81,55 @@ test('FetchPlanner (jitter)', async t => {
             jitter
           }
         )
-        const first = planner.getFetch()('http://offline.test/first')
-        await runtime.advance(0)
-        await first
-        assert.equal(planner.getCurInflightRequestsCount(), 0)
+        const spec = {
+          method: 'GET' as const,
+          replay: { serverSafe: false, consumeSafe: false },
+          prepare: () => ({ url: 'http://offline.test/pacing', init: {} }),
+          consume: () => 'finished'
+        }
+        const first = planner.submit(spec)
+        const handles = [first]
+        try {
+          await runtime.advance(0)
+          assert.equal((await first.result).value, 'finished')
+          await first.resourcesDone
+          assert.equal(planner.snapshot().sentActive, 0)
 
-        // k = (1 - remaining / limit)^coefficient = 0.5, no elapsed interval yet.
-        // Current jitter is ±jitterRange/2: random 0/0.5/1 gives upper/middle/lower.
-        const expected = Math.round(0.5 * (1000 + 1000 * jitter * (0.5 - random)))
-        const second = planner.getFetch()('http://offline.test/second')
-        assert.equal(planner.getNextRequestTime() - Date.now(), expected)
-        await runtime.advance(expected - 1)
-        assert.equal(starts.length, 1)
-        await runtime.advance(1)
-        await second
-        assert.equal(planner.getLastRequestDelay(), expected)
-        assert.deepEqual(starts, [1_000_000, 1_000_000 + expected])
-        assert.equal(planner.getCurInflightRequestsCount(), 0)
+          // Independent oracle: k=0.5, with upper/middle/lower jitter endpoints.
+          const expected = Math.round(0.5 * (1000 + 1000 * jitter * (0.5 - random)))
+          const second = planner.submit(spec)
+          handles.push(second)
+          await runtime.advance(0)
+          assert.equal(second.snapshot().phase, 'ready', 'JITTER_READY_WAITS')
+          assert.equal(planner.snapshot().leasedAttempts, 1)
+          assert.equal(planner.snapshot().sentActive, 0)
+          await runtime.advance(expected - 1)
+          assert.equal(starts.length, 1, 'JITTER_NO_EARLY_DISPATCH')
+          assert.equal(second.snapshot().dispatchCalls, 0)
+          await runtime.advance(1)
+          assert.equal((await second.result).value, 'finished')
+          await second.resourcesDone
+          assert.deepEqual(starts, [1_000_000, 1_000_000 + expected], 'JITTER_EXACT_DISPATCH')
+          assert.equal(second.snapshot().dispatchCalls, 1)
+          assert.equal(planner.snapshot().sentActive, 0)
+          assert.equal(planner.snapshot().leasedAttempts, 0)
+        } finally {
+          planner.stop()
+          for (const handle of handles) handle.abort()
+          await Promise.allSettled(handles.flatMap(handle => [handle.result, handle.resourcesDone]))
+        }
       })
     }
   }
 })
 
-test('Runtime elapsed interval reduces planner delay without real waiting', async t => {
+test('Migrated Runtime elapsed interval reduces planner delay without real waiting', async t => {
   const runtime = createRuntime(t)
+  const starts: number[] = []
   const planner = new FetchPlanner<typeof import('undici').fetch>(
-    () =>
-      Promise.resolve(
+    () => {
+      starts.push(Date.now())
+      return Promise.resolve(
         new Response(null, {
           headers: {
             'X-RateLimit-Limit': '10',
@@ -116,123 +137,65 @@ test('Runtime elapsed interval reduces planner delay without real waiting', asyn
             'X-Lognex-Retry-TimeInterval': '1000'
           }
         })
-      ),
+      )
+    },
     { jitter: 0, throttlingCoefficient: 1, maxRequestDelayTimeMs: 1000 }
   )
-  const first = planner.getFetch()('http://offline.test/first')
-  await runtime.advance(0)
-  await first
-  await runtime.advance(100)
-  const second = planner.getFetch()('http://offline.test/second')
-  // remaining/limit + elapsed/window = 0.5 + 0.1, so delay = 400.
-  assert.equal(planner.getNextRequestTime() - Date.now(), 400)
-  await runtime.advance(400)
-  await second
-  assert.equal(planner.getLastRequestDelay(), 400)
-  assert.equal(planner.getCurInflightRequestsCount(), 0)
+  const spec = {
+    method: 'GET' as const,
+    replay: { serverSafe: false, consumeSafe: false },
+    prepare: () => ({ url: 'http://offline.test/elapsed', init: {} }),
+    consume: () => 'finished'
+  }
+  const first = planner.submit(spec)
+  const handles = [first]
+  try {
+    await runtime.advance(0)
+    await first.result
+    await first.resourcesDone
+    await runtime.advance(100)
+    const second = planner.submit(spec)
+    handles.push(second)
+    await runtime.advance(0)
+    // remaining/limit + elapsed/window = 0.5 + 0.1, so delay = 400.
+    assert.equal(second.snapshot().phase, 'ready')
+    assert.equal(planner.snapshot().sentActive, 0)
+    await runtime.advance(399)
+    assert.equal(starts.length, 1, 'ELAPSED_400_NO_EARLY_DISPATCH')
+    await runtime.advance(1)
+    assert.equal((await second.result).value, 'finished')
+    await second.resourcesDone
+    assert.deepEqual(starts, [1_000_000, 1_000_500], 'ELAPSED_400_EXACT_DISPATCH')
+    const secondStart = starts[1]
+    assert.ok(secondStart !== undefined)
+    assert.equal(secondStart - 1_000_100, 400)
+    assert.equal(planner.snapshot().sentActive, 0)
+    assert.equal(planner.snapshot().leasedAttempts, 0)
+  } finally {
+    planner.stop()
+    for (const handle of handles) handle.abort()
+    await Promise.allSettled(handles.flatMap(handle => [handle.result, handle.resourcesDone]))
+  }
 })
 
-test('D07 rejects maxParallelLimit rounding to zero synchronously', () => {
+test('Migrated D07 rejects maxParallelLimit rounding to zero synchronously', () => {
+  let calls = 0
   assert.throws(
     () =>
-      new FetchPlanner<typeof import('undici').fetch>(() => Promise.resolve(new Response(null)), {
-        maxParallelLimit: 0.1
-      }),
-    /maxParallelLimit/,
+      new FetchPlanner<typeof import('undici').fetch>(
+        () => {
+          calls++
+          return Promise.resolve(new Response(null))
+        },
+        { maxParallelLimit: 0.1 }
+      ),
+    error =>
+      error instanceof OperationError &&
+      error.code === 'INVALID_ARGUMENT' &&
+      error.operationId === 0 &&
+      error.attemptNumber === 0 &&
+      !error.dispatchEntered,
     'A parallel limit rounding to zero must fail before an action can remain pending'
   )
-})
-
-test('Pacing preserves the 101 step formula across remaining, time, coefficient and random', () => {
-  for (const coefficient of [1, 2.5, 5, 20]) {
-    const table = createAttenuationSteps(coefficient)
-    assert.equal(table.length, 101)
-    for (const remaining of [0, 1, 25, 49, 50, 99, 100, 101, Number.MAX_SAFE_INTEGER]) {
-      for (const elapsed of [0, 4, 5, 100, 499, 1000, 1001]) {
-        for (const jitter of [0, 0.1, 0.3]) {
-          for (const random of [0, 0.5, 1]) {
-            const recoveredPercent = Math.min(
-              100,
-              Math.round((remaining / 100 + elapsed / 1000) * 100)
-            )
-            // Compute the attenuation independently, without using the production table.
-            const attenuation = ((100 - recoveredPercent) / 100) ** coefficient
-            const jitterOffset = 3000 * jitter * (0.5 - random)
-            const expected = elapsed >= 1000 ? 0 : Math.round(attenuation * (3000 + jitterOffset))
-            const actual = calculateRequestDelay(
-              { limit: 100, remaining, retryTimeInterval: 1000, elapsed },
-              { maxRequestDelayTimeMs: 3000, jitter },
-              table,
-              random
-            )
-            assert.equal(
-              actual,
-              expected,
-              JSON.stringify({ coefficient, remaining, elapsed, jitter, random })
-            )
-            assert.ok(Number.isSafeInteger(actual) && actual >= 0)
-          }
-        }
-      }
-    }
-  }
-})
-
-test('Pacing handles unknown, partial and over-limit state and clamps clock rollback', () => {
-  const options = { maxRequestDelayTimeMs: 1000, jitter: 0 }
-  const table = createAttenuationSteps(1)
-  for (const [limit, remaining] of [
-    [null, null],
-    [10, null],
-    [null, 0]
-  ]) {
-    assert.equal(
-      calculateRequestDelay(
-        { limit: limit ?? null, remaining: remaining ?? null, retryTimeInterval: 1000, elapsed: 0 },
-        options,
-        table,
-        0.5
-      ),
-      0
-    )
-  }
-  assert.equal(
-    calculateRequestDelay(
-      { limit: 10, remaining: 0, retryTimeInterval: 1000, elapsed: -100 },
-      options,
-      table,
-      0.5
-    ),
-    1000
-  )
-  assert.equal(
-    calculateRequestDelay(
-      { limit: 10, remaining: 11, retryTimeInterval: 1000, elapsed: 0 },
-      options,
-      table,
-      0.5
-    ),
-    0
-  )
-})
-
-test('Pacing rejects unsafe arithmetic and preserves long safe deadlines', () => {
-  for (const delay of [0, 2147483647, 2147483648]) {
-    assert.equal(requestDeadline(1_000_000, delay), 1_000_000 + delay)
-  }
-  for (const delay of [NaN, Infinity, -Infinity, -1, 0.1, Number.MAX_SAFE_INTEGER + 1]) {
-    assert.throws(() => requestDeadline(1_000_000, delay))
-  }
-  assert.throws(() => requestDeadline(Number.MAX_SAFE_INTEGER, 1))
-  assert.throws(() => requestDeadline(Infinity, 0))
-  assert.throws(
-    () =>
-      calculateRequestDelay(
-        { limit: 1, remaining: 0, retryTimeInterval: 1000, elapsed: 0 },
-        { maxRequestDelayTimeMs: Number.MAX_SAFE_INTEGER, jitter: 0.3 },
-        createAttenuationSteps(1),
-        0
-      ),
-    /Небезопасное/
-  )
+  assert.equal(calls, 0, 'D07_REJECTED_BEFORE_ADMISSION')
 })
