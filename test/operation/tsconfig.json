@@ -6,7 +6,8 @@
     "noEmit": false,
     "declaration": true,
     "strict": true,
-    "skipLibCheck": false
+    "skipLibCheck": false,
+    "sourceMap": true
   },
   "include": ["../../src/**/*.ts", "./**/*.ts", "../helpers/runtime.ts"]
 }

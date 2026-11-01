@@ -2304,11 +2304,14 @@ for (const entry of ['index', 'planner']) {
       '    snapshot() {',
       `    t94() { return {active:this.#active.size,ready:this.#ready.size,commands:this.commands.length,timer:this.#timer!==undefined,pump:this.#pumpScheduled,subscribers:this.observation.listeners.size,operationSubscribers:this.t94States.reduce((n,s)=>n+s.observation.listeners.size,0),retained:this.t94States.filter(s=>s.committed!==undefined||s.abortRequest!==undefined||s.plannerObservation!==undefined).length,deliveries:this.observation.pendingDeliveries?.length??0}; }\n    snapshot() {`
     )
+    // Transformed data modules have no file base and no longer match the original map.
     const absolute = (source: string) =>
-      source.replaceAll(
-        /from '(\.\/[^']+)'/g,
-        (_match, relative: string) => `from '${new URL(relative, directory).href}'`
-      )
+      source
+        .replace(/(?:\r?\n)\/\/# sourceMappingURL=[^\r\n]*(?:\r?\n)?$/, '\n')
+        .replaceAll(
+          /from '(\.\/[^']+)'/g,
+          (_match, relative: string) => `from '${new URL(relative, directory).href}'`
+        )
     const plannerURL = `data:text/javascript;base64,${Buffer.from(absolute(emitted)).toString('base64')}`
     const root = readFileSync(new URL('index.js', directory), 'utf8').replace(
       "from './planner.js'",
