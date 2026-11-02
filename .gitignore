@@ -1,5 +1,5 @@
 # Bootstrap scripts folder
-.DS_store
+.DS_Store
 .bootstrap
 
 # npm
@@ -18,5 +18,9 @@ node_modules
 #coverage
 /coverage/
 
-# Local plans and execution journals
+# Local agent work, plans and reports
+/.agents/
+/.explain/
 /.plans/
+/.reports/
+/.vscode/
