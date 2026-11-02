@@ -4,7 +4,9 @@ All notable changes to this project will be documented in this file. Dates are d
 
 Исторические записи созданы [`auto-changelog`](https://github.com/CookPete/auto-changelog); описание major-перехода подготовлено вручную.
 
-#### 4.0.0 — кандидат, не опубликован
+#### [4.0.0](https://github.com/wmakeev/moysklad-fetch-planner/releases/tag/v4.0.0)
+
+> 2 November 2026
 
 Новый контракт законченной HTTP-операции несовместим с API 3.x. Перед обновлением потребителя прочитайте [руководство миграции](https://github.com/wmakeev/moysklad-fetch-planner/blob/master/docs/migration.md).
 

@@ -20,12 +20,12 @@
 
 ## Статус поставки и установка
 
-Ветка содержит новый major API `submit → handle`. Подготовлен кандидат 4.0.0; он ещё не опубликован, а npm badge относится к опубликованному старому API. Установка `moysklad-fetch-planner@latest` сейчас не гарантирует наличие описанного здесь интерфейса.
+Опубликована версия 4.0.0 с новым major API `submit → handle`. Для воспроизводимой интеграции устанавливайте точную версию и используйте документацию её tag; переход с 3.x требует [миграции](https://github.com/wmakeev/moysklad-fetch-planner/blob/v4.0.0/docs/migration.md).
 
-До выхода нового релиза используйте проверенный tarball нужного commit; как установить происхождение артефакта, описано в [руководстве агента](https://github.com/wmakeev/moysklad-fetch-planner/blob/master/docs/agent-guide.md). Из каталога с таким файлом:
+Установка из npm:
 
 ```sh
-npm install ./package.tgz
+npm install moysklad-fetch-planner@4.0.0
 ```
 
 Runtime Undici не является зависимостью библиотеки. Для явного transport `undici.fetch` потребитель отдельно устанавливает совместимую версию Undici; проверенный runtime — Undici 7.30.1; совместимость старой типовой family сохраняется через `undici-types@7.3.0` без установки старого runtime. Для native fetch собственный dispatcher должен быть совместим с Undici внутри выбранного Node.
