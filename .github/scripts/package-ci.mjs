@@ -32,6 +32,7 @@ const marker = path.join(owned, '.owner')
 const nonce = randomUUID()
 await writeFile(marker, nonce, { flag: 'wx' })
 try {
+  /** @type {NodeJS.ProcessEnv} */
   const env = { ...process.env, TMPDIR: owned, TMP: owned, TEMP: owned, NODE_PATH: '' }
   const state = path.join(
     owned,
@@ -68,6 +69,9 @@ try {
     )
   }
   console.log(`CI package preparation: ${owned}`)
+  // setup-node pins Node, but the runner image may provide a different npm.
+  await install('npm', ['npm@11.13.0'])
+  env.PATH = `${path.join(tooling, 'npm/node_modules/.bin')}${path.delimiter}${env.PATH ?? ''}`
   await install('bare', compilers)
   await install('undici', [...compilers, 'undici@7.3.0'])
   for (const version of ['24.0.0', '24.22.2', '26.13.0']) {

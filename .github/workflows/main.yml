@@ -24,6 +24,13 @@ jobs:
         with:
           run_install: false
       - run: pnpm install --frozen-lockfile
+      - name: Prepare the exact compiler required by the existing test harness
+        run: |
+          compiler="$PWD/node_modules/.pnpm/typescript@5.7.3"
+          mkdir -p "$compiler"
+          printf '{"private":true}\n' > "$compiler/package.json"
+          npm install --prefix "$compiler" --ignore-scripts --no-audit --no-fund --package-lock=false --save-exact typescript@5.7.3
+          node "$compiler/node_modules/typescript/bin/tsc" --version
       - run: pnpm check
       - run: pnpm coverage
 
@@ -44,6 +51,13 @@ jobs:
         with:
           run_install: false
       - run: pnpm install --frozen-lockfile
+      - name: Prepare the exact compiler required by the existing test harness
+        run: |
+          compiler="$PWD/node_modules/.pnpm/typescript@5.7.3"
+          mkdir -p "$compiler"
+          printf '{"private":true}\n' > "$compiler/package.json"
+          npm install --prefix "$compiler" --ignore-scripts --no-audit --no-fund --package-lock=false --save-exact typescript@5.7.3
+          node "$compiler/node_modules/typescript/bin/tsc" --version
       - run: pnpm test
 
   package:
