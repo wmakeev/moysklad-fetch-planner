@@ -57,6 +57,12 @@ node .github/scripts/package-ci.mjs
 node test/operation/run.mjs http-integration
 ```
 
+## Security overrides инструментов
+
+В pnpm-workspace.yaml временно переопределены только связи external-editor3.1.0 → tmp0.2.7, test-exclude8.0.0 → glob14.0.2/minimatch11.0.1 и ignore-walk8.0.0 → minimatch11.0.1: последние родительские ranges ещё не включают security fixes. Это выход за их заявленные semver ranges, долг [ROOT, DEVIATE]. Удалять override после обновления parent ranges и повторной проверки audit/совместимости; не расширять его на все версии пакета.
+
+`node scripts/check-tooling.mjs` входит в pnpm check и проверяет фактические parent APIs на собственных временных fixtures: sync/async coverage glob, ignore rules, создание/удаление editor temp file без запуска редактора, YAML и auto-changelog template без version/release commands. После изменения coverage dependencies дополнительно нужен полный pnpm coverage с прежними порогами. Не подменять эти проверки одним отсутствием advisories и не запускать np/version/release ради smoke.
+
 ## Выполнить package gate
 
 В чистом клоне не вызывайте один `pnpm test:package` без подготовки: он требует fresh внешние state/work/tooling/cache. Штатная обёртка выше создаёт новый owned TMPDIR, устанавливает npm11.13.0, отдельные bare/undici leaves с TS5.7.3/TS7.0.2 и Node24.0.0/24.22.2/26.13.0, затем вызывает неизменённый полный test:package и удаляет свои ресурсы.
