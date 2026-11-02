@@ -292,7 +292,7 @@ for (const family of ['native/root', 'undici/deep'] as const) {
                   const response = await transport('fixture')
                   return new UndiciResponse(response.body, {
                     status: response.status,
-                    headers: response.headers
+                    headers: [...response.headers]
                   })
                 },
                 { maxParallelLimit: 4, ...(status === 429 ? { errorPerMinuteLimit: 1000 } : {}) }

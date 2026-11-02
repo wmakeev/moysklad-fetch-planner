@@ -1,4 +1,4 @@
-import { fetch } from 'undici'
+import { fetch } from 'undici-types'
 import type { Init, Descriptor, Spec, Snapshot, PlannerSnapshot, Event, ResourceSummary, Completed } from '../../src/operation-types.js'
 import type { HookContext, Decision } from './contract.js'
 import { OperationPlanner } from './contract.js'

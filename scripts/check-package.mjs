@@ -231,7 +231,7 @@ async function fixtureTypes() {
     /** @type {{version: string}} */ (require('@types/node/package.json')).version,
     '24.19.2'
   )
-  assert.equal(/** @type {{version: string}} */ (require('undici/package.json')).version, '7.3.0')
+  assert.equal(/** @type {{version: string}} */ (require('undici/package.json')).version, '7.30.1')
   assert.equal(
     /** @type {{version: string}} */ (require('undici-types/package.json')).version,
     '7.3.0'
@@ -535,7 +535,8 @@ async function prerequisites(statePath) {
       ['ts5', '5.7.3'],
       ['ts7', '7.0.2'],
       ['@types/node', '24.19.2'],
-      ['undici-types', '7.3.0']
+      ['undici-types', '7.3.0'],
+      ['undici-types-modern', '7.30.1']
     ]) {
       assert.ok(name && version)
       await packageVersion(directory, name, version)
@@ -552,7 +553,7 @@ async function prerequisites(statePath) {
   }
   const require = createRequire(path.join(tools.bare, 'package.json'))
   assert.throws(() => require.resolve('undici'), { code: 'MODULE_NOT_FOUND' })
-  await packageVersion(tools.undici, 'undici', '7.3.0')
+  await packageVersion(tools.undici, 'undici', '7.30.1')
   for (const { binary, version } of tools.nodes) {
     assert.equal(await realpath(binary), binary, 'Node binary must be canonical')
     await packageVersion(
@@ -571,7 +572,8 @@ async function readiness(statePath) {
   await prerequisites(statePath)
   assert.equal(manifest.scripts.prepack, 'pnpm run build')
   assert.equal(manifest.dependencies['undici-types'], '7.3.0')
-  assert.equal(manifest.devDependencies.undici, '7.3.0')
+  assert.equal(manifest.dependencies['undici-types-modern'], 'npm:undici-types@7.30.1')
+  assert.equal(manifest.devDependencies.undici, '7.30.1')
   assert.ok(!Object.hasOwn(manifest, 'exports'))
   // mkdir without recursive rejects pre-existing/foreign workspaces and repeated readiness.
   const workspace = `${statePath}.work`
@@ -774,10 +776,20 @@ async function consumer(state, family, work) {
       libraryRequire.resolve('undici-types/package.json').startsWith(`${directory}/node_modules/`),
       'Library closure escaped consumer'
     )
+    assert.equal(
+      /** @type {{version: string}} */ (libraryRequire('undici-types-modern/package.json')).version,
+      '7.30.1'
+    )
+    assert.ok(
+      libraryRequire
+        .resolve('undici-types-modern/package.json')
+        .startsWith(`${directory}/node_modules/`),
+      'Modern declaration closure escaped consumer'
+    )
     if (family === 'undici') {
       assert.equal(
         /** @type {{version: string}} */ (require('undici/package.json')).version,
-        '7.3.0'
+        '7.30.1'
       )
     } else {
       assert.throws(() => require.resolve('undici'), { code: 'MODULE_NOT_FOUND' })

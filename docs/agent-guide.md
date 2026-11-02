@@ -24,7 +24,7 @@ npm install "$ARTIFACT_DIR/package.tgz"
 
 ## Выбрать транспорт и область coordination
 
-- Для native используйте конкретный `typeof globalThis.fetch`; для Undici7.3 — конкретный `typeof fetch` этой версии. Не объединяйте их в union и не исправляйте body/response typing приведениями.
+- Для native используйте конкретный `typeof globalThis.fetch`; для Undici — конкретный `typeof fetch` установленной версии (проверен runtime7.30.1; legacy declarations7.3 поддерживаются без старого runtime). Не объединяйте их в union и не исправляйте body/response typing приведениями.
 - Один общий instance должен видеть операции одной выбранной области coordination. Несколько instances или процессов не образуют account-wide лимитер.
 - Убедитесь, что transport не делает скрытых повторов. `dispatchCalls` считает входы в F; redirects и внутренние wire tries не становятся отдельными planner attempts.
 - Собственный native dispatcher должен быть совместим с Undici внутри Node. Тестовые Agent7/Agent8 не являются production-адаптером библиотеки. Undici8 добавлен только для native test fixture; это не новая публичная Undici8 transport family.

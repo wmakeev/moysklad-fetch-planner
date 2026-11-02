@@ -61,7 +61,7 @@ node test/operation/run.mjs http-integration
 
 В чистом клоне не вызывайте один `pnpm test:package` без подготовки: он требует fresh внешние state/work/tooling/cache. Штатная обёртка выше создаёт новый owned TMPDIR, устанавливает npm11.13.0, отдельные bare/undici leaves с TS5.7.3/TS7.0.2 и Node24.0.0/24.22.2/26.13.0, затем вызывает неизменённый полный test:package и удаляет свои ресурсы.
 
-Она проверяет четыре cold/stale pack cases, четыре compiler/family slices, runtime profiles и finish по одному frozen artifact. Bare consumer не получает runtime Undici; Undici family использует7.3.0. Wrapper не публикует npm-пакет, но требует сетевого чтения registry, GNU tar и прав создать/удалить свой scratch. Ошибка setup не является отказом product assertion; сохраняйте исходный error и лог.
+Она проверяет четыре cold/stale pack cases, четыре compiler/family slices, runtime profiles и finish по одному frozen artifact. Bare consumer не получает runtime Undici; Runtime Undici family использует7.30.1; Legacy declaration fixtures используют `undici-types@7.3.0`, а `undici-types-modern` (alias7.30.1) позволяет принимать исправленный transport. Оба пакета деклараций устанавливаются также в bare consumer без runtime Undici. Негативный oracle отсутствия bytes относится к legacy declarations; positive runtime fixture отдельно проверяет bytes актуального transport. Wrapper не публикует npm-пакет, но требует сетевого чтения registry, GNU tar и прав создать/удалить свой scratch. Ошибка setup не является отказом product assertion; сохраняйте исходный error и лог.
 
 Для отдельного локального кандидата `pnpm pack` выполняет prepack/build. Один успешный pack не равен package acceptance. Порядок получения проверенного Actions artifact — [руководство агента](agent-guide.md); условия финального релизного кандидата — [выпуск](releasing.md).
 
@@ -75,7 +75,7 @@ node test/operation/run.mjs http-integration
 | artifact | Одна сборка package и runtime fixture с SHA256SUMS |
 | runtime, Node24.0.0/24.x/26.x | Тот же artifact без development dependencies, root/deep smoke |
 
-Точные команды и action refs — [.github/workflows/main.yml](../.github/workflows/main.yml). TS5.7/TS7 и native/Undici families — разные оси. Dev alias undici8@8.12.2 нужен только matching native dispatcher в Node26 tests; explicit Undici7.3 family сохраняется. Не заменяйте transport cast-ом, не отключайте assert ради green и не повышайте budgets без доказанного основания.
+Точные команды и action refs — [.github/workflows/main.yml](../.github/workflows/main.yml). TS5.7/TS7 и native/Undici families — разные оси. Dev alias undici8@8.12.2 нужен только matching native dispatcher в Node26 tests; explicit Undici runtime проверяется на7.30.1, baseline типов7.3 сохраняется без уязвимого runtime. Не заменяйте transport cast-ом, не отключайте assert ради green и не повышайте budgets без доказанного основания.
 
 ## Границы безопасного запуска
 

@@ -35,7 +35,7 @@ const fixtures = [
   { name: 'manual-redirect', status: 302, payload: html, format: 'text' }
 ] as const
 
-type Family = 'native/root' | 'undici7.3/deep'
+type Family = 'native/root' | 'undici7.30.1/deep'
 type Body = string | ReadableStream<Uint8Array> | null
 
 class ApplicationFailure extends Error {
@@ -162,7 +162,7 @@ function httpFailure(error: unknown, cause: unknown, status: number) {
   return true
 }
 
-for (const family of ['native/root', 'undici7.3/deep'] as const) {
+for (const family of ['native/root', 'undici7.30.1/deep'] as const) {
   for (const item of fixtures) {
     for (const mode of ['result', 'typed-error'] as const) {
       test(`${family} unread ${item.name} preserves ${mode} and HTTP facts`, async () => {

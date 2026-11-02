@@ -18,6 +18,8 @@ All notable changes to this project will be documented in this file. Dates are d
 - Legacy slot waiters и `errorLimits` заменены bounded admission и локальными receipt/PUT guards. Ограничения относятся к instance, не ко всему аккаунту.
 - Требуется Node ≥24 и ESM. Runtime Undici не устанавливается библиотекой; explicit Undici transport потребитель предоставляет отдельно.
 
+Dev-зависимости Undici и Piscina обновлены до 7.30.1 и 5.3.2 с исправлениями security advisories. Runtime Undici не включён в поставку; legacy type compatibility проверяется отдельно от исправленного transport. Type-only alias `undici-types-modern` добавляет поддержку новых деклараций, сохраняя native и legacy families и запрет union transports.
+
 Также подготовлены самодостаточные инструкции для агентов, справочник API, руководство разработки и порядок проверки релизного кандидата. CI проверяет compiler families TS5.7/TS7, native/Undici7 consumers и runtime-совместимость Node24/26. Успешные offline/loopback проверки не означают проверку на реальном аккаунте или гарантию оптимальной скорости.
 
 #### [v3.2.0](https://github.com/wmakeev/moysklad-fetch-planner/compare/v3.1.0...v3.2.0)

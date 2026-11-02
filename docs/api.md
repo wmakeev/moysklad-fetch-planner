@@ -61,9 +61,9 @@ export async function loadOrders(token: string) {
 
 `FetchPlanner<F>` связывает `Init<F>` и `ResponseOf<F>` с одной конкретной функцией транспорта. `prepare` возвращает `{url: string | URL, init}`; готовый `Request` не принимается. `method` задаётся в spec заглавными буквами: GET, HEAD, POST, PUT, PATCH, DELETE, OPTIONS, TRACE или CONNECT. Для PUT обязателен `entityKey`, для остальных методов он запрещён. `init.method` и `init.signal` запрещены: coordinator добавляет method и свежий signal сам. Поддержка метода типом не означает, что выбранный transport или endpoint его разрешает.
 
-Native body использует native FormData/File/stream; undici — своё семейство. Не объединяйте transports в union и не расширяйте типы body/response приведением. Совместимое расширение одной семьи может вывести собственный `F`; произвольные overloads и callable properties не обещаны. Native `Response.bytes()` и undici 7.3 `Response.arrayBuffer()` различаются.
+Native body использует native FormData/File/stream; undici — своё семейство. Не объединяйте transports в union и не расширяйте типы body/response приведением. Совместимое расширение одной семьи может вывести собственный `F`; произвольные overloads и callable properties не обещаны. Типы legacy Undici 7.3 не содержат `Response.bytes()`; для них используйте `arrayBuffer()`. Исправленный runtime Undici 7.30.1 также поддерживает `bytes()`; вывод конкретного transport сохраняет его расширения.
 
-Deep import того же класса с явно выбранным undici 7.3:
+Deep import того же класса с явно выбранным Undici 7.30.1:
 
 ```ts
 import { fetch, FormData } from 'undici'
@@ -91,7 +91,7 @@ export function submitForm(url: URL, field: string): Handle<number> {
 }
 ```
 
-Это пример transport typing, не рецепт формы JSON API. Приложение обрабатывает `result` и `resourcesDone` возвращённого handle, как в первом примере. Runtime undici устанавливает использующий его потребитель; сама библиотека зависит только от `undici-types@7.3.0` для деклараций. Root import — `moysklad-fetch-planner`, deep — `moysklad-fetch-planner/build/src/planner.js`; исходные `.ts` не являются runtime entrypoint.
+Это пример transport typing, не рецепт формы JSON API. Приложение обрабатывает `result` и `resourcesDone` возвращённого handle, как в первом примере. Runtime undici устанавливает использующий его потребитель; библиотека зависит от type-only пакетов `undici-types@7.3.0` и `undici-types-modern` (alias `undici-types@7.30.1`) для legacy и исправленной modern family. Root import — `moysklad-fetch-planner`, deep — `moysklad-fetch-planner/build/src/planner.js`; исходные `.ts` не являются runtime entrypoint.
 
 ## Результат и владение ресурсами
 

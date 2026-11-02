@@ -48,10 +48,17 @@ export function undiciConsumer() {
     }),
     consume: response => response.arrayBuffer()
   })
+  // The patched runtime extends the legacy declaration family with bytes().
+  const modernBytes: Handle<Uint8Array> = planner.submit({
+    method: 'GET',
+    replay: { serverSafe: false, consumeSafe: false },
+    prepare: () => ({ url: 'https://local.invalid/', init: {} }),
+    consume: response => response.bytes()
+  })
   const typed: Handle<ArrayBuffer> = form
   const result: Promise<Completed<ArrayBuffer>> = typed.result
   const bytes: Promise<ArrayBuffer> = result.then(completed => completed.value)
-  return { planner, form, file, stream, bytes, resources: typed.resourcesDone }
+  return { planner, form, file, stream, bytes, modernBytes, resources: typed.resourcesDone }
 }
 
 type Equal<A, B> =

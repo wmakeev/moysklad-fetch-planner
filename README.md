@@ -28,7 +28,7 @@
 npm install ./package.tgz
 ```
 
-Runtime Undici не является зависимостью библиотеки. Для явного transport `undici.fetch` потребитель отдельно устанавливает совместимую версию Undici; проверенная типовая family — Undici 7.3. Для native fetch собственный dispatcher должен быть совместим с Undici внутри выбранного Node.
+Runtime Undici не является зависимостью библиотеки. Для явного transport `undici.fetch` потребитель отдельно устанавливает совместимую версию Undici; проверенный runtime — Undici 7.30.1; совместимость старой типовой family сохраняется через `undici-types@7.3.0` без установки старого runtime. Для native fetch собственный dispatcher должен быть совместим с Undici внутри выбранного Node.
 
 ## Минимальный пример без сети
 

@@ -682,13 +682,28 @@ for (const [entry, Planner] of [
         })
         const response = new ResponseClass(body, { status: 206 })
         let reader: ReadableStreamDefaultReader<Uint8Array> | undefined
-        const planner = new Planner<typeof UndiciFetch>(
-          () => {
-            sends++
-            return Promise.resolve(sends === 1 ? response : new ResponseClass())
-          },
-          { maxParallelLimit: 1 }
-        )
+        const nextResponse = () => {
+          sends++
+          return sends === 1 ? response : new ResponseClass()
+        }
+        const planner =
+          family === 'native'
+            ? new Planner<typeof globalThis.fetch>(
+                () => {
+                  const value = nextResponse()
+                  assert.ok(value instanceof Response)
+                  return Promise.resolve(value)
+                },
+                { maxParallelLimit: 1 }
+              )
+            : new Planner<typeof UndiciFetch>(
+                () => {
+                  const value = nextResponse()
+                  assert.ok(value instanceof UndiciResponse)
+                  return Promise.resolve(value)
+                },
+                { maxParallelLimit: 1 }
+              )
         const handle = planner.submit({
           method: 'POST',
           replay,
