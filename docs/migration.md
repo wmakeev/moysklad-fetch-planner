@@ -1,6 +1,6 @@
 # Миграция на submit и handle
 
-Новый API меняет владение HTTP и требует major-перехода для Node ≥24/ESM. Сначала установите точную поставку по [руководству агента](agent-guide.md); опубликованная старая npm-версия пока не соответствует этому интерфейсу. Общий контракт хранится в [API](api.md), а не дублируется здесь.
+Контракт4.1.0 сохраняет submit → handle из4.0.0 и добавляет opt-in HTTP retry и поддержку Undici8.11.2/8.12.2. Переход с3.x требует major-миграции ниже. Сначала выберите точную поставку по [руководству агента](agent-guide.md); условия retry хранятся в [API](api.md#явный-http-retry). Исторический tag v4.0.0 не меняется.
 
 ## Что заменить
 
@@ -95,3 +95,5 @@ export function sendForm(url: URL, value: string): Handle<number> {
 5. Проверьте typed consumers и локальные success/error/retry/cancellation/cleanup сценарии. Не проверяйте миграцию live-записями или запуском samples/stress.
 
 Для готовых условий retry, non429 ошибок, Promise boundary, budgets и shutdown используйте [API](api.md) и [интеграцию](integration-guide.md). Проверки самой библиотеки описаны в [разработке](development.md).
+
+Конечные рецепты [окон, ошибок коллекции и остановки](integration-guide.md#11-конечные-рецепты-приложения) используют существующий API. HTTP retry включается явно по [API](api.md#явный-http-retry); per-spec attemptTimeout и дополнительные diagnostics не добавлены; полной миграции SDK эти рецепты не обещают.

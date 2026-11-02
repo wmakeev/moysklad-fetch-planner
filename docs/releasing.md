@@ -1,10 +1,10 @@
 # Подготовка выпуска
 
-Новый `submit → handle` API требует major-перехода. Версия4.0.0 опубликована; для следующего кандидата проверяйте точную identity заново и не подменяйте её старым npm latest. Version/changelog, tag, push и публикация — отдельные действия, каждое выполняется в согласованном объёме.
+Контракт4.1.0 — additive minor к submit → handle из4.0.0: opt-in HTTP retry и поддержка Undici8.11.2/8.12.2. Исторический tag v4.0.0 не переписывается. Подготовленный manifest не подтверждает публикацию: registry, точный release commit и результаты проверяются отдельно. Version/changelog, tag, push и публикация выполняются только в согласованном объёме.
 
 ## Проверить содержание кандидата
 
-1. Согласовать номер major-версии. Описать breaking changes понятными потребителю пунктами и дать ссылку на [миграцию](migration.md); автосписок commit titles этого не заменяет.
+1. Проверить доступность номера4.1.0 в registry перед выпуском. Описать additive изменения и сохранённые гарантии в changelog; переход с3.x описан в [миграции](migration.md). Автосписок commit titles этого не заменяет.
 2. Сверить README, [API](api.md), [AGENTS.md](../AGENTS.md) и [разработку](development.md) с source и actual scripts. Публичные документы не должны зависеть от локальных планов/передач. Проверить все локальные ссылки и доступность ссылок README из npm.
 3. Зафиксировать ровно предназначенный release commit. После изменения manifest/README/build inputs заново получить нужные package checks; не выдавать старый tarball за новый кандидат.
 4. Получить successful Actions для этого commit. Проверить head_sha, conclusion всех jobs и происхождение runtime-package artifact; сверить SHA256SUMS и состав архива. Полный package job и runtime smoke artifact — разные подтверждения, оба должны относиться к кандидату.

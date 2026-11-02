@@ -1,5 +1,5 @@
 import type { CallbackLifetime } from './callback-context.js'
-import { ConsumeReadFailure, type FailureCode } from './operation-types.js'
+import { ConsumeHttpFailure, ConsumeReadFailure, type FailureCode } from './operation-types.js'
 import { absoluteDeadline } from './runtime.js'
 
 /** Internal facts, materialized by the coordinator, never inferred from an Error's shape. */
@@ -10,7 +10,7 @@ export interface RetryFailure {
   readonly consumeLifetime?: CallbackLifetime
 }
 
-export type RetryCandidate = 'rate-limit' | 'transport' | 'consume-read'
+export type RetryCandidate = 'rate-limit' | 'transport' | 'consume-read' | 'consume-http'
 
 /**
  * Capture inside the exact active consume rejection/assimilation lifetime. The caller
@@ -24,6 +24,13 @@ export function retryCandidate(
   if (!replay.serverSafe || !replay.consumeSafe) return undefined
   if (failure.code === 'HTTP_FAILED' && failure.status === 429) return 'rate-limit'
   if (failure.code === 'TRANSPORT_FAILED' && failure.status === undefined) return 'transport'
+  if (
+    failure.code === 'CONSUME_FAILED' &&
+    [500, 502, 503, 504].includes(failure.status ?? 0) &&
+    failure.consumeLifetime?.active === true &&
+    ConsumeHttpFailure.original(failure.cause, failure.consumeLifetime) !== undefined
+  )
+    return 'consume-http'
   if (
     failure.code === 'CONSUME_FAILED' &&
     failure.status !== undefined &&
@@ -97,7 +104,11 @@ export function retryDecision(facts: RetryBudget): RetryDecision {
       ? Math.ceil(
           Math.min(30_000, 3000 * 2 ** Math.min(4, facts.rateLimitOrdinal - 1)) * facts.jitterFactor
         )
-      : 1
+      : facts.candidate === 'consume-http'
+        ? Math.ceil(
+            Math.min(30_000, 1000 * 2 ** Math.min(5, facts.attempts - 1)) * facts.jitterFactor
+          )
+        : 1
   const fallbackNotBefore = absoluteDeadline(facts.now, fallback)
   if (fallbackNotBefore === undefined) return { kind: 'terminal', reason: 'budget' }
   const notBefore = Math.max(fallbackNotBefore, facts.adaptiveNotBefore, facts.serverNotBefore)

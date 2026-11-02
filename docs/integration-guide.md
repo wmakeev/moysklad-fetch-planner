@@ -1,6 +1,6 @@
 # Интеграция и эксплуатационная проверка
 
-Руководство для агента, подключающего библиотеку к системе массового обмена с МойСклад. Короткий маршрут — [руководство агента](agent-guide.md), условия API — [справочник](api.md). Здесь выбирают необходимые прикладные проверки, наблюдение и действия при отказах; сам collector/exporter или эксплуатационный эксперимент библиотека не предоставляет.
+Руководство для агента, подключающего библиотеку к системе массового обмена с МойСклад. Короткий маршрут — [руководство агента](agent-guide.md), контракт4.1.0 — [API](api.md). Opt-in HTTP retry и Undici8 не относятся к исторической4.0.0. Здесь выбирают прикладные проверки, наблюдение и действия при отказах; collector/exporter и эксплуатационный эксперимент библиотека не предоставляет.
 
 ## 1. Установить исходный контракт
 
@@ -32,7 +32,7 @@
 2. В spec задавать method и обе replay flags явно. Значение true подкреплять свойством бизнесоперации и прикладной обработки, а не одним GET/POST или фактом получения429. Для PUT определить единое соглашение entityKey в пределах экземпляра; не включать секреты или сырой URL.
 3. Каждый prepare создаёт fresh init/body с тем же логическим содержимым. Method/signal принадлежат coordinator, готовый Request не подставляется. Выбрать одну transport family; отключить или явно исключить скрытые transport retries. Redirects и входы в fetch не считать точным числом wire sends.
 4. Ресурс регистрировать через onDispose сразу после acquisition до следующего await. Код приобретения сам отвечает за частичный acquisition до регистрации. Для upload нужен работающий stop-and-wait disposer: остановить источник, затем дождаться известных чтений/pull/handles. Один abort или ранний Response этого не доказывает.
-5. Consume полностью await-ит чтение и свою работу, возвращает законченный T. Не отдавать наружу живой Response/reader/stream и не прятать detached работу за успешным возвратом. Non429 HTTP-ответы, бизнесошибки и mixed bulk разбирает приложение. Помечать retryableReadFailure только для известной ошибки чтения в её действующем consume lifetime, а не для любой ошибки parser/БД.
+5. Consume полностью await-ит чтение и свою работу, возвращает законченный T. Не отдавать наружу живой Response/reader/stream и не прятать detached работу за успешным возвратом. Non429 HTTP-ответы, бизнесошибки и mixed bulk разбирает приложение. Помечать retryableReadFailure только для известной ошибки чтения в её действующем consume lifetime, а не для любой ошибки parser/БД. HTTP retry разрешать только через [retryableHttpFailure](api.md#явный-http-retry) после parsing и исключения partial success; обычный throw остаётся terminal. Generic catch→marker запрещён.
 6. Временные результаты регистрировать через onDiscard. Публикацию, rename, сообщение или прикладной commit выполнять после принятого result. Отмена до resultCommitted должна привести к discard, после него успех уже сохраняется даже при cleanup pending/failed.
 7. Учитывать каждый возвращённый handle, включая id=0: нематериализованный отказ submit приходит через result, не создаёт индивидуальных events и не занимает sequence. Сразу присоединять обработку обеих ветвей result и отслеживать resourcesDone. Не создавать необработанную производную Promise-цепочку своим logger/exporter. id=0 не использовать как уникальный ключ операции.
 8. При внешнем AbortSignal самостоятельно связать его с handle.abort: учесть уже отменённый signal, установить listener и проверить отсутствие пропущенной отмены до продолжения работы. Снять внешний listener после окончания нужного периода наблюдения. Не передавать этот signal через init, не выдумывать signal option в submit. Запоздалую отмену и result race обрабатывать по сохранённому исходу handle.
@@ -139,3 +139,191 @@ Guard ограничивает новые dispatch после своего ре�
 Основания для изменений различаются: ошибка owner требует исправления интеграции; неподходящий бюджет — обоснованной настройки; повторяемая ошибка использования — улучшения документации или адаптера; воспроизводимое ограничение границы — отдельного архитектурного решения. Редко используемую возможность нельзя удалять только из-за отсутствия incidents; сначала проверить, какую принятую гарантию она обеспечивает.
 
 Руководство можно применять выборочно: для первого потребителя достаточно карточки, минимальной telemetry и сценариев реально используемых операций. Остальные проверки добавляются при соответствующих рисках. Это ограничивает стоимость интеграции без ослабления заявленных библиотекой гарантий [PARETO, VERIFY].
+
+
+## 11. Конечные рецепты приложения
+
+Эти примеры используют public API, native fetch и локальный демонстрационный формат. Они сверяются с [test-only рецептами](../test/operation/consumer-recipes.ts) и [finite tests](../test/operation/consumer-recipes.test.ts), не являются новыми exports библиотеки или полной миграцией SDK/CLI. Гарантии transport и compiler ограничения находятся в [API](api.md#типы-method-и-transport-family).
+
+### Окно готовых пачек
+
+Приложение заранее ограничивает waiting keys, размер и число готовых пачек в памяти, URL, body и timeout формирования. Ниже jobs — конечный ограниченный список готовых specs, width — положительный размер окна. Это не batcher: size/URL/timeout flush, снятие batch timers при stop и отказ ещё ожидающим ключам остаются приложению. Альтернатива со slot waiters добавила бы второй механизм admission без гарантированного permit; здесь достаточно окна [ALT, SURFACE].
+
+publish, taskFailure и resourceReport — короткие синхронные обработчики без throw; они сохраняют результаты/ошибки в ограниченном внешнем хранилище или агрегатах. Свою асинхронную публикацию приложение учитывает отдельно. Не накапливайте value/cause в telemetry. Вызывайте track ровно один раз для каждого handle, сразу после submit; windows делает это сама. Одно окно хранит не более width handles; следующее начинается после обоих lifecycle. result публикуется немедленно, в том числе при pending cleanup. Нет resubmit при QUEUE_FULL; observe не выдаёт permit.
+
+```ts
+import {
+  OperationError,
+  type Completed,
+  type Handle,
+  type Init,
+  type Planner,
+  type ResourceSummary,
+  type Spec
+} from 'moysklad-fetch-planner'
+
+export function finiteRun<T>(
+  planner: Planner<Init<typeof fetch>, Response>,
+  publish: (value: T) => void,
+  taskFailure: (error: unknown) => void,
+  resourceReport: (resources: ResourceSummary['resources']) => void
+) {
+  let stopped = false
+  const active = new Map<Handle<T>, { result: boolean; resources: boolean }>()
+  function softStop() {
+    stopped = true
+    planner.stop()
+  }
+  function track(handle: Handle<T>) {
+    const state = { result: false, resources: false }
+    active.set(handle, state) // Identity matters: several rejected handles can have id=0.
+    const forget = () => {
+      if (state.result && state.resources) active.delete(handle)
+    }
+    const result = handle.result
+      .then(
+        (completed: Completed<T>) => {
+          publish(completed.value)
+        },
+        (error: unknown) => {
+          if (
+            error instanceof OperationError &&
+            ['GUARD_OPEN', 'STOPPED', 'QUEUE_FULL'].includes(error.code)
+          )
+            softStop()
+          taskFailure(error)
+        }
+      )
+      .finally(() => {
+        state.result = true
+        forget()
+      })
+    const resources = handle.resourcesDone.then(summary => {
+      resourceReport(summary.resources)
+      state.resources = true
+      forget()
+    })
+    return Promise.all([result, resources])
+  }
+  return {
+    track,
+    softStop,
+    forceAbort() {
+      softStop()
+      for (const handle of active.keys()) handle.abort()
+    },
+    async windows(jobs: readonly Spec<Init<typeof fetch>, Response, T>[], width: number) {
+      if (!Number.isSafeInteger(width) || width < 1) throw new Error('Invalid window')
+      let next = 0
+      while (!stopped && next < jobs.length) {
+        const window: Promise<unknown>[] = []
+        while (window.length < width && next < jobs.length) {
+          const job = jobs[next++]
+          if (job) window.push(track(planner.submit(job)))
+        }
+        await Promise.all(window) // Results publish early; next window waits for resources.
+      }
+      return next // Caller owns jobs[next..] as remaining work.
+    },
+    async finalize(waitMs: number) {
+      if (!Number.isSafeInteger(waitMs) || waitMs < 1) throw new Error('Invalid wait')
+      let timer: ReturnType<typeof setTimeout> | undefined
+      try {
+        await Promise.race([
+          Promise.all([...active.keys()].map(handle => handle.resourcesDone)),
+          new Promise<void>(resolve => {
+            timer = setTimeout(resolve, waitMs)
+          })
+        ])
+        return [...active.keys()].map(handle => handle.snapshot())
+      } finally {
+        clearTimeout(timer)
+      }
+    }
+  }
+}
+```
+
+Число next, возвращённое windows, отделяет невыданный остаток jobs[next..]; уже выданные неуспехи учитывает taskFailure. При зависших ресурсах windows остаётся pending: host отдельно запускает bounded finalizer ниже. После resourcesDone запись удаляется по identity handle; одинаковые id=0 не сталкиваются. resourceReport сохраняет released/failed/unknown отдельно; отсутствие записи в active не означает released. Внешний sink ограничивает собственную retention.
+
+### Consume и известный cause
+
+Демонстрационная коллекция содержит строки {value: string} либо {error: string}. Успех возвращает значения с исходными индексами; mixed ответ бросает локальный CollectionFailure с errors и partial. HTTP body дочитывается до проверки HTTP/JSON. Настоящий parser, схема, SDK errorsIndexes и mapping через публичные exports SDK принадлежат приложению: этот пример не копирует SDK или его private imports.
+
+```ts
+import { OperationError } from 'moysklad-fetch-planner'
+
+export class CollectionFailure extends Error {
+  constructor(
+    readonly errors: readonly { index: number; message: string }[],
+    readonly partial: readonly { index: number; value: string }[]
+  ) {
+    super('Collection failure')
+  }
+}
+
+export async function consumeCollection(response: Response) {
+  const text = await response.text() // Complete body, including HTTP error responses.
+  if (!response.ok) throw new Error(`HTTP ${response.status}`)
+  const rows: unknown = JSON.parse(text)
+  if (!Array.isArray(rows)) throw new Error('Invalid collection')
+  const partial: { index: number; value: string }[] = []
+  const errors: { index: number; message: string }[] = []
+  rows.forEach((row: unknown, index) => {
+    if (typeof row !== 'object' || row === null) throw new Error('Invalid row')
+    if ('value' in row && typeof row.value === 'string') partial.push({ index, value: row.value })
+    else if ('error' in row && typeof row.error === 'string')
+      errors.push({ index, message: row.error })
+    else throw new Error('Invalid row')
+  })
+  if (errors.length) throw new CollectionFailure(errors, partial)
+  return partial
+}
+
+export function normalizeCollection(error: unknown) {
+  return error instanceof OperationError &&
+    error.code === 'CONSUME_FAILED' &&
+    error.cause instanceof CollectionFailure
+    ? error.cause
+    : error
+}
+```
+
+Подставьте consumeCollection как consume соответствующего spec. На границе result вызывайте normalizeCollection(error), сохраняя исходный OperationError рядом для cancellation/serverOutcome facts. Только CONSUME_FAILED с известным классом cause становится ошибкой коллекции; STOPPED/GUARD_OPEN/DEADLINE/QUEUE_FULL, неизвестный cause и неизвестный исход отправленной записи остаются task failure. Partial из бизнесответа сохраняют отдельно от подтверждённого task success. Обычный throw HTTP/JSON/parser errors не становится retry candidate; cause не отправляют в observation.
+
+### Мягкая остановка и bounded finalizer
+
+Первый сигнал прекращает producer и вызывает planner.stop через softStop. Уже sent POST продолжает текущую attempt с прежними attemptTimeoutMs/deadlineMs; успешная запись не гарантирована. Второй сигнал вызывает forceAbort для учитываемых handles. Этот адаптер принимает AbortSignal приложения, не устанавливает process handlers и возвращает снятие listeners; уже отменённые signals проверяются после подписки.
+
+```ts
+export function bindStop(
+  run: { softStop(): void; forceAbort(): void },
+  soft: AbortSignal,
+  force: AbortSignal
+) {
+  const stop = () => {
+    run.softStop()
+  }
+  const abort = () => {
+    run.forceAbort()
+  }
+  soft.addEventListener('abort', stop)
+  force.addEventListener('abort', abort)
+  if (soft.aborted) stop()
+  if (force.aborted) abort()
+  return () => {
+    soft.removeEventListener('abort', stop)
+    force.removeEventListener('abort', abort)
+  }
+}
+```
+
+Host подключает bindStop(run, softSignal, forceSignal) до выдачи jobs и снимает listeners в finally. При остановке он вызывает run.softStop(), затем await run.finalize(waitMs); если остался pending, вызывает run.forceAbort() и ещё раз await run.finalize(waitMs). Сохраняет возвращённые scalar snapshots и уже опубликованный partial, затем применяет свою политику завершения host. Не ожидает windows или resourcesDone бесконечно после своего окна. Каждый finalize снимает свой timer в finally. Обработчики result/resourcesDone остаются присоединёнными и учитывают late completion без повторной публикации проигравшего result.
+
+Timeout finalizer оставляет pending; он не освобождает ресурсы и не доказывает rollback. Failed/unknown resources поступают в resourceReport даже после логического результата; неизвестный serverOutcome записи поступает в taskFailure. Committed value сохраняется при cleanup failed/pending. Удаление registry после физического settlement не превращает failed/unknown в released.
+
+### Ожидаемые 404/412 и guard
+
+Успешный consume ожидаемого404/412 всё равно означает HTTP receipt для локального guard. Например, finite tests с явным errorPerMinuteLimit=2 допускают два таких результата, а следующий dispatch получает GUARD_OPEN. Рецепт прекращает producer, сохраняет partial, task failure и невыданный остаток. Это локальная policy instance, не обещание точной vendor policy. Не пересоздавайте planner, не меняйте entityKey и не отключайте guard для обхода; сначала разберите причину, дальнейшее возобновление требует осознанного решения.
+
+В контракте4.1.0 безопасные5xx включаются только явным [HTTP marker](api.md#явный-http-retry); per-spec attemptTimeout и дополнительные diagnostics не добавлены. Эти fake finite рецепты не подтверждают actual Actions, полную package приёмку, live API или миграцию конкретного SDK/CLI.

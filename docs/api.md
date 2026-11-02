@@ -1,6 +1,6 @@
 # Справочник API операций
 
-Контракт публичного `submit → handle` для Node ≥24 и ESM. Начните с [маршрута интеграции для агента](agent-guide.md); устройство реализации находится в [архитектуре](architecture.md). Runtime exports: `FetchPlanner`, `OperationError`; точные type exports перечислены в [src/index.ts](../src/index.ts), определения — в [src/operation-types.ts](../src/operation-types.ts).
+Контракт4.1.0 публичного `submit → handle` для Node ≥24 и ESM. Начните с [маршрута интеграции для агента](agent-guide.md); устройство реализации находится в [архитектуре](architecture.md). Runtime exports: `FetchPlanner`, `OperationError`; точные type exports перечислены в [src/index.ts](../src/index.ts), определения — в [src/operation-types.ts](../src/operation-types.ts).
 
 ## Навигация
 
@@ -59,6 +59,17 @@ export async function loadOrders(token: string) {
 
 ### Типы, method и transport family
 
+Поддержка Undici8 и opt-in HTTP retry входят в контракт4.1.0 и не относятся к исторической4.0.0. Выбор точной поставки и проверка доступности версии — [руководство агента](agent-guide.md).
+
+| Family | Контракт кандидата |
+| --- | --- |
+| Native | Конкретный typeof globalThis.fetch на Node ≥24 |
+| Legacy7.3 | undici-types7.3.0, без Response.bytes; старый runtime не требуется |
+| Modern7 | Runtime Undici7.30.1, включая bytes |
+| Undici8 | Реальные runtime8.11.2 и8.12.2, отдельные type-only declarations8.12.2; bytes/textStream |
+
+Runtime Undici устанавливает приложение; библиотека не поставляет runtime transport. Source/compiler и finite loopback проверки не равны isolated package acceptance или actual Actions. Проверки типов используют TS5.7.3/7.0.2, strict=true и skipLibCheck=false. Дополнительный exactOptionalPropertyTypes=true пока не гарантируется: отдельная проба без библиотеки воспроизводит несовместимость runtime Undici8 и type-only declarations по RequestInit.dispatcher → Dispatcher.compose/DispatcherComposeInterceptor на обоих TS и обеих8.x. Не скрывайте её cast, union или skipLibCheck. Матрица package consumers — [разработка](development.md#выполнить-package-gate).
+
 `FetchPlanner<F>` связывает `Init<F>` и `ResponseOf<F>` с одной конкретной функцией транспорта. `prepare` возвращает `{url: string | URL, init}`; готовый `Request` не принимается. `method` задаётся в spec заглавными буквами: GET, HEAD, POST, PUT, PATCH, DELETE, OPTIONS, TRACE или CONNECT. Для PUT обязателен `entityKey`, для остальных методов он запрещён. `init.method` и `init.signal` запрещены: coordinator добавляет method и свежий signal сам. Поддержка метода типом не означает, что выбранный transport или endpoint его разрешает.
 
 Native body использует native FormData/File/stream; undici — своё семейство. Не объединяйте transports в union и не расширяйте типы body/response приведением. Совместимое расширение одной семьи может вывести собственный `F`; произвольные overloads и callable properties не обещаны. Типы legacy Undici 7.3 не содержат `Response.bytes()`; для них используйте `arrayBuffer()`. Исправленный runtime Undici 7.30.1 также поддерживает `bytes()`; вывод конкретного transport сохраняет его расширения.
@@ -91,7 +102,7 @@ export function submitForm(url: URL, field: string): Handle<number> {
 }
 ```
 
-Это пример transport typing, не рецепт формы JSON API. Приложение обрабатывает `result` и `resourcesDone` возвращённого handle, как в первом примере. Runtime undici устанавливает использующий его потребитель; библиотека зависит от type-only пакетов `undici-types@7.3.0` и `undici-types-modern` (alias `undici-types@7.30.1`) для legacy и исправленной modern family. Root import — `moysklad-fetch-planner`, deep — `moysklad-fetch-planner/build/src/planner.js`; исходные `.ts` не являются runtime entrypoint.
+Это пример transport typing, не рецепт формы JSON API. Приложение обрабатывает `result` и `resourcesDone` возвращённого handle, как в первом примере. Runtime undici устанавливает использующий его потребитель; библиотека зависит от type-only пакетов `undici-types@7.3.0` и `undici-types-modern` (alias `undici-types@7.30.1`) и `undici-types8@npm:undici-types@8.12.2` для соответствующих families. Root import — `moysklad-fetch-planner`, deep — `moysklad-fetch-planner/build/src/planner.js`; исходные `.ts` не являются runtime entrypoint.
 
 ## Результат и владение ресурсами
 
@@ -167,7 +178,66 @@ export function submitBulk(
 
 `replay` обязателен: отсутствие неявного разрешения («default false») выражается явными `{serverSafe:false, consumeSafe:false}`. Для безопасного чтения без внешних эффектов consume можно явно выбрать обе true, как в быстром старте. Метод GET/POST или один HTTP-статус не доказывают безопасность повторного бизнес-действия. Обе flags true необходимы вместе с подходящим failure, известной успешной cleanup и оставшимися budgets.
 
-Кандидаты: перехваченный 429, ошибка отправленного transport до известного HTTP-ответа и явно помеченный в своём активном consume `throw ctx.retryableReadFailure(cause)` при HTTP2xx. Помечайте только установленную ошибку чтения, не schema/JSON/БД error. Non2xx кроме 429 никогда не автоматический retry candidate, даже при обеих flags и такой пометке; 500/503 автоматически не повторяются. Реальный errored response body может дать failed/unknown cleanup и terminal отказ даже при HTTP200 и пометке. Ошибки prepare, timeout, hooks и cleanup не превращаются в transient. Default maxAttempts=3 включает первую подготовку; общий deadline не перезапускается. Повтор встаёт в хвост FIFO.
+Кандидаты: перехваченный429, ошибка отправленного transport до известного HTTP-ответа, явно помеченная ошибка чтения `throw ctx.retryableReadFailure(cause)` при HTTP2xx и opt-in HTTP failure по правилам ниже. Read marker предназначен только для установленной ошибки чтения, не JSON/schema/БД error; на non2xx он не разрешает retry. Реальный errored response body может дать failed/unknown cleanup и terminal отказ даже при HTTP200 и пометке. Ошибки prepare, timeout, hooks и cleanup не превращаются в transient. Повтор встаёт в хвост FIFO.
+
+### Явный HTTP retry
+
+`ConsumeContext.retryableHttpFailure(cause: unknown): Error` создаёт marker в своём активном consume lifetime. Приложение явно бросает его после чтения тела, разбора API/SDK ошибки и проверки, что отказала вся безопасная операция. Coordinator допускает retry только для фактических HTTP500/502/503/504, собственного marker, обеих replay flags и успешной известной cleanup при оставшихся budgets. Статус из cause не читается. Без marker эти статусы по умолчанию строгие: обычный throw завершает операцию без retry, даже при обеих flags=true.
+
+Приложение обязано исключить partial success и недопустимые побочные эффекты до marker: библиотека не анализирует бизнес-исход body. Возвращённый законченный partial value сохраняет обычную семантику результата. Нельзя превращать generic catch parser/business/БД ошибок в HTTP marker. Borrowed/foreign/late/forged marker не разрешает повтор; read marker и HTTP marker не взаимозаменяемы.
+
+Свой marker разворачивается непосредственно в исходную `OperationError.cause` с сохранением identity, независимо от replay flags и подходящего status, включая maxAttempts=1 и исчерпание retries. Публичное поле marker.cause не используется. Foreign marker не разворачивается. При terminal HTTP failure сохраняются code=CONSUME_FAILED, phase=consuming, последний status, serverOutcome=http-response, operationId, attemptNumber и dispatchEntered. Stop/abort/deadline/hook/queue сохраняют собственные terminal причины. После commit cleanup failure/pending сохраняет готовое value и не разрешает replay.
+
+Все категории делят один `maxAttempts` (default3, включая первую preparation) и исходный admission deadline; budgets категорий и новый deadline на retry не создаются. Последовательность429→503→200 может успешно завершиться за3 attempts;503→429→503 заканчивается на третьей попытке с cause последнего503 при тех же условиях safety/cleanup/budgets.
+
+HTTP fallback в мс: `ceil(min(30000, 1000 * 2 ** (completedAttemptNumber - 1)) * factor)`, factor от0.8 до1.2. Номер — завершившаяся attempt всей операции: чистая серия даёт base1с/2с, а429→503 даёт HTTP base2с на втором повторе. Cap применяется до jitter, максимум fallback36с при увеличенном maxAttempts. Sample jitter и исходное now фиксируются один раз после успешной известной cleanup; beforeRetry allow/defer не запускает ожидание заново. Итоговый notBefore — максимум fallback, server/adaptive и hook floors; при notBefore>=deadline повтор запрещён. Политики429, read и transport не меняются.
+
+Пример с локальным демонстрационным классом известной API-ошибки (не тип ошибки МойСклад или конкретного SDK):
+
+```ts
+import { FetchPlanner, OperationError } from 'moysklad-fetch-planner'
+
+class KnownApiFailure extends Error {
+  constructor(readonly status: number, readonly detail: string) {
+    super(`HTTP ${status}: ${detail}`)
+  }
+}
+
+// Только для этого demo-протокола fullRefusal=true доказывает отказ всей операции.
+export function loadSafe(planner: FetchPlanner<typeof globalThis.fetch>, url: URL) {
+  return planner.submit({
+    method: 'GET',
+    replay: { serverSafe: true, consumeSafe: true },
+    prepare: () => ({ url, init: {} }),
+    async consume(response, ctx) {
+      const text = await response.text()
+      const body: unknown = JSON.parse(text) // Parser вне catch→marker.
+      if (!response.ok) {
+        const cause = new KnownApiFailure(response.status, text)
+        if (typeof body === 'object' && body !== null &&
+            'fullRefusal' in body && body.fullRefusal === true &&
+            [500, 502, 503, 504].includes(response.status)) {
+          throw ctx.retryableHttpFailure(cause)
+        }
+        throw cause // Partial/unknown outcome не маркируется.
+      }
+      return body // Прикладная схема и partial outcomes проверяются приложением.
+    }
+  })
+}
+
+export function knownFailure(error: unknown) {
+  if (error instanceof OperationError && error.code === 'CONSUME_FAILED' &&
+      error.cause instanceof KnownApiFailure) {
+    // Сохранить planner facts вместе с известной cause, не потерять diagnostics.
+    return { failure: error.cause, operation: error }
+  }
+  throw error // Неизвестные и planner failures сохраняют прежнюю identity.
+}
+```
+
+Caller обрабатывает result и resourcesDone возвращённого handle. Для настоящего SDK замените demo parser/класс его публичными API и доказательством полного отказа, сохраняя partial results и индексы. Автоматический retry по одному status отнял бы у приложения контроль над body и бизнес-исходом; внешний retry-loop обошёл бы coordinator и общий budget [ALT, ROOT].
+
 
 429 body принадлежит coordinator: JSON-код 1073 разбирается с пределом 65536 принятых байт и 250 мс; поддержан также legacy `X-Lognex-Auth: 429005`. Malformed/nonJSON/oversize/read failure дают generic429 с сохранением status/hints; частичное тело в consume не попадает. Предел classifier не ограничивает размер chunk, уже выделенного transport. Parallel overflow понижает effective parallelism до минимума 1, затем он постепенно восстанавливается.
 

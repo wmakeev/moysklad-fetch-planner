@@ -4,7 +4,15 @@
 
 ## Установить точную поставку
 
-Опубликована версия 4.0.0 с новым major API. Устанавливайте `moysklad-fetch-planner@4.0.0`; документация версии находится в tag v4.0.0. Старая npm-версия3.x имеет другой интерфейс. Для проверки будущего кандидата по Actions используйте следующий порядок: совпадение номера версии само по себе не доказывает совпадения кода.
+Контракт4.1.0 включает opt-in HTTP retry и Undici8.11.2/8.12.2; историческая4.0.0 их не содержит. Перед registry install проверьте наличие нужной версии и её provenance по [порядку выпуска](releasing.md). Номер manifest сам по себе не доказывает публикацию или успешные gates. Документацию выбирайте по tag/commit установленной версии.
+
+После проверки наличия4.1.0 в registry:
+
+```sh
+npm install moysklad-fetch-planner@4.1.0
+```
+
+Для кандидата до публикации используйте отдельно проверенный tarball по commit и контрольной сумме. Проверка кандидата по Actions:
 
 1. Выберите commit, для которого завершён workflow Check and runtime compatibility. Сверьте headSha, conclusion=success и jobs, а не только зелёный badge ветки.
 2. Получите artifact `runtime-package` этого run. Он содержит `package.tgz`, `runtime.mjs` и `SHA256SUMS`. Artifact хранится ограниченное время; если он истёк, не заменяйте его файлом от другого ref. Запросите проверенный кандидат либо согласуйте новый run нужного ref.
@@ -24,10 +32,10 @@ npm install "$ARTIFACT_DIR/package.tgz"
 
 ## Выбрать транспорт и область coordination
 
-- Для native используйте конкретный `typeof globalThis.fetch`; для Undici — конкретный `typeof fetch` установленной версии (проверен runtime7.30.1; legacy declarations7.3 поддерживаются без старого runtime). Не объединяйте их в union и не исправляйте body/response typing приведениями.
+- Для native используйте конкретный `typeof globalThis.fetch`; для Undici — конкретный `typeof fetch` установленной версии (families и ограничения кандидата перечислены в [API](api.md#типы-method-и-transport-family)). Не объединяйте их в union и не исправляйте body/response typing приведениями.
 - Один общий instance должен видеть операции одной выбранной области coordination. Несколько instances или процессов не образуют account-wide лимитер.
 - Убедитесь, что transport не делает скрытых повторов. `dispatchCalls` считает входы в F; redirects и внутренние wire tries не становятся отдельными planner attempts.
-- Собственный native dispatcher должен быть совместим с Undici внутри Node. Тестовые Agent7/Agent8 не являются production-адаптером библиотеки. Undici8 добавлен только для native test fixture; это не новая публичная Undici8 transport family.
+- Собственный native dispatcher должен быть совместим с Undici внутри Node. Тестовые Agent7/Agent8 не являются production-адаптером библиотеки. Transport family8 и совместимость native dispatcher — разные проверки; подробности в [API](api.md#типы-method-и-transport-family).
 
 ## Собрать одну операцию
 
@@ -47,6 +55,7 @@ Native, Undici, bulk/upload и hook snippets находятся в [API](api.md)
 | Неизвестный исход отправленной записи | Выполнить прикладную сверку по устойчивой identity; не resubmit вслепую |
 | Ошибка JSON, схемы или БД | Оставить прикладной ошибкой; не маркировать как wire-read failure |
 | Настоящая read failure на HTTP2xx | Только в своём consume использовать retryableReadFailure; проверить обе replay flags, cleanup и budgets |
+| Полный безопасный отказ HTTP500/502/503/504 | После parsing и исключения partial success явно бросить retryableHttpFailure; [полные условия](api.md#явный-http-retry) |
 | Result succeeded, cleanup pending/failed | Сохранить готовое value; отдельно учесть ресурсную проблему |
 | GUARD_OPEN или STOPPED | Остановить producer; не пересоздавать instance для обхода защиты |
 | Hook timeout при pending callback | Сохранить учёт lease/resources; не считать callback остановленным |
@@ -55,13 +64,13 @@ Native, Undici, bulk/upload и hook snippets находятся в [API](api.md)
 
 ## Ограничить producer и обработать отмену
 
-Подавайте конечные окна работы. Сохраняйте handles окна, присоединяйте rejection handlers ко всем results сразу и при ошибке одного учитывайте остальных через allSettled. Размер очереди не ограничивает размер body/замыканий или память приложения. Сценарии producer windows описаны в [samples](../samples/README.md), но их нельзя запускать автоматически.
+Подавайте конечные окна работы. Сохраняйте handles окна, присоединяйте rejection handlers ко всем results сразу и при ошибке одного учитывайте остальных через allSettled. Размер очереди не ограничивает размер body/замыканий или память приложения. Компактные проверяемые [конечные рецепты](integration-guide.md#11-конечные-рецепты-приложения) показывают окна, обработку ошибок и bounded finalizer. [Samples](../samples/README.md) нельзя запускать автоматически.
 
 Для внешнего AbortSignal проверьте уже отменённый signal до submit. Сразу после получения handle поставьте abort listener, вызывающий handle.abort(signal.reason), затем повторно проверьте signal.aborted, чтобы не пропустить отмену при подключении. Снимите listener после нужного периода учёта. Отмена после фактической отправки не гарантирует отсутствия записи на сервере; результат гонки определяет handle, не последующий signal.aborted.
 
 ## Подключить observation или control
 
-Observe возвращает атомарный initial snapshot и unsubscribe. События содержат только scalar факты, listener return игнорируется. Для корреляции используйте ограниченный внешний registry по handle.id, не включайте в Event business payload. Здоровье и ошибки exporter учитывайте отдельно.
+Observe возвращает атомарный initial snapshot и unsubscribe. События содержат только scalar факты, listener return игнорируется. Для корреляции используйте ограниченный внешний registry по identity handle (id=0 повторяется), не включайте в Event business payload. Здоровье и ошибки exporter учитывайте отдельно.
 
 Для решения allow/deny/defer используйте beforeDispatch/beforeRetry. Allow и пробуждение timer не являются permit: coordinator заново проверяет ограничения. Зависимый submit того же planner нельзя вызывать из prepare/consume/dispose/discard/hook, даже после await. Запускайте зависимые операции снаружи после результата. Особые Promise constructor/species boundaries описаны в [API](api.md).
 

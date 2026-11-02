@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file. Dates are d
 
 Исторические записи созданы [`auto-changelog`](https://github.com/CookPete/auto-changelog); описание major-перехода подготовлено вручную.
 
+#### 4.1.0
+
+- Добавлен opt-in `ConsumeContext.retryableHttpFailure(cause)` для полного безопасного отказа HTTP500/502/503/504. По умолчанию обычный throw этих ошибок остаётся terminal; parsing и исключение partial success принадлежат приложению.
+- HTTP retry использует прежний coordinator, обе replay flags, успешную cleanup, общий maxAttempts/deadline и свежий prepare/body. Исходная cause сохраняется напрямую; committed value не повторяется при cleanup failure.
+- Поддержаны runtime Undici8.11.2/8.12.2 и соответствующие declarations, root/deep consumers; native и Undici7 сохраняются. Ограничение exactOptionalPropertyTypes для8.x остаётся явным.
+- Обновлены API, миграция и интеграционные руководства; package fixtures проверяют новый метод, HTTP retry и прежние cancellation/cleanup гарантии.
+
 #### [4.0.0](https://github.com/wmakeev/moysklad-fetch-planner/releases/tag/v4.0.0)
 
 > 2 November 2026

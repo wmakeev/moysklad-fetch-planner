@@ -1,6 +1,6 @@
 {
   "name": "moysklad-fetch-planner",
-  "version": "4.0.0",
+  "version": "4.1.0",
   "type": "module",
   "description": "Планировщик запросов для API МойСклад",
   "files": [
@@ -82,11 +82,13 @@
     "oxfmt": "0.75.0",
     "knip": "6.44.0",
     "np": "12.1.1",
-    "undici8": "npm:undici@8.12.2"
+    "undici8": "npm:undici@8.12.2",
+    "undici8-baseline": "npm:undici@8.11.2"
   },
   "packageManager": "pnpm@12.16.1",
   "dependencies": {
     "undici-types": "7.3.0",
-    "undici-types-modern": "npm:undici-types@7.30.1"
+    "undici-types-modern": "npm:undici-types@7.30.1",
+    "undici-types8": "npm:undici-types@8.12.2"
   }
 }

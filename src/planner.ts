@@ -32,7 +32,7 @@ import type {
   Spec,
   Transport
 } from './operation-types.js'
-import { ConsumeReadFailure, OperationError } from './operation-types.js'
+import { ConsumeHttpFailure, ConsumeReadFailure, OperationError } from './operation-types.js'
 
 const defaults: FetchPlannerOptions = {
   maxParallelLimit: 4,
@@ -695,7 +695,7 @@ export class FetchPlanner<F extends Transport> implements Planner<Init<F>, Respo
           const borrowed = attempt.response
           const value = await attempt.resources.runOwner(
             'consume',
-            // The inner lifetime gives the read-failure capability its exact consume
+            // The inner lifetime gives failure capabilities their exact consume
             // identity; another active owner on this planner must not be able to use it.
             // Keep both value boxes until outer materialization, preserving T49's guard.
             registrations =>
@@ -709,6 +709,11 @@ export class FetchPlanner<F extends Transport> implements Planner<Init<F>, Respo
                       operationId: state.handle.id,
                       attemptNumber: attempt.number,
                       ...registrations,
+                      retryableHttpFailure: cause => {
+                        if (!this.#context.isActive() || !this.#consumeScope.isCurrent(lifetime))
+                          throw invalid()
+                        return new ConsumeHttpFailure(lifetime, cause)
+                      },
                       retryableReadFailure: cause => {
                         if (!this.#context.isActive() || !this.#consumeScope.isCurrent(lifetime))
                           throw invalid()
@@ -722,11 +727,12 @@ export class FetchPlanner<F extends Transport> implements Planner<Init<F>, Respo
                     Object.setPrototypeOf(box, null)
                     return Object.freeze(box)
                   } catch (cause) {
+                    const original = ConsumeHttpFailure.original(cause, lifetime)
                     candidate = retryCandidate(
                       { code: 'CONSUME_FAILED', status, cause, consumeLifetime: lifetime },
                       spec.replay
                     )
-                    throw cause
+                    throw original === undefined ? cause : original.cause
                   }
                 },
                 boxed => boxed.value

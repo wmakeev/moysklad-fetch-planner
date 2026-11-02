@@ -10,8 +10,8 @@
 | --- | --- |
 | [index.ts](../src/index.ts) | Runtime exports FetchPlanner и OperationError; публичные type exports из operation-types |
 | [planner.ts](../src/planner.ts) | Единственный coordinator admission/dispatch/retry, active/ready, commands, одного timer, deadlines, hooks и physical ownership; соединяет остальные механизмы |
-| [operation-types.ts](../src/operation-types.ts) | Spec/Handle/Completed/contexts/snapshots/decisions, OperationError и внутренний ConsumeReadFailure; использует fetch-types |
-| [fetch-types.ts](../src/fetch-types.ts) | Только типы Transport/UndiciFetch, без runtime; native либо undici-types |
+| [operation-types.ts](../src/operation-types.ts) | Spec/Handle/Completed/contexts/snapshots/decisions, OperationError и внутренние ConsumeReadFailure/ConsumeHttpFailure; использует fetch-types |
+| [fetch-types.ts](../src/fetch-types.ts) | Только типы Transport/UndiciFetch, без runtime; native либо declarations Undici7/8 |
 | [callback-context.ts](../src/callback-context.ts) | ALS lifetime, detached observer delivery и guarded value boxes; отдельные owner/consume scopes у planner |
 | [operation-capacity.ts](../src/operation-capacity.ts) | Reservation FIFO, leases и sent tokens, effective limit; без clocks/callbacks/scheduling |
 | [operation-state.ts](../src/operation-state.ts) | Handle, single result commit/settlement, snapshots, resource settlement и publication через observation; не admission |
@@ -48,6 +48,8 @@ Timer будит coordinator, но не выдаёт permit. Store, observer и 
 
 Prepare/consume/dispose/discard/control hooks выполняются внутри owning AsyncLocalStorage lifetime, включая async/thenable assimilation, getters и извлечение результата. Зависимый submit того же planner запрещён до фактического выхода owner. Observation detached и read-only; команды listener проходят после полного fanout через FIFO command path. Повреждённый Promise constructor/species остаётся отдельной caller boundary и не ослабляет owning hooks.
 
+HTTP marker и read marker имеют раздельную identity своего active consume lifetime. Coordinator извлекает исходную HTTP cause отдельно от retry eligibility, затем использует прежние cleanup barrier, общий budget и FIFO. Новая HTTP policy не создаёт scheduler; точные условия и backoff — [API](api.md#явный-http-retry).
+
 ## Карта проверок
 
 | Область изменения | Основные suites |
@@ -56,6 +58,6 @@ Prepare/consume/dispose/discard/control hooks выполняются внутр�
 | Commit, отмена и ресурсы | [commit](../test/operation/commit.test.ts), [cancellation](../test/operation/cancellation.test.ts), [resources](../test/operation/resources.test.ts), [ownership](../test/operation/ownership.test.ts) |
 | Transport, классификация и upload | [http-integration](../test/operation/http-integration.test.ts), [classifier](../test/operation/classifier.test.ts), [upload](../test/operation/upload.test.ts) |
 | Управление и observation | [hooks-integration](../test/operation/hooks-integration.test.ts), [observation](../test/operation/observation.test.ts), [reentry](../test/operation/reentry.test.ts) |
-| HTTP policy и pacing | [hints](../test/operation/hints.test.ts), [guard](../test/operation/guard.test.ts), [retry](../test/operation/retry.test.ts), [pacing](../test/operation/pacing.test.ts) |
+| HTTP policy и pacing | [hints](../test/operation/hints.test.ts), [guard](../test/operation/guard.test.ts), [retry](../test/operation/retry.test.ts), [safe-http-retry](../test/operation/safe-http-retry.test.ts), [pacing](../test/operation/pacing.test.ts) |
 
 Как подготовить среду и запустить suites — [разработка](development.md). Source/type, fake/loopback, package acceptance, Actions и эксплуатация — разные уровни проверки. Причины выбранных границ и условия их пересмотра — [обоснование](high-load-rationale.md).

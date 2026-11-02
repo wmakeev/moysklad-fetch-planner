@@ -34,6 +34,7 @@ const registry = new Map([
   ['pacing-formula', 'pacing-formula.test.ts'],
   ['context', 'context.test.ts'],
   ['resources', 'resources.test.ts'],
+  ['consumer-recipes', 'consumer-recipes.test.ts'],
   ['state', 'state.test.ts'],
   ['observation', 'observation.test.ts'],
   ['capacity', 'capacity.test.ts'],
@@ -41,11 +42,13 @@ const registry = new Map([
   ['reentry', 'reentry.test.ts'],
   ['http-consume', 'http-consume.test.ts'],
   ['http-integration', 'http-integration.test.ts'],
+  ['undici8-integration', 'undici8-integration.test.ts'],
   ['upload', 'upload.test.ts'],
   ['integration', 'integration.test.ts'],
   ['classifier', 'classifier.test.ts'],
   ['hints', 'hints.test.ts'],
   ['guard', 'guard.test.ts'],
+  ['safe-http-retry', 'safe-http-retry.test.ts'],
   ['retry', 'retry.test.ts']
 ])
 const compilers = /** @type {const} */ ([
@@ -164,11 +167,18 @@ const expected = /** @type {const} */ ([
 function types() {
   mkdirSync(scratch, { recursive: true })
   const fixtures = path.join(directory, 'type-fixtures')
-  const names = ['contract', 'native', 'undici', 'final-hooks', 'negative']
+  const names = ['contract', 'native', 'undici', 'final-hooks', 'undici8', 'negative8', 'negative']
   for (const name of names) {
     writeFileSync(
       path.join(scratch, `${name}.ts`),
       readFileSync(path.join(fixtures, `${name}.ts.txt`))
+    )
+  }
+  for (const name of ['undici8', 'negative8']) {
+    const source = readFileSync(path.join(scratch, `${name}.ts`), 'utf8')
+    writeFileSync(
+      path.join(scratch, `${name}-baseline.ts`),
+      source.replaceAll("from 'undici8'", "from 'undici8-baseline'")
     )
   }
   const compilerOptions = {
@@ -214,7 +224,7 @@ function types() {
     assert.equal(result.status, diagnostics.length ? (version === '7.0.2' ? 1 : 2) : 0, raw)
     assert.deepEqual(
       actual,
-      diagnostics.map(item => ['__temp/operation-types/negative.ts', ...item]),
+      diagnostics.map(item => [`__temp/operation-types/${name}.ts`, ...item]),
       raw
     )
     // Include non-file/config diagnostics in the count so an unexpected error cannot hide.
@@ -226,9 +236,21 @@ function types() {
     const versionResult = child([compiler, '--version'])
     assert.equal(versionResult.status, 0, versionResult.stderr)
     assert.equal(versionResult.stdout.trim(), `Version ${version}`)
-    for (const name of ['native', 'undici', 'final-hooks']) compile(version, compiler, name, [])
+    for (const name of ['native', 'undici', 'undici8', 'undici8-baseline', 'final-hooks'])
+      compile(version, compiler, name, [])
   }
-  for (const [version, compiler] of compilers) compile(version, compiler, 'negative', expected)
+  for (const [version, compiler] of compilers) {
+    compile(version, compiler, 'negative', expected)
+    for (const name of ['negative8', 'negative8-baseline'])
+      compile(version, compiler, name, [
+        [6, 18, 2345],
+        [8, 18, 2345],
+        [9, 45, 2322],
+        [10, 45, 2322],
+        [11, 43, 2322],
+        [13, 154, 2339]
+      ])
+  }
 }
 
 function publicTypes() {
@@ -247,16 +269,34 @@ function publicTypes() {
   }
   const positives = []
   for (const module of ['index', 'planner']) {
-    for (const family of ['native', 'undici']) {
+    for (const family of ['native', 'undici', 'undici8', 'undici8-baseline']) {
       const name = `public-${module}-${family}`
       const source = readFileSync(
-        path.join(directory, 'type-fixtures', `${family}.ts.txt`),
+        path.join(
+          directory,
+          'type-fixtures',
+          `${family === 'undici8-baseline' ? 'undici8' : family}.ts.txt`
+        ),
         'utf8'
-      ).replace(
-        "import { OperationPlanner } from './contract.js'",
-        `import { FetchPlanner as OperationPlanner } from '../../src/${module}.js'`
       )
-      writeFileSync(path.join(scratch, `${name}.ts`), source)
+        .replaceAll(
+          "from 'undici8'",
+          family === 'undici8-baseline' ? "from 'undici8-baseline'" : "from 'undici8'"
+        )
+        .replace(
+          "import { OperationPlanner } from './contract.js'",
+          `import { FetchPlanner as OperationPlanner } from '../../src/${module}.js'`
+        )
+      const mapped = source
+        .replace(
+          "import { OperationPlanner as FetchPlanner } from './contract.js'",
+          `import { FetchPlanner } from '../../src/${module}.js'`
+        )
+        .replace(
+          "import { OperationPlanner as DeepPlanner } from './contract.js'",
+          "import { FetchPlanner as DeepPlanner } from '../../src/planner.js'"
+        )
+      writeFileSync(path.join(scratch, `${name}.ts`), mapped)
       positives.push(name)
     }
   }

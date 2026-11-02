@@ -54,7 +54,13 @@ node .github/scripts/package-ci.mjs
 Для отдельной operation suite используйте имя из registry в test/operation/run.mjs. Команда сама компилирует operation graph; public/types/hook-types selectors дополнительно выполняют свои compiler phases.
 
 ```sh
-node test/operation/run.mjs http-integration
+node test/operation/run.mjs consumer-recipes,safe-http-retry,undici8-integration,http-consume,commands,resources,guard
+```
+
+Для scoped проверки package compiler fixtures без pack/install используйте существующий runner; он проверяет declarations на обоих TS с strict=true/skipLibCheck=false, включая новый HTTP marker и consumer-owned http1Fetch. Это локальная compiler проверка, не isolated installed-package acceptance.
+
+```sh
+node scripts/check-package.mjs --phase fixture-types
 ```
 
 ## Security overrides инструментов
@@ -67,7 +73,7 @@ node test/operation/run.mjs http-integration
 
 В чистом клоне не вызывайте один `pnpm test:package` без подготовки: он требует fresh внешние state/work/tooling/cache. Штатная обёртка выше создаёт новый owned TMPDIR, устанавливает npm11.13.0, отдельные bare/undici leaves с TS5.7.3/TS7.0.2 и Node24.0.0/24.22.2/26.13.0, затем вызывает неизменённый полный test:package и удаляет свои ресурсы.
 
-Она проверяет четыре cold/stale pack cases, четыре compiler/family slices, runtime profiles и finish по одному frozen artifact. Bare consumer не получает runtime Undici; Runtime Undici family использует7.30.1; Legacy declaration fixtures используют `undici-types@7.3.0`, а `undici-types-modern` (alias7.30.1) позволяет принимать исправленный transport. Оба пакета деклараций устанавливаются также в bare consumer без runtime Undici. Негативный oracle отсутствия bytes относится к legacy declarations; positive runtime fixture отдельно проверяет bytes актуального transport. Wrapper не публикует npm-пакет, но требует сетевого чтения registry, GNU tar и прав создать/удалить свой scratch. Ошибка setup не является отказом product assertion; сохраняйте исходный error и лог.
+Она проверяет контракт4.1.0, включая вызов retryableHttpFailure в root/deep consumers всех families: default503, safe503→200 со свежим body, terminal503 с исходной cause, и wire503→200 через owned Agent. Она проверяет четыре cold/stale pack cases, восемь compiler/family slices, runtime profiles и finish по одному frozen artifact. Bare consumer не получает runtime Undici или dev aliases; closure установленной библиотеки включает все три type-only dependencies; Runtime families используют7.30.1,8.11.2 и8.12.2 в отдельных leaves; Legacy declaration fixtures используют `undici-types@7.3.0`, а `undici-types-modern` (alias7.30.1) позволяет принимать исправленный transport. Все три пакета деклараций устанавливаются также в bare consumer без runtime Undici. Негативный oracle отсутствия bytes относится к legacy declarations; positive runtime fixture отдельно проверяет bytes актуального transport. Wrapper не публикует npm-пакет, но требует сетевого чтения registry, GNU tar и прав создать/удалить свой scratch. Ошибка setup не является отказом product assertion; сохраняйте исходный error и лог.
 
 Для отдельного локального кандидата `pnpm pack` выполняет prepack/build. Один успешный pack не равен package acceptance. Порядок получения проверенного Actions artifact — [руководство агента](agent-guide.md); условия финального релизного кандидата — [выпуск](releasing.md).
 
@@ -81,7 +87,7 @@ node test/operation/run.mjs http-integration
 | artifact | Одна сборка package и runtime fixture с SHA256SUMS |
 | runtime, Node24.0.0/24.x/26.x | Тот же artifact без development dependencies, root/deep smoke |
 
-Точные команды и action refs — [.github/workflows/main.yml](../.github/workflows/main.yml). TS5.7/TS7 и native/Undici families — разные оси. Dev alias undici8@8.12.2 нужен только matching native dispatcher в Node26 tests; explicit Undici runtime проверяется на7.30.1, baseline типов7.3 сохраняется без уязвимого runtime. Не заменяйте transport cast-ом, не отключайте assert ради green и не повышайте budgets без доказанного основания.
+Точные команды и action refs — [.github/workflows/main.yml](../.github/workflows/main.yml). TS5.7/TS7 и native/Undici families — разные оси. Dev aliases undici8-baseline@8.11.2 и undici8@8.12.2 проверяют explicit8.x; matching native dispatcher в Node26 tests также использует8.12.2. Baseline типов7.3 сохраняется без старого runtime. Package slices: bare/undici/undici8-baseline/undici8 × TS5.7.3/7.0.2; каждый из трёх Node profiles проверяет root/deep и все четыре families. Ограничение exactOptionalPropertyTypes=true описано в [API](api.md#типы-method-и-transport-family). Это устройство gates нового локального кандидата, а не заявление об уже пройденных package/Actions проверках. Не заменяйте transport cast-ом, не отключайте assert ради green и не повышайте budgets без доказанного основания.
 
 ## Границы безопасного запуска
 

@@ -1,0 +1,13 @@
+import { fetch } from 'undici8'
+import { fetch as fetch7 } from 'undici'
+import { OperationPlanner as FetchPlanner } from './contract.js'
+import type { Init } from '../../src/index.js'
+declare const nativeUnion: typeof globalThis.fetch | typeof fetch
+new FetchPlanner(nativeUnion)
+declare const undiciUnion: typeof fetch7 | typeof fetch
+new FetchPlanner(undiciUnion)
+export const method: Init<typeof fetch> = { method: 'POST' }
+export const signal: Init<typeof fetch> = { signal: new AbortController().signal }
+export const body: Init<typeof fetch> = { body: 42 }
+const planner = new FetchPlanner(fetch)
+planner.submit({ method: 'GET', replay: { serverSafe: false, consumeSafe: false }, prepare: () => ({ url: '', init: {} }), consume: response => response.notAResponseMethod() })

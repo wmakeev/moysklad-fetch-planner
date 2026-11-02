@@ -20,15 +20,15 @@
 
 ## Статус поставки и установка
 
-Опубликована версия 4.0.0 с новым major API `submit → handle`. Для воспроизводимой интеграции устанавливайте точную версию и используйте документацию её tag; переход с 3.x требует [миграции](https://github.com/wmakeev/moysklad-fetch-planner/blob/v4.0.0/docs/migration.md).
+Контракт4.1.0 сохраняет API `submit → handle` и добавляет явный opt-in HTTP retry и поддержку Undici8. Эти возможности не относятся к исторической4.0.0. Перед установкой проверьте наличие4.1.0 в registry и используйте документацию её tag; порядок получения проверенного кандидата — в [руководстве агента](https://github.com/wmakeev/moysklad-fetch-planner/blob/master/docs/agent-guide.md). Переход с3.x требует [миграции](https://github.com/wmakeev/moysklad-fetch-planner/blob/master/docs/migration.md).
 
-Установка из npm:
+После проверки наличия версии в npm:
 
 ```sh
-npm install moysklad-fetch-planner@4.0.0
+npm install moysklad-fetch-planner@4.1.0
 ```
 
-Runtime Undici не является зависимостью библиотеки. Для явного transport `undici.fetch` потребитель отдельно устанавливает совместимую версию Undici; проверенный runtime — Undici 7.30.1; совместимость старой типовой family сохраняется через `undici-types@7.3.0` без установки старого runtime. Для native fetch собственный dispatcher должен быть совместим с Undici внутри выбранного Node.
+Runtime Undici не является зависимостью библиотеки. Для явного transport `undici.fetch` потребитель отдельно устанавливает совместимую версию Undici; runtime families контракта4.1.0 — Undici7.30.1/8.11.2/8.12.2; совместимость старой типовой family сохраняется через `undici-types@7.3.0` без установки старого runtime. Для native fetch собственный dispatcher должен быть совместим с Undici внутри выбранного Node.
 
 ## Минимальный пример без сети
 
@@ -64,7 +64,7 @@ Handle не является Promise: не пишите `await planner.submit(..
 
 ## Гарантии и ограничения
 
-- Повтор требует обеих явных replay flags, подходящей ошибки, успешной известной cleanup и оставшихся budgets. HTTP method или status сами по себе безопасность не доказывают; 500/503 автоматически не повторяются.
+- Повтор требует обеих явных replay flags, подходящей ошибки, успешной известной cleanup и оставшихся budgets. HTTP method или status сами по себе безопасность не доказывают; 500/502/503/504 по умолчанию не повторяются. Для полного безопасного отказа приложение явно бросает `ctx.retryableHttpFailure(cause)` после parsing и исключения partial success; [условия](https://github.com/wmakeev/moysklad-fetch-planner/blob/master/docs/api.md#явный-http-retry).
 - Все non429 ответы передаются в consume непрочитанными. Приложение проверяет HTTP, JSON и бизнес-ошибки; живой Response/reader/stream нельзя выдавать как законченное значение.
 - Abort/timeout не доказывает остановки callback или отсутствия записи на сервере. После успешного commit готовое значение сохраняется при failed/pending cleanup.
 - Очередь, guard и pacing ограничены одним instance. Account-wide ограничения, exactly-once и оптимальная скорость не обещаны.

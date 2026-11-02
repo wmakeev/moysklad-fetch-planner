@@ -24,6 +24,7 @@ export function exercise<T>(
     },
     async consume(response, ctx) {
       ctx.onDiscard(() => undefined)
+      if (response.status === 503) throw ctx.retryableHttpFailure(new Error('whole-operation failure'))
       try {
         return await decode(await response.bytes())
       } catch (cause) {

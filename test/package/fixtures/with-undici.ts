@@ -3,6 +3,7 @@ import { File } from 'node:buffer'
 import { fetch, Request, FormData } from 'undici'
 import type { Response } from 'undici'
 import { FetchPlanner } from '../../../src/index.js'
+import { FetchPlanner as DeepPlanner } from '../../../src/planner.js'
 import type { Completed, Handle, Init, ResponseOf } from '../../../src/index.js'
 
 export function undiciConsumer() {
@@ -17,9 +18,12 @@ export function undiciConsumer() {
       const init: Init<typeof fetch> = { body }
       return { url: request.url, init }
     },
-    consume(response) {
+    consume(response, ctx) {
       const exact: Response = response
-      return exact.arrayBuffer()
+      return exact.arrayBuffer().then(value => {
+        if (exact.status === 503) throw ctx.retryableHttpFailure(new Error('Known full refusal'))
+        return value
+      })
     }
   })
   const file = planner.submit({
@@ -70,3 +74,17 @@ export type OwnedSignal = Check<Equal<Init<typeof fetch>['signal'], undefined>>
 export type UndiciResult = Check<
   Equal<ReturnType<typeof undiciConsumer>['file'], Handle<ArrayBuffer>>
 >
+
+export function deepHttpConsumer() {
+  const planner = new DeepPlanner(fetch)
+  return planner.submit({
+    method: 'GET',
+    replay: { serverSafe: true, consumeSafe: true },
+    prepare: () => ({ url: 'https://offline.invalid/', init: {} }),
+    async consume(response, ctx) {
+      const text = await response.text()
+      if (response.status === 503) throw ctx.retryableHttpFailure(new Error(text))
+      return text
+    }
+  })
+}

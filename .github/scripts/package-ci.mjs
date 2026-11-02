@@ -55,7 +55,8 @@ try {
     'ts7@npm:typescript@7.0.2',
     '@types/node@24.19.2',
     'undici-types@7.3.0',
-    'undici-types-modern@npm:undici-types@7.30.1'
+    'undici-types-modern@npm:undici-types@7.30.1',
+    'undici-types8@npm:undici-types@8.12.2'
   ]
   /** @param {string} leaf @param {string[]} packages @param {boolean} [scripts] */
   async function install(leaf, packages, scripts = false) {
@@ -75,6 +76,8 @@ try {
   env.PATH = `${path.join(tooling, 'npm/node_modules/.bin')}${path.delimiter}${env.PATH ?? ''}`
   await install('bare', compilers)
   await install('undici', [...compilers, 'undici@7.30.1'])
+  await install('undici8-baseline', [...compilers, 'undici@8.11.2'])
+  await install('undici8', [...compilers, 'undici@8.12.2'])
   for (const version of ['24.0.0', '24.22.2', '26.13.0']) {
     // Only the isolated Node packages need their binary-install lifecycle scripts.
     await install(`node-${version}`, [`node@${version}`], true)
@@ -87,6 +90,7 @@ try {
       'add',
       'undici-types@7.3.0',
       'undici-types@7.30.1',
+      'undici-types@8.12.2',
       '--cache',
       cache,
       '--registry=https://registry.npmjs.org'

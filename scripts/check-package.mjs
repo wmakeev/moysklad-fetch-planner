@@ -30,7 +30,11 @@ const manifest = /** @type {typeof import('../package.json')} */ (
 )
 const packCases = ['pnpm-absent', 'pnpm-stale', 'npm-absent', 'npm-stale']
 const nodeVersions = ['24.0.0', '24.22.2', '26.13.0']
-const typeJobs = ['bare/ts5', 'bare/ts7', 'undici/ts5', 'undici/ts7']
+const families = ['bare', 'undici', 'undici8-baseline', 'undici8']
+/** @type {Record<string, string>} */
+const runtimeVersions = { 'undici': '7.30.1', 'undici8-baseline': '8.11.2', 'undici8': '8.12.2' }
+const runtimeNames = ['undici', 'undici8', 'undici8-baseline']
+const typeJobs = families.flatMap(family => ['ts5', 'ts7'].map(compiler => `${family}/${compiler}`))
 const cli = parseCLI(process.argv.slice(2))
 
 /** @typedef {{phase: string, state?: string, family?: string, compiler?: string, node?: string, packCase?: string}} CLI */
@@ -77,7 +81,7 @@ function parseCLI(args) {
   const node = options.get('--node')
   const packCase = options.get('--pack-case')
   if (phase === 'types') {
-    assert.ok(family && ['bare', 'undici'].includes(family), 'Unknown family')
+    assert.ok(family && families.includes(family), 'Unknown family')
     assert.ok(compiler && ['ts5', 'ts7'].includes(compiler), 'Unknown compiler')
   }
   if (phase === 'runtime')
@@ -94,7 +98,8 @@ const positiveFixtures = [
   'subclass',
   'events',
   'events-bytes',
-  'with-undici'
+  'with-undici',
+  'with-undici8'
 ]
 /** @type {readonly string[]} */
 const negativeFixtures = [
@@ -113,7 +118,8 @@ const negativeFixtures = [
   'negative-undici-body',
   'negative-undici-bytes',
   'negative-undici-method',
-  'negative-union-input'
+  'negative-union-input',
+  'negative-undici8'
 ]
 /** @typedef {[number, number, number | [number, number]]} ExpectedDiagnostic */
 /** @typedef {Record<string, ExpectedDiagnostic[]>} DiagnosticMatrix */
@@ -236,6 +242,17 @@ async function fixtureTypes() {
     /** @type {{version: string}} */ (require('undici-types/package.json')).version,
     '7.3.0'
   )
+  for (const [name, version] of [
+    ['undici8', '8.12.2'],
+    ['undici8-baseline', '8.11.2'],
+    ['undici-types-modern', '7.30.1'],
+    ['undici-types8', '8.12.2']
+  ]) {
+    assert.equal(
+      /** @type {{version: string}} */ (require(`${name}/package.json`)).version,
+      version
+    )
+  }
   const parent = path.join(root, '__temp')
   await mkdir(parent, { recursive: true })
   const workspace = await mkdtemp(path.join(parent, 'package-fixture-types-'))
@@ -243,19 +260,41 @@ async function fixtureTypes() {
   try {
     const directory = path.join(workspace, 'test/package/fixtures')
     await mkdir(directory, { recursive: true })
-    await symlink(path.join(root, 'src'), path.join(workspace, 'src'), 'dir')
+    run(
+      process.execPath,
+      [
+        path.join(root, 'node_modules/typescript/bin/tsc'),
+        '-p',
+        path.join(root, 'tsconfig.prod.json'),
+        '--emitDeclarationOnly',
+        '--outDir',
+        workspace
+      ],
+      root,
+      0,
+      30_000
+    )
     await symlink(path.join(root, 'node_modules'), path.join(workspace, 'node_modules'), 'dir')
     await writeFile(path.join(workspace, 'package.json'), '{"private":true,"type":"module"}\n')
-    for (const name of positiveFixtures) {
+    const localPositives = [...positiveFixtures, 'with-undici8-baseline']
+    for (const name of localPositives) {
       await writeFile(
         path.join(directory, `${name}.ts`),
-        await readFile(path.join(fixtures, `${name}.ts`))
+        (
+          await readFile(
+            path.join(fixtures, `${name === 'with-undici8-baseline' ? 'with-undici8' : name}.ts`),
+            'utf8'
+          )
+        ).replaceAll(
+          "from 'undici8'",
+          name === 'with-undici8-baseline' ? "from 'undici8-baseline'" : "from 'undici8'"
+        )
       )
     }
     const config = {
       extends: path.join(root, 'tsconfig.json'),
       compilerOptions: { noEmit: true },
-      files: positiveFixtures.map(name => `test/package/fixtures/${name}.ts`),
+      files: localPositives.map(name => `test/package/fixtures/${name}.ts`),
       include: []
     }
     await writeFile(path.join(workspace, 'positive.json'), JSON.stringify(config))
@@ -267,7 +306,9 @@ async function fixtureTypes() {
         0,
         30_000
       )
-      console.log(`fixture-types: TS ${version} ${compiler} all seven positives passed`)
+      console.log(
+        `fixture-types: TS ${version} ${compiler} all nine emitted-declaration positives passed`
+      )
     }
     // No negative source is materialized or compiled until BOTH actual positive matrices pass.
     for (const name of negativeFixtures) {
@@ -280,6 +321,7 @@ async function fixtureTypes() {
       path.join(workspace, 'negative.json'),
       JSON.stringify({
         ...config,
+        compilerOptions: { noEmit: true, exactOptionalPropertyTypes: false },
         files: negativeFixtures.map(name => `test/package/fixtures/${name}.ts`)
       })
     )
@@ -293,7 +335,7 @@ async function fixtureTypes() {
       )
       console.log(output.trim())
       exactDiagnostics(output, expected, negativeFixtures, compiler, 'test/package/fixtures/')
-      console.log(`fixture-types: TS ${version} all sixteen exact negative fixtures passed`)
+      console.log(`fixture-types: TS ${version} all seventeen exact negative fixtures passed`)
     }
   } catch (error) {
     failed = true
@@ -317,6 +359,7 @@ const snapshotInputs = [
 const identityInputs = [
   ...snapshotInputs,
   'scripts/check-package.mjs',
+  '.github/scripts/package-ci.mjs',
   'test/package/fixtures',
   'pnpm-lock.yaml',
   'pnpm-workspace.yaml'
@@ -490,10 +533,12 @@ function tooling(statePath) {
   const base = `${statePath}.tooling`
   return {
     base,
-    cache: path.join(base, 'npm-cache'),
-    bare: path.join(base, 'bare'),
-    undici: path.join(base, 'undici'),
-    nodes: nodeVersions.map(version => ({
+    'cache': path.join(base, 'npm-cache'),
+    'bare': path.join(base, 'bare'),
+    'undici': path.join(base, 'undici'),
+    'undici8-baseline': path.join(base, 'undici8-baseline'),
+    'undici8': path.join(base, 'undici8'),
+    'nodes': nodeVersions.map(version => ({
       version,
       binary: path.join(base, `node-${version}`, 'node_modules/node/bin/node')
     }))
@@ -528,7 +573,7 @@ async function prerequisites(statePath) {
   run('tar', ['--version'], root)
   const tools = tooling(statePath)
   await canonicalCache(tools)
-  for (const directory of [tools.bare, tools.undici]) {
+  for (const directory of families.map(family => path.join(tools.base, family))) {
     assert.equal(await realpath(directory), directory)
     await isolatedAncestry(path.dirname(directory))
     for (const [name, version] of [
@@ -536,7 +581,8 @@ async function prerequisites(statePath) {
       ['ts7', '7.0.2'],
       ['@types/node', '24.19.2'],
       ['undici-types', '7.3.0'],
-      ['undici-types-modern', '7.30.1']
+      ['undici-types-modern', '7.30.1'],
+      ['undici-types8', '8.12.2']
     ]) {
       assert.ok(name && version)
       await packageVersion(directory, name, version)
@@ -552,8 +598,10 @@ async function prerequisites(statePath) {
       )
   }
   const require = createRequire(path.join(tools.bare, 'package.json'))
-  assert.throws(() => require.resolve('undici'), { code: 'MODULE_NOT_FOUND' })
-  await packageVersion(tools.undici, 'undici', '7.30.1')
+  for (const name of runtimeNames)
+    assert.throws(() => require.resolve(name), { code: 'MODULE_NOT_FOUND' })
+  for (const [family, version] of Object.entries(runtimeVersions))
+    await packageVersion(path.join(tools.base, family), 'undici', version)
   for (const { binary, version } of tools.nodes) {
     assert.equal(await realpath(binary), binary, 'Node binary must be canonical')
     await packageVersion(
@@ -574,6 +622,9 @@ async function readiness(statePath) {
   assert.equal(manifest.dependencies['undici-types'], '7.3.0')
   assert.equal(manifest.dependencies['undici-types-modern'], 'npm:undici-types@7.30.1')
   assert.equal(manifest.devDependencies.undici, '7.30.1')
+  assert.equal(manifest.dependencies['undici-types8'], 'npm:undici-types@8.12.2')
+  assert.equal(manifest.devDependencies.undici8, 'npm:undici@8.12.2')
+  assert.equal(manifest.devDependencies['undici8-baseline'], 'npm:undici@8.11.2')
   assert.ok(!Object.hasOwn(manifest, 'exports'))
   // mkdir without recursive rejects pre-existing/foreign workspaces and repeated readiness.
   const workspace = `${statePath}.work`
@@ -753,7 +804,7 @@ async function consumer(state, family, work) {
     )
     const tools = path.join(tooling(state.statePath).base, family)
     await mkdir(path.join(directory, 'node_modules/@types'), { recursive: true })
-    for (const name of ['ts5', 'ts7', '@types/node', ...(family === 'undici' ? ['undici'] : [])])
+    for (const name of ['ts5', 'ts7', '@types/node', ...(family !== 'bare' ? ['undici'] : [])])
       await symlink(
         path.join(tools, 'node_modules', name),
         path.join(directory, 'node_modules', name),
@@ -786,15 +837,35 @@ async function consumer(state, family, work) {
         .startsWith(`${directory}/node_modules/`),
       'Modern declaration closure escaped consumer'
     )
-    if (family === 'undici') {
+    for (const [name, version] of [
+      ['undici-types', '7.3.0'],
+      ['undici-types-modern', '7.30.1'],
+      ['undici-types8', '8.12.2']
+    ]) {
+      assert.ok(name && version)
+      assert.equal(
+        /** @type {{version: string}} */ (libraryRequire(`${name}/package.json`)).version,
+        version
+      )
+      assert.ok(
+        (await realpath(libraryRequire.resolve(`${name}/package.json`))).startsWith(
+          `${directory}/node_modules/`
+        ),
+        'Declaration closure escaped consumer'
+      )
+    }
+    if (family !== 'bare') {
       assert.equal(
         /** @type {{version: string}} */ (require('undici/package.json')).version,
-        '7.30.1'
+        runtimeVersions[family]
       )
+      await packageVersion(tools, 'undici', runtimeVersions[family] ?? '')
     } else {
-      assert.throws(() => require.resolve('undici'), { code: 'MODULE_NOT_FOUND' })
-      assert.throws(() => libraryRequire.resolve('undici'), { code: 'MODULE_NOT_FOUND' })
-      assert.ok(!(await readdir(path.join(directory, 'node_modules'))).includes('undici'))
+      for (const name of runtimeNames) {
+        assert.throws(() => require.resolve(name), { code: 'MODULE_NOT_FOUND' })
+        assert.throws(() => libraryRequire.resolve(name), { code: 'MODULE_NOT_FOUND' })
+        assert.ok(!(await readdir(path.join(directory, 'node_modules'))).includes(name))
+      }
     }
     await work(directory)
   })
@@ -806,11 +877,15 @@ async function types(state, family, compiler) {
   const job = `${family}/${compiler}`
   assert.ok(!state.types.includes(job), 'Repeated type job')
   await consumer(state, family, async directory => {
-    const positiveNames = positiveFixtures.filter(
-      name => family === 'undici' || name !== 'with-undici'
+    const positiveNames = positiveFixtures.filter(name =>
+      name === 'with-undici'
+        ? family === 'undici'
+        : name === 'with-undici8'
+          ? family !== 'undici'
+          : true
     )
     // The same legacy family declarations are available from declared undici-types
-    // in bare: all sixteen literal oracles run without installing runtime undici.
+    // in bare: all seventeen literal oracles run without installing runtime undici.
     const negativeNames = negativeFixtures
     for (const name of [...positiveNames, ...negativeNames])
       await writeFile(
@@ -820,7 +895,15 @@ async function types(state, family, compiler) {
             path.join(fixtures, `${name}.ts${positiveNames.includes(name) ? '' : '.txt'}`),
             'utf8'
           )
-        ).replaceAll("from 'undici'", family === 'bare' ? "from 'undici-types'" : "from 'undici'")
+        )
+          .replaceAll(
+            "from 'undici'",
+            name === 'with-undici' ? "from 'undici'" : "from 'undici-types'"
+          )
+          .replaceAll(
+            "from 'undici8'",
+            family === 'bare' || family === 'undici' ? "from 'undici-types8'" : "from 'undici'"
+          )
       )
     const config = {
       compilerOptions: {
@@ -913,7 +996,7 @@ async function runtime(state, binary) {
   assert.ok(profile, 'Unknown Node profile')
   assert.ok(!state.runtime.includes(profile.version), 'Repeated runtime profile')
   assert.equal(run(binary, ['--version'], state.workspace).trim(), `v${profile.version}`)
-  for (const family of ['bare', 'undici']) {
+  for (const family of families) {
     await consumer(state, family, async directory => {
       const source = await readFile(path.join(fixtures, 'runtime.mjs'), 'utf8')
       assert.ok(

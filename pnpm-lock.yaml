@@ -178,6 +178,9 @@ importers:
       undici-types-modern:
         specifier: npm:undici-types@7.30.1
         version: undici-types@7.30.1
+      undici-types8:
+        specifier: npm:undici-types@8.12.2
+        version: undici-types@8.12.2
     devDependencies:
       '@types/highland':
         specifier: 2.13.0
@@ -230,6 +233,9 @@ importers:
       undici8:
         specifier: npm:undici@8.12.2
         version: undici@8.12.2
+      undici8-baseline:
+        specifier: npm:undici@8.11.2
+        version: undici@8.11.2
 
 packages:
 
@@ -2575,9 +2581,16 @@ packages:
   undici-types@7.30.1:
     resolution: {integrity: sha512-4CNTj7RmIepmiez9hX5pJzYLi5bv1ZBA6puqC3qYyqluB8zu5uygFc+4iG5Nmcx3fg+6bPFxuEbCrxTa7Yqy3A==}
 
+  undici-types@8.12.2:
+    resolution: {integrity: sha512-VoMeD2O0KdHhcn+oPqOrpivN+7aDOklVSwOLD7JNjbzV1CboAFek9IFOXnreoufTUtAsCsOK0iETiERPNR/fDA==}
+
   undici@7.30.1:
     resolution: {integrity: sha512-03KrMbjIFDWQR5RNPrSw3bd1r12JpyFQl9/yxjUbJtqkjmllqC5lFjZh6ujeuJCKr8EOQvRW872Oy/az+nLYxg==}
     engines: {node: '>=20.18.1'}
+
+  undici@8.11.2:
+    resolution: {integrity: sha512-u4UB2/IrKdU6lFxumHmmo1a3fCQO5tzQllRorfoRS63txhrB7xTpSn1PftwC4qEHkOaqP95fCWW4lJzwErwzhQ==}
+    engines: {node: '>=22.19.0'}
 
   undici@8.12.2:
     resolution: {integrity: sha512-XtuDWVdqTLr3NAxm2ly9/hU6kUsJOgGh1RASzMBbsw6aWCOaQzHdW+QQDfdERjfJ2V5vL5pRPa4RetO9UfivDg==}
@@ -4691,7 +4704,11 @@ snapshots:
 
   undici-types@7.30.1: {}
 
+  undici-types@8.12.2: {}
+
   undici@7.30.1: {}
+
+  undici@8.11.2: {}
 
   undici@8.12.2: {}
 

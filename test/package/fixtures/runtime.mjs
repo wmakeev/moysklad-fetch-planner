@@ -7,9 +7,14 @@ import * as deep from '../../../src/index.js'
 import { FetchPlanner as DeepPlanner } from '../../../src/planner.js'
 
 const family = process.argv[2]
-assert.ok(process.argv.length === 3 && (family === 'bare' || family === 'undici'), 'Runtime family')
+assert.ok(
+  process.argv.length === 3 &&
+    family &&
+    ['bare', 'undici', 'undici8-baseline', 'undici8'].includes(family),
+  'Runtime family'
+)
 
-// SOURCE PREPARATION ONLY in T107. Artifact/Node runtime acceptance belongs to T119–T121.
+const runtimeUndici = family === 'bare' ? undefined : await import('undici')
 assert.equal(FetchPlanner, deep.FetchPlanner)
 assert.equal(FetchPlanner, DeepPlanner)
 assert.equal(OperationError, deep.OperationError)
@@ -139,6 +144,94 @@ try {
   retryPlanner.stop('retry fixture finished')
 }
 
+// Every installed runtime family exercises the additive API with its real Response class.
+const HttpResponse = runtimeUndici?.Response ?? Response
+for (const Planner of [FetchPlanner, DeepPlanner]) {
+  for (const scenario of ['default', 'recover', 'terminal']) {
+    let dispatches = 0
+    let prepares = 0
+    let disposals = 0
+    /** @type {unknown[]} */
+    const httpBodies = []
+    /** @type {number[]} */
+    const httpIds = []
+    const cause = new Error(`Known full refusal: ${scenario}`)
+    /** @type {typeof globalThis.fetch} */
+    const httpTransport = (_input, init) => {
+      dispatches++
+      httpBodies.push(init?.body)
+      return Promise.resolve(
+        new HttpResponse('complete body', {
+          status: scenario === 'recover' && dispatches === 2 ? 200 : 503
+        })
+      )
+    }
+    const httpPlanner = new Planner(httpTransport, { ...options, maxAttempts: 3 })
+    const handle = httpPlanner.submit({
+      method: 'POST',
+      replay: { serverSafe: true, consumeSafe: true },
+      prepare(ctx) {
+        assert.equal(disposals, prepares, 'HTTP_CLEANUP_BEFORE_PREPARE')
+        prepares++
+        httpIds.push(ctx.operationId)
+        ctx.onDispose(() => {
+          disposals++
+        })
+        return { url: 'https://offline.invalid/http', init: { body: new Uint8Array([1, 2]) } }
+      },
+      async consume(response, ctx) {
+        const text = await response.text()
+        if (!response.ok) {
+          if (scenario === 'default') throw cause
+          throw ctx.retryableHttpFailure(cause)
+        }
+        return text
+      }
+    })
+    try {
+      if (scenario === 'recover') {
+        assert.deepEqual(
+          { ...(await handle.result) },
+          {
+            value: 'complete body',
+            status: 200,
+            cleanup: 'released'
+          }
+        )
+      } else {
+        await assert.rejects(handle.result, error => {
+          assert.ok(error instanceof OperationError)
+          assert.equal(error.cause, cause, 'DIRECT_HTTP_CAUSE_IDENTITY')
+          assert.equal(error.code, 'CONSUME_FAILED')
+          assert.equal(error.phase, 'consuming')
+          assert.equal(error.status, 503)
+          assert.equal(error.attemptNumber, scenario === 'terminal' ? 3 : 1)
+          assert.equal(error.operationId, handle.id)
+          assert.equal(error.dispatchEntered, true)
+          assert.equal(error.serverOutcome, 'http-response')
+          return true
+        })
+      }
+      assert.deepEqual(await handle.resourcesDone, { resources: 'released' })
+      const expected = scenario === 'default' ? 1 : scenario === 'recover' ? 2 : 3
+      assert.equal(dispatches, expected)
+      assert.equal(prepares, expected)
+      assert.equal(disposals, expected)
+      assert.equal(handle.snapshot().dispatchCalls, expected)
+      assert.deepEqual(httpIds, Array(expected).fill(handle.id))
+      assert.equal(new Set(httpBodies).size, expected, 'HTTP_FRESH_BODIES')
+      for (const body of httpBodies) assert.deepEqual(body, new Uint8Array([1, 2]))
+    } finally {
+      handle.abort('HTTP fixture finally')
+      httpPlanner.stop('HTTP fixture finally')
+      await handle.resourcesDone
+    }
+  }
+}
+console.log(
+  `Runtime ${family}: default503, safe503 recovery, terminal503 original cause, root/deep`
+)
+
 // stop during a sent consume preserves that attempt; it rejects subsequent submissions.
 function gate() {
   /** @type {() => void} */
@@ -215,17 +308,26 @@ try {
 }
 console.log('Runtime source: root/deep, GET/POST, fresh safe retry, finished consume and stop')
 
-// Buffered loopback smoke only; cooperative upload/retry barriers remain in T71.
+// Finite wire scenarios shared by installed-package acceptance and the source suite.
 // Bare consumers never resolve or import the optional runtime transport.
-if (family === 'undici') {
-  const { fetch: undiciFetch, Response: UndiciResponse, Agent } = await import('undici')
+if (family !== 'bare') {
+  assert.ok(runtimeUndici)
+  const { fetch: undiciFetch, Response: UndiciResponse, Agent } = runtimeUndici
   const agent = new Agent({ connections: 1, pipelining: 1 })
   /** @type {Set<import('node:net').Socket>} */
   const sockets = new Set()
-  /** @type {{method: string | undefined, url: string | undefined, body: string}[]} */
+  /** @type {{method: string | undefined, url: string | undefined, body: string, contentType: string | undefined}[]} */
   const received = []
   /** @type {unknown[]} */
   const serverErrors = []
+  const beforeHeaders = gate()
+  const bodyEntered = gate()
+  const headersClosed = gate()
+  const bodyClosed = gate()
+  const cleanupEntered = gate()
+  const cleanupRelease = gate()
+  let retryRequests = 0
+  let httpRetryRequests = 0
   const server = createServer((request, response) => {
     let body = ''
     request.setEncoding('utf8')
@@ -233,14 +335,43 @@ if (family === 'undici') {
       serverErrors.push(error)
     })
     request.on('error', error => {
-      serverErrors.push(error)
+      // Aborted clients may reset their own finite loopback connection.
+      if (!('code' in error) || error.code !== 'ECONNRESET') serverErrors.push(error)
     })
     request.on('data', (/** @type {string} */ chunk) => {
       body += chunk
       if (body.length > 1024) request.destroy(new Error('Loopback payload exceeded bound'))
     })
     request.on('end', () => {
-      received.push({ method: request.method, url: request.url, body })
+      received.push({
+        method: request.method,
+        url: request.url,
+        body,
+        contentType: request.headers['content-type']
+      })
+      if (request.url === '/abort-headers') {
+        response.once('close', headersClosed.resolve)
+        beforeHeaders.resolve()
+        return
+      }
+      if (request.url === '/abort-body') {
+        response.once('close', bodyClosed.resolve)
+        response.writeHead(200, { 'content-type': 'text/plain' })
+        response.write('partial')
+        return
+      }
+      if (request.url === '/http-safe') {
+        const retry = ++httpRetryRequests === 1
+        response.writeHead(retry ? 503 : 200)
+        response.end(retry ? 'full refusal' : 'finished')
+        return
+      }
+      if (request.url === '/safe' || request.url === '/unsafe') {
+        const retry = request.url === '/unsafe' || ++retryRequests === 1
+        response.writeHead(retry ? 429 : 200, { 'x-lognex-retry-after': '1' })
+        response.end(retry ? 'retry' : 'finished')
+        return
+      }
       response.writeHead(201, { 'content-type': 'text/plain' })
       response.end(`${request.method}:${body}`)
     })
@@ -254,16 +385,32 @@ if (family === 'undici') {
   server.on('error', error => {
     serverErrors.push(error)
   })
+  /** @type {AbortSignal[]} */
+  const signals = []
   /** @type {typeof undiciFetch} */
-  const wireTransport = (input, init) => undiciFetch(input, { ...init, dispatcher: agent })
+  const wireTransport = (input, init) => {
+    assert.ok(init?.signal instanceof AbortSignal, 'COORDINATOR_SIGNAL_REQUIRED')
+    assert.equal(init.signal.aborted, false)
+    signals.push(init.signal)
+    return undiciFetch(input, { ...init, dispatcher: agent })
+  }
   const wirePlanners = [
     new FetchPlanner(wireTransport, options),
     new DeepPlanner(wireTransport, options)
   ]
-  /** @type {import('../../../src/index.js').Handle<{text: string, undici: boolean}>[]} */
+  /** @type {import('../../../src/index.js').Handle<unknown>[]} */
   const handles = []
   /** @type {Promise<unknown>[]} */
   const settlements = []
+  // One finite deadline also bounds gates on failure; finally destroys held sockets.
+  const wireDeadline = setTimeout(() => {
+    beforeHeaders.resolve()
+    bodyEntered.resolve()
+    cleanupEntered.resolve()
+    cleanupRelease.resolve()
+    for (const handle of handles) handle.abort('wire deadline')
+    for (const socket of sockets) socket.destroy()
+  }, 12_000)
   try {
     await new Promise((resolve, reject) => {
       server.once('error', reject)
@@ -288,11 +435,19 @@ if (family === 'undici') {
           })
           return {
             url: `http://127.0.0.1:${address.port}/${method.toLowerCase()}`,
-            init: method === 'POST' ? { body: 'wire payload' } : {}
+            init:
+              method === 'POST'
+                ? {
+                    body: JSON.stringify({ payload: 'wire payload' }),
+                    headers: { 'content-type': 'application/json' }
+                  }
+                : {}
           }
         },
         async consume(response) {
-          return { text: await response.text(), undici: response instanceof UndiciResponse }
+          const text = await response.text()
+          assert.equal(response.bodyUsed, true, 'CONSUMED_TO_EOF')
+          return { text, undici: response instanceof UndiciResponse }
         }
       })
       handles.push(handle)
@@ -307,7 +462,10 @@ if (family === 'undici') {
       assert.deepEqual(
         { ...(await handle.result) },
         {
-          value: { text: `${method}:${method === 'POST' ? 'wire payload' : ''}`, undici: true },
+          value: {
+            text: `${method}:${method === 'POST' ? JSON.stringify({ payload: 'wire payload' }) : ''}`,
+            undici: true
+          },
           status: 201,
           cleanup: 'released'
         }
@@ -317,12 +475,218 @@ if (family === 'undici') {
       assert.equal(disposed, 1)
     }
     assert.deepEqual(received, [
-      { method: 'GET', url: '/get', body: '' },
-      { method: 'POST', url: '/post', body: 'wire payload' }
+      { method: 'GET', url: '/get', body: '', contentType: undefined },
+      {
+        method: 'POST',
+        url: '/post',
+        body: JSON.stringify({ payload: 'wire payload' }),
+        contentType: 'application/json'
+      }
     ])
+    const wirePlanner = wirePlanners[0]
+    assert.ok(wirePlanner)
+    const base = `http://127.0.0.1:${address.port}`
+    // Observe immediately, including paths that fail before the next assertion.
+    /**
+     * @template T
+     * @param {import('../../../src/index.js').Handle<T>} handle
+     */
+    function track(handle) {
+      handles.push(handle)
+      settlements.push(
+        handle.result.catch(() => undefined),
+        handle.resourcesDone
+      )
+      return handle
+    }
+    for (const stage of ['headers', 'body']) {
+      /** @type {import('../../../src/index.js').Handle<never>} */
+      const handle = track(
+        wirePlanner.submit({
+          method: 'GET',
+          replay: { serverSafe: true, consumeSafe: true },
+          prepare: () => ({ url: `${base}/abort-${stage}`, init: {} }),
+          async consume(response) {
+            assert.ok(response.body)
+            const reader = response.body.getReader()
+            try {
+              const first = await reader.read()
+              assert.ok(first.value instanceof Uint8Array)
+              assert.equal(new TextDecoder().decode(first.value), 'partial')
+              assert.equal(first.done, false)
+              bodyEntered.resolve()
+              await reader.read()
+              throw new Error('Incomplete response unexpectedly reached EOF')
+            } finally {
+              reader.releaseLock()
+            }
+          }
+        })
+      )
+      await (stage === 'headers' ? beforeHeaders.promise : bodyEntered.promise)
+      const signal = signals.at(-1)
+      assert.ok(signal)
+      handle.abort(`abort ${stage}`)
+      await assert.rejects(handle.result, error => {
+        assert.ok(error instanceof OperationError)
+        assert.equal(error.code, 'ABORTED')
+        assert.equal(error.dispatchEntered, true)
+        assert.equal(error.serverOutcome, stage === 'headers' ? 'unknown' : 'http-response')
+        if (stage === 'body') assert.equal(error.status, 200)
+        return true
+      })
+      assert.equal(signal.aborted, true, 'COORDINATOR_SIGNAL_ABORTED')
+      // The signal must reach the real transport: the peer sees a closed,
+      // unfinished response before finally destroys any owned socket.
+      let closeTimer
+      try {
+        await Promise.race([
+          stage === 'headers' ? headersClosed.promise : bodyClosed.promise,
+          new Promise((_, reject) => {
+            closeTimer = setTimeout(() => {
+              reject(new Error('ABORT_DID_NOT_CLOSE_WIRE'))
+            }, 1000)
+          })
+        ])
+      } finally {
+        clearTimeout(closeTimer)
+      }
+      const resources = await handle.resourcesDone
+      assert.ok(['released', 'unknown', 'failed'].includes(resources.resources))
+      assert.equal(handle.snapshot().resources, resources.resources)
+      assert.equal(handle.snapshot().dispatchCalls, 1, 'NO_ABORT_RETRY')
+      console.log(`Wire abort ${stage}: ${resources.resources}`)
+    }
+
+    let freshPrepared = 0
+    let freshDisposed = 0
+    /** @type {Uint8Array[]} */
+    const freshBodies = []
+    /** @type {number[]} */
+    const freshIds = []
+    const fresh = track(
+      wirePlanner.submit({
+        method: 'POST',
+        replay: { serverSafe: true, consumeSafe: true },
+        prepare(ctx) {
+          const attempt = ++freshPrepared
+          freshIds.push(ctx.operationId)
+          assert.equal(freshDisposed, attempt - 1, 'CLEANUP_BEFORE_PREPARE')
+          ctx.onDispose(async () => {
+            if (attempt === 1) {
+              cleanupEntered.resolve()
+              await cleanupRelease.promise
+            }
+            freshDisposed++
+          })
+          const body = new TextEncoder().encode(
+            JSON.stringify({ identity: 'wire-safe', payload: 'same' })
+          )
+          freshBodies.push(body)
+          return {
+            url: `${base}/safe`,
+            init: { body, headers: { 'content-type': 'application/json' } }
+          }
+        },
+        consume: response => response.text()
+      })
+    )
+    try {
+      await cleanupEntered.promise
+      // Cross a real event-loop turn while cleanup is deliberately pending.
+      await new Promise(resolve => setTimeout(resolve, 20))
+      assert.equal(retryRequests, 1, 'NO_SECOND_DISPATCH_WHILE_CLEANUP_PENDING')
+      assert.equal(freshPrepared, 1)
+      assert.equal(fresh.snapshot().resources, 'pending')
+    } finally {
+      cleanupRelease.resolve()
+    }
+    assert.deepEqual(
+      { ...(await fresh.result) },
+      { value: 'finished', status: 200, cleanup: 'released' }
+    )
+    assert.deepEqual(await fresh.resourcesDone, { resources: 'released' })
+    assert.equal(freshPrepared, 2)
+    assert.equal(freshDisposed, 2)
+    assert.deepEqual(freshIds, [fresh.id, fresh.id])
+    assert.equal(freshBodies.length, 2)
+    assert.notEqual(freshBodies[0], freshBodies[1], 'FRESH_BODY_OBJECTS')
+    assert.deepEqual(freshBodies[0], freshBodies[1], 'SAME_LOGICAL_PAYLOAD')
+    assert.equal(fresh.snapshot().dispatchCalls, 2)
+
+    // The same owned Agent carries an actual 503 retry, with fresh bytes on the wire.
+    /** @type {Uint8Array[]} */
+    const wireHttpBodies = []
+    /** @type {number[]} */
+    const wireHttpIds = []
+    const http = track(
+      wirePlanner.submit({
+        method: 'POST',
+        replay: { serverSafe: true, consumeSafe: true },
+        prepare(ctx) {
+          wireHttpIds.push(ctx.operationId)
+          const body = new TextEncoder().encode('same safe HTTP payload')
+          wireHttpBodies.push(body)
+          return { url: `${base}/http-safe`, init: { body } }
+        },
+        async consume(response, ctx) {
+          assert.ok(response instanceof UndiciResponse)
+          const text = await response.text()
+          if (response.status === 503) throw ctx.retryableHttpFailure(new Error(text))
+          return text
+        }
+      })
+    )
+    assert.deepEqual(
+      { ...(await http.result) },
+      { value: 'finished', status: 200, cleanup: 'released' }
+    )
+    assert.deepEqual(await http.resourcesDone, { resources: 'released' })
+    assert.equal(httpRetryRequests, 2)
+    assert.deepEqual(wireHttpIds, [http.id, http.id])
+    assert.equal(wireHttpBodies.length, 2)
+    assert.notEqual(wireHttpBodies[0], wireHttpBodies[1])
+    assert.deepEqual(wireHttpBodies[0], wireHttpBodies[1])
+    assert.deepEqual(
+      received.filter(request => request.url === '/http-safe').map(request => request.body),
+      ['same safe HTTP payload', 'same safe HTTP payload']
+    )
+
+    const unsafe = track(
+      wirePlanner.submit({
+        method: 'POST',
+        replay: { serverSafe: false, consumeSafe: false },
+        prepare: () => ({ url: `${base}/unsafe`, init: { body: 'unsafe' } }),
+        consume: response => response.text()
+      })
+    )
+    await assert.rejects(unsafe.result, error => {
+      assert.ok(error instanceof OperationError)
+      assert.equal(error.code, 'HTTP_FAILED')
+      assert.equal(error.status, 429)
+      assert.equal(error.dispatchEntered, true)
+      return true
+    })
+    assert.deepEqual(await unsafe.resourcesDone, { resources: 'released' })
+    assert.equal(unsafe.snapshot().dispatchCalls, 1)
+    for (const route of ['/safe', '/unsafe']) {
+      /** @type {typeof received} */
+      const requests = received.filter(request => request.url === route)
+      assert.equal(requests.length, route === '/safe' ? 2 : 1)
+      for (const request of requests) {
+        assert.equal(request.method, 'POST')
+        assert.equal(
+          request.body,
+          route === '/safe' ? JSON.stringify({ identity: 'wire-safe', payload: 'same' }) : 'unsafe'
+        )
+        if (route === '/safe') assert.equal(request.contentType, 'application/json')
+      }
+    }
     assert.deepEqual(serverErrors, [])
     await agent.close()
   } finally {
+    clearTimeout(wireDeadline)
+    cleanupRelease.resolve()
     for (const wirePlanner of wirePlanners) wirePlanner.stop('wire fixture finally')
     for (const handle of handles) handle.abort('wire fixture finally')
     try {
@@ -344,5 +708,7 @@ if (family === 'undici') {
       }
     }
   }
-  console.log('Runtime undici: owned Agent, root/deep planner GET/POST loopback released')
+  console.log(
+    `Runtime ${family}: owned Agent, root/deep GET/JSON POST EOF, signal, aborts, fresh safe429 cleanup barrier, unsafe429, safe503`
+  )
 }

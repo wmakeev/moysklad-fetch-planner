@@ -114,6 +114,7 @@ export interface PrepareContext {
 export interface ConsumeContext extends PrepareContext {
   onDiscard(fn: () => void | Promise<void>): void
   retryableReadFailure(cause: unknown): Error
+  retryableHttpFailure(cause: unknown): Error
 }
 /** Readonly control input; runtime hooks will supply frozen, detached snapshots. */
 export interface HookContext {
@@ -219,5 +220,28 @@ export class ConsumeReadFailure extends Error {
       #identity in error &&
       error.#identity === identity
     )
+  }
+}
+
+/** Internal HTTP opt-in identity and cause; public Error properties are never trusted. */
+export class ConsumeHttpFailure extends Error {
+  readonly #identity: object
+  readonly #originalCause: unknown
+
+  constructor(identity: object, cause: unknown) {
+    super('RETRYABLE_HTTP_FAILURE', { cause })
+    this.#identity = identity
+    this.#originalCause = cause
+  }
+
+  static original(error: unknown, identity: object): { cause: unknown } | undefined {
+    if (
+      typeof error === 'object' &&
+      error !== null &&
+      #identity in error &&
+      error.#identity === identity
+    )
+      return { cause: error.#originalCause }
+    return undefined
   }
 }

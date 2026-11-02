@@ -1,5 +1,6 @@
 import { ReadableStream } from 'node:stream/web'
 import { FetchPlanner } from '../../../src/index.js'
+import { FetchPlanner as DeepPlanner } from '../../../src/planner.js'
 import type { Completed, Handle, Init, ResponseOf } from '../../../src/index.js'
 
 export function nativeConsumer() {
@@ -15,7 +16,11 @@ export function nativeConsumer() {
       const init: Init<typeof globalThis.fetch> = { body }
       return { url: request.url, init }
     },
-    consume: response => response.bytes()
+    async consume(response, ctx) {
+      const value = await response.bytes()
+      if (response.status === 503) throw ctx.retryableHttpFailure(new Error('Known full refusal'))
+      return value
+    }
   })
   const file = planner.submit({
     method: 'POST',
@@ -59,3 +64,17 @@ export type OwnedSignal = Check<Equal<Init<typeof globalThis.fetch>['signal'], u
 export type NativeResult = Check<
   Equal<ReturnType<typeof nativeConsumer>['file'], Handle<Uint8Array>>
 >
+
+export function deepHttpConsumer() {
+  const planner = new DeepPlanner(globalThis.fetch)
+  return planner.submit({
+    method: 'GET',
+    replay: { serverSafe: true, consumeSafe: true },
+    prepare: () => ({ url: 'https://offline.invalid/', init: {} }),
+    async consume(response, ctx) {
+      const text = await response.text()
+      if (response.status === 503) throw ctx.retryableHttpFailure(new Error(text))
+      return text
+    }
+  })
+}
