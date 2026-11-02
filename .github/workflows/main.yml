@@ -60,7 +60,8 @@ jobs:
         with:
           run_install: false
       - run: pnpm install --frozen-lockfile
-      - run: pnpm test:package
+      - name: Prepare isolated tooling and run the full package gate
+        run: node .github/scripts/package-ci.mjs
 
   artifact:
     runs-on: ubuntu-latest
@@ -85,6 +86,7 @@ jobs:
           mv "$artifact"/*.tgz "$artifact/package.tgz"
           sed \
             -e "s|'../../../src/index.js'|'moysklad-fetch-planner'|" \
+            -e "s|'../../../src/planner.js'|'moysklad-fetch-planner/build/src/planner.js'|" \
             -e "s|import \* as deep from 'moysklad-fetch-planner'|import * as deep from 'moysklad-fetch-planner/build/src/index.js'|" \
             test/package/fixtures/runtime.mjs > "$artifact/runtime.mjs"
           grep -Eq "^import .+ from 'moysklad-fetch-planner'$" "$artifact/runtime.mjs"
@@ -126,4 +128,4 @@ jobs:
           test ! -d "$consumer/node_modules/undici"
           cp runtime.mjs "$consumer/runtime.mjs"
           node --version
-          node "$consumer/runtime.mjs"
+          node --unhandled-rejections=strict "$consumer/runtime.mjs" bare
