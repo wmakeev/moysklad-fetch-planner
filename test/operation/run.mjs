@@ -357,8 +357,8 @@ try {
     runtimeEnv,
     120_000
   )
-  process.stdout.write(runtime.stdout)
-  process.stderr.write(runtime.stderr)
+  writeDiagnostic(1, runtime.stdout)
+  writeDiagnostic(2, runtime.stderr)
   assert.equal(runtime.status, 0, 'Operation runtime suites failed')
 } catch (error) {
   failed = true

@@ -5,6 +5,7 @@ import type { Socket } from 'node:net'
 import { setImmediate as turn } from 'node:timers/promises'
 import { fileURLToPath } from 'node:url'
 import { Agent, fetch as undiciFetch } from 'undici'
+import { Agent as NativeAgent8 } from 'undici8'
 import type { Response as UndiciResponse } from 'undici'
 import { FetchPlanner, OperationError } from '../../src/index.js'
 import { FetchPlanner as DeepPlanner } from '../../src/planner.js'
@@ -16,6 +17,15 @@ const prefix = new TextEncoder().encode('cooperative-upload-prefix:')
 const errorBody = JSON.stringify({ errors: [{ code: 1073, error: 'loopback fixture' }] })
 type Family = 'native' | 'undici'
 type Mode = 'released' | 'rejected' | 'failure' | 'watchdog'
+
+/** Native fetch needs the dispatcher protocol of its bundled Undici major. */
+function createAgent(family: Family) {
+  const options = { connections: 1, pipelining: 1 }
+  if (family === 'undici') return new Agent(options)
+  const major = process.versions['undici']?.split('.')[0]
+  assert.ok(major === '7' || major === '8', 'UNSUPPORTED_NATIVE_UNDICI_MAJOR')
+  return major === '8' ? new NativeAgent8(options) : new Agent(options)
+}
 
 /** This fixture owns every pull; it is not a disposer for arbitrary caller streams. */
 function producer() {
@@ -87,7 +97,7 @@ function producer() {
 
 export async function runUploadCase(family: Family, mode: Mode) {
   const source = producer()
-  const dispatcher = new Agent({ connections: 1, pipelining: 1 })
+  const dispatcher = createAgent(family)
   const sockets = new Set<Socket>()
   const socketClosures: Promise<void>[] = []
   const requests: {
@@ -164,9 +174,8 @@ export async function runUploadCase(family: Family, mode: Mode) {
     )
     return observed
   }
-  // Node's declaration imports a newer undici-types Dispatcher whose compose overloads
-  // differ from installed Agent 7.3. Keep the transport native-family and install the
-  // fixture-owned runtime dispatcher as a property, without widening body/Response types.
+  // Keep Node's fetch types while installing the fixture-owned matching dispatcher.
+  // Its structural types can differ from @types/node's undici-types version.
   const nativeTransport: typeof fetch = (url, init) => {
     const actual = {
       ...init,
@@ -179,8 +188,9 @@ export async function runUploadCase(family: Family, mode: Mode) {
     Object.defineProperty(actual, 'dispatcher', { value: dispatcher })
     return spy(globalThis.fetch(url, actual))
   }
-  const undiciTransport: typeof undiciFetch = (url, init) =>
-    spy(
+  const undiciTransport: typeof undiciFetch = (url, init) => {
+    assert.ok(dispatcher instanceof Agent, 'UNDICI7_FAMILY_OWNS_UNDICI7_AGENT')
+    return spy(
       undiciFetch(url, {
         ...init,
         dispatcher,
@@ -191,6 +201,7 @@ export async function runUploadCase(family: Family, mode: Mode) {
         ])
       })
     )
+  }
   const options = { maxParallelLimit: 1, jitter: 0, deadlineMs: 10000 }
   const planner =
     family === 'native'
@@ -421,10 +432,7 @@ export async function runUploadRetryCase(family: Family, mode: RetryMode) {
   const source = producer()
   const suffix = new TextEncoder().encode('stable-business-id:71;full-payload:конец')
   const payload = Buffer.concat([prefix, suffix])
-  const agents = [
-    new Agent({ connections: 1, pipelining: 1 }),
-    new Agent({ connections: 1, pipelining: 1 })
-  ]
+  const agents = [createAgent(family), createAgent(family)]
   const sockets = new Set<Socket>()
   const socketClosures: Promise<void>[] = []
   const transports: Promise<unknown>[] = []
@@ -521,6 +529,7 @@ export async function runUploadRetryCase(family: Family, mode: RetryMode) {
   const undiciTransport: typeof undiciFetch = (url, init) => {
     const dispatcher = agents[dispatches++]
     assert.ok(dispatcher, 'NO_UNEXPECTED_THIRD_DISPATCH')
+    assert.ok(dispatcher instanceof Agent, 'UNDICI7_FAMILY_OWNS_UNDICI7_AGENT')
     return spy(
       undiciFetch(url, {
         ...init,
@@ -602,8 +611,13 @@ export async function runUploadRetryCase(family: Family, mode: RetryMode) {
     // This fact is established before testing retry/accounting: actual early HTTP429,
     // and the cooperative request pull is still physically pending after parser EOF.
     assert.deepEqual(statuses, [429])
+    assert.equal(
+      responses[0]?.headers.get('content-type'),
+      'application/json',
+      'REAL_429_CONTENT_TYPE_PRESERVED'
+    )
     assert.equal(planner.snapshot().effectiveParallelism, 1, 'REAL_JSON1073_CLASSIFICATION')
-    assert.equal(responses[0]?.bodyUsed, true, 'BOUNDED_CLASSIFIER_READ_REAL_429')
+    assert.equal(responses[0].bodyUsed, true, 'BOUNDED_CLASSIFIER_READ_REAL_429')
     assert.equal(responses[0].body?.locked, false)
     assert.equal(requests[0]?.pending, 1)
     assert.equal(source.state.pending, 1)

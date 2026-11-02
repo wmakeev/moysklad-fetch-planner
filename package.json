@@ -81,7 +81,8 @@
     "oxlint-tsgolint": "7.0.2005",
     "oxfmt": "0.75.0",
     "knip": "6.44.0",
-    "np": "12.1.1"
+    "np": "12.1.1",
+    "undici8": "npm:undici@8.12.2"
   },
   "packageManager": "pnpm@12.16.1",
   "dependencies": {
